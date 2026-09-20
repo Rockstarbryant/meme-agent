@@ -1,0 +1,43 @@
+# Local development: CONTROL PLANE (backend + PostgreSQL + Redis). The frontend runs separately (npm run dev).
+# The trading Local Runner is a separate profile: it is meant to run on the USER's machine, not next to the server in production.
+services:
+  db:
+    image: postgres:16
+    environment: {POSTGRES_USER: agent, POSTGRES_PASSWORD: agent, POSTGRES_DB: agent}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U agent"], interval: 5s, timeout: 3s, retries: 10}
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 10}
+  backend:
+    build: ./backend
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports: ["8000:8000"]
+    environment:
+      APP_ENV: development
+      SECRET_KEY: ${SECRET_KEY:-dev-only-change-me-dev-only-change-me}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me-dev-only-change-me}
+      DATABASE_URL: postgresql+asyncpg://agent:agent@db:5432/agent
+      REDIS_URL: redis://redis:6379/0
+      ARC_RPC_URL: ${ARC_RPC_URL:-}
+      ARC_CHAIN_ID: ${ARC_CHAIN_ID:-5042}
+      ARC_EXPLORER_URL: ${ARC_EXPLORER_URL:-}
+      LIVE_TRADING_ENABLED: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+  runner:
+    profiles: ["runner"]
+    build: {context: ./backend, dockerfile: Dockerfile.runner}
+    depends_on: [backend]
+    environment:
+      ARC_RUNNER_SERVER_URL: http://backend:8000
+      ARC_RUNNER_DATA_SOURCE: ${ARC_RUNNER_DATA_SOURCE:-demo}   # synthetic, labelled DEMO DATA, PAPER only
+      ARC_RUNNER_LIVE_ENABLED: "false"
+    volumes: [runner_state:/state]
+    # pair once:  docker compose run --rm runner pair --code XXXX-XXXX-XXXX     then:  docker compose --profile runner up runner
+volumes:
+  pgdata:
+  runner_state:

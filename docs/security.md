@@ -1,0 +1,11 @@
+# Security model (implemented in code, covered by tests)
+- **Control plane never custodies or trades.** No pooled wallet, no signing code, no wallet sessions, no AI keys server-side. Trading code lives only in the Local Runner (docs/local-runner.md); a test fails the build if API modules reference executors, approvers or signing.
+- **Two credential types that cannot be swapped:** user JWT (browser) and runner token (`rt_...`, only its hash stored). Pairing codes are single-use and expire in 10 minutes. Revocation is immediate.
+- **Local ceilings on the runner** bound whatever the control plane sends; LIVE needs the UI activation AND local enablement AND a verified wallet provider; the runner never falls back to PAPER silently.
+- **AI has no authority.** Strict schema, can only shrink position size, numeric features only (no token text in prompts). Keys stay on the runner.
+- **Proof-carrying trades.** Executors act only on HMAC-signed approvals from the deterministic risk layer; the approval key is generated locally on the runner.
+- **Risk engine fails closed;** unknown data is never treated as safe; exits are never blocked by entry rules.
+- **Ingestion hardening:** per-runner monotonic sequence (replay-safe), strict event schema, size limits, poison events skipped, ownership checks on every row write, DB partial unique index as an order-duplicate backstop.
+- **Dead-man switch, durable outbox, restart-safe idempotency** on the runner.
+- **Circle CLI wrapper:** no shell, validated arguments, no login/terms/limit-set/limit-reset code, `CIRCLE_ACCEPT_TERMS` stripped.
+- **Web:** bcrypt, JWT with revocation, rate limits (Redis, local fallback), CORS allowlist, security headers, no internals in 5xx. Known gaps: no CSP yet; JWT lives in sessionStorage (XSS trade-off).

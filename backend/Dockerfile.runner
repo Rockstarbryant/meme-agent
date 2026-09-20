@@ -1,0 +1,13 @@
+# Local Runner image: runs on the USER's machine. No web framework, no database driver, no server code paths.
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 ARC_RUNNER_STATE_DIR=/state
+WORKDIR /app
+COPY requirements-runner.txt .
+RUN pip install -r requirements-runner.txt
+COPY app ./app
+COPY runner ./runner
+RUN useradd --system --uid 10001 runner && mkdir /state && chown runner /state
+USER runner
+VOLUME /state
+ENTRYPOINT ["python", "-m", "runner"]
+CMD ["run"]

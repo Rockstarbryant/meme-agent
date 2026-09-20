@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 99%; --foreground: 222 24% 12%;
+  --muted: 220 16% 95%; --muted-foreground: 220 9% 38%;
+  --card: 0 0% 100%; --card-foreground: 222 24% 12%;
+  --border: 220 14% 87%;
+  --primary: 224 64% 38%; --primary-foreground: 0 0% 100%;
+  --destructive: 0 70% 42%; --destructive-foreground: 0 0% 100%;
+  --success: 142 64% 27%; --warning: 32 92% 34%;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: 222 24% 8%; --foreground: 220 14% 94%;
+    --muted: 222 18% 14%; --muted-foreground: 220 10% 68%;
+    --card: 222 22% 11%; --card-foreground: 220 14% 94%;
+    --border: 222 14% 22%;
+    --primary: 224 80% 66%; --primary-foreground: 222 30% 8%;
+    --destructive: 0 78% 62%; --destructive-foreground: 222 30% 8%;
+    --success: 142 55% 52%; --warning: 38 90% 58%;
+  }
+}
+* { border-color: hsl(var(--border)); }
+body { @apply bg-background text-foreground antialiased; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }

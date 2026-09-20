@@ -1,0 +1,50 @@
+# Render Blueprint.
+# - CONTROL PLANE (web): always deployed. Never holds wallet keys or trades.
+# - OPTIONAL CLOUD RUNNER (background worker): PAPER / demo only by default.
+#   LIVE still requires Circle CLI session next to the process; for true non-custodial
+#   LIVE keep the runner on a machine you control (laptop/VPS) and pair it.
+# Validate with Render's blueprint validator before relying on it.
+databases:
+  - name: arc-agent-db
+    plan: basic-256mb
+    databaseName: agent
+    user: agent
+services:
+  - type: web
+    name: arc-agent-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health/live
+    numInstances: 1
+    envVars:
+      - {key: APP_ENV, value: production}
+      - {key: DATABASE_URL, fromDatabase: {name: arc-agent-db, property: connectionString}}
+      - {key: REDIS_URL, sync: false}
+      - {key: SECRET_KEY, generateValue: true}
+      - {key: JWT_SECRET, generateValue: true}
+      - {key: CORS_ORIGINS, sync: false}          # e.g. https://your-app.vercel.app
+      - {key: TRUST_PROXY, value: "true"}
+      - {key: ARC_RPC_URL, sync: false}
+      - {key: ARC_RPC_FALLBACK_URLS, sync: false}
+      - {key: ARC_CHAIN_ID, value: "5042"}
+      - {key: ARC_EXPLORER_URL, sync: false}
+      - {key: LIVE_TRADING_ENABLED, value: "false"}
+
+  # Shared cloud worker. Prefer CMD cloud-worker with PLATFORM_WORKER_TOKEN + Privy for multi-user.
+  # Self-hosted path still uses: pair then CMD run. LIVE needs paid plan + secrets.
+  - type: worker
+    name: arc-agent-runner
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile.runner
+    dockerContext: ./backend
+    # Uncomment and set after first pairing on a one-off job / shell:
+    # plan: starter
+    envVars:
+      - {key: ARC_RUNNER_SERVER_URL, fromService: {type: web, name: arc-agent-api, property: host}}
+      - {key: ARC_RUNNER_DATA_SOURCE, value: demo}
+      - {key: ARC_RUNNER_LIVE_ENABLED, value: "false"}
+      - {key: ARC_RUNNER_LIVE_TRADING_VERIFIED, value: "false"}
+      - {key: ARC_RUNNER_WALLET_PROVIDER, value: none}
+      - {key: ARC_RUNNER_STATE_DIR, value: /state}
+      - {key: ARC_RUNNER_NAME, value: cloud-runner}
