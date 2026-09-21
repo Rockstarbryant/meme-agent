@@ -322,7 +322,7 @@ async def provision_cloud_wallet(
         base_url=settings.privy_api_url,
     )
     try:
-        created = await client.create_wallet(chain_type="ethereum", external_id=f"user:{user.id}")
+        created = await client.create_wallet(chain_type="ethereum", external_id=f"user-{user.id}")
     except PrivyError as e:
         raise HTTPException(502, f"Privy wallet create failed: {e.detail}") from e
     except Exception as e:  # noqa: BLE001
