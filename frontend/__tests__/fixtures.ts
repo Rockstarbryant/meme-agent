@@ -32,7 +32,7 @@ export const wallet = (o: Partial<WalletState> = {}): WalletState => ({
     { id: "circle_developer_controlled_wallet", label: "Circle Developer-Controlled Wallet", status: "forbidden", custody: "developer (custodial)", note: "Server-side custody." },
   ],
   execution_capability: { capability: "PAPER_ONLY", label: "Paper trading only", autonomous: false, detail: "Connect a wallet, set a policy and authorize per-trade signing." },
-  authorization: null, policy: null, runner_wallet: null,
+  authorization: null, policy: null, runner_wallet: null, cloud_wallet: null, execution_mode: "self_hosted",
   usdc: { balance: null, view: "ERC-20, 6 decimals", address: "0x3600000000000000000000000000000000000000", note: "Connect a wallet to read the balance." },
   allocated_capital_usdc: null, available_trading_capital_usdc: 1000, capital_label: "PAPER (virtual USDC)", mode: "PAPER", live_blockers: ["No wallet with verified ownership"], ...o,
 });

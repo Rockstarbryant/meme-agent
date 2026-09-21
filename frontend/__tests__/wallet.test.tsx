@@ -14,7 +14,7 @@ describe("wallet page", () => {
     mockFetch(routes());
     renderApp(<WalletPanel />);
     expect(await screen.findByText("Paper trading only", { selector: "p" })).toBeInTheDocument();
-    expect(screen.getByText(/Autonomous delegated execution:/)).toBeInTheDocument();
+    expect(screen.getByText(/Autonomous cloud execution:/).closest("li")).toHaveTextContent("not enabled for this account");
     expect(screen.getByText(/Explicit per-trade signing:/).closest("li")).toHaveTextContent("inactive");
     expect(screen.getByText(/Paper trading:/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Authorize autonomous delegation" })).toBeDisabled();
@@ -27,7 +27,29 @@ describe("wallet page", () => {
     expect(await screen.findByText("Wallet on your Local Runner")).toBeInTheDocument();
     expect(screen.getByText("circle_agent_wallet")).toBeInTheDocument();
     expect(screen.getByText("Circle CLI JSON output schemas are unverified")).toBeInTheDocument();
-    expect(screen.getByText(/Your wallet session and keys stay on your machine/)).toBeInTheDocument();
+    expect(screen.getByText(/Browser wallet keys stay in your wallet\. A Privy cloud wallet uses a separate platform-managed custody model/)).toBeInTheDocument();
+  });
+
+  it("discloses that a Privy cloud wallet is platform-managed custody, not self-custody", async () => {
+    const cloud = { id: "cw1", address: "0x" + "ab".repeat(20), privy_wallet_id: "pw1", active: true };
+    mockFetch(routes({ "GET /wallet": wallet({ cloud_wallet: cloud, execution_mode: "cloud_managed" }) }));
+    renderApp(<WalletPanel />);
+    expect(await screen.findByText("Cloud agent wallet")).toBeInTheDocument();
+    expect(screen.getByText("cloud execution enabled")).toBeInTheDocument();
+    expect(screen.getByText(/platform app-scoped managed wallet\. Privy holds the wallet key material/)).toBeInTheDocument();
+    expect(screen.getByText(/Autonomous cloud execution:/).closest("li")).toHaveTextContent("uses your per-user Privy managed wallet on the shared cloud worker");
+  });
+
+  it("shows a provisioned-but-inactive cloud wallet as not executing, and offers provisioning when there is none", async () => {
+    const cloud = { id: "cw1", address: "0x" + "cd".repeat(20), privy_wallet_id: "pw1", active: false };
+    mockFetch(routes({ "GET /wallet": wallet({ cloud_wallet: cloud }) }));
+    const { unmount } = renderApp(<WalletPanel />);
+    expect(await screen.findByText("provisioned, not active")).toBeInTheDocument();
+    unmount();
+    mockFetch(routes());
+    renderApp(<WalletPanel />);
+    expect(await screen.findByText("No Privy cloud wallet is provisioned.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Provision Privy cloud wallet" })).toBeEnabled();
   });
 
   it("says there is no autonomous wallet when no runner is paired", async () => {
