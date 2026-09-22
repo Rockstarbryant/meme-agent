@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+runner.env.example
+backend/runner.env.example
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -17,3 +19,11 @@ credentials.json
 approval.key
 state.db*
 circle-capture-*.json
+.env.runner
+.env.*
+!.env.example
+runner.env.example
+backend/runner.env.example
+*.key
+*.pem
+credentials.json

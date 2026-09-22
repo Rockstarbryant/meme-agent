@@ -60,16 +60,35 @@ class AnthropicProvider(LLMProvider):
 
 
 def build_provider(settings) -> LLMProvider | None:
-    """Return None when no provider/key/model is configured (AI disabled)."""
-    if not settings.ai_model:
+    """Return None when no provider/key is configured (AI disabled).
+
+    OpenRouter: if AI_MODEL is empty, default to ``openrouter/free`` (OpenRouter's
+    Free Models Router — picks an available $0 model). Explicit AI_MODEL is kept as-is
+    for all providers (e.g. a specific ``*:free`` id or a paid model).
+    """
+    p = getattr(settings, "llm_provider", None) or "none"
+    if p in ("", "none"):
         return None
-    p = settings.llm_provider
-    if p == "openrouter" and settings.openrouter_api_key:
-        return OpenAICompatibleProvider("openrouter", "https://openrouter.ai/api/v1",
-                                        settings.openrouter_api_key.get_secret_value(), settings.ai_model)
-    if p == "openai" and settings.openai_api_key:
-        return OpenAICompatibleProvider("openai", settings.openai_base_url,
-                                        settings.openai_api_key.get_secret_value(), settings.ai_model)
-    if p == "anthropic" and settings.anthropic_api_key:
-        return AnthropicProvider(settings.anthropic_api_key.get_secret_value(), settings.ai_model)
+
+    if p == "openrouter" and getattr(settings, "openrouter_api_key", None):
+        model = (settings.ai_model or "").strip() or "openrouter/free"
+        return OpenAICompatibleProvider(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            settings.openrouter_api_key.get_secret_value(),
+            model,
+        )
+    if p == "openai" and getattr(settings, "openai_api_key", None):
+        if not (settings.ai_model or "").strip():
+            return None
+        return OpenAICompatibleProvider(
+            "openai",
+            getattr(settings, "openai_base_url", "https://api.openai.com/v1"),
+            settings.openai_api_key.get_secret_value(),
+            settings.ai_model.strip(),
+        )
+    if p == "anthropic" and getattr(settings, "anthropic_api_key", None):
+        if not (settings.ai_model or "").strip():
+            return None
+        return AnthropicProvider(settings.anthropic_api_key.get_secret_value(), settings.ai_model.strip())
     return None
