@@ -148,6 +148,26 @@ async def test_the_execution_layer_is_provider_agnostic(tmp_path):
         assert type(getattr(live.engine, attr)) is type(getattr(paper.engine, attr))                          # same strategy/risk/exit code
 
 
+# ------------------------------------------------------------------ cloud-worker first heartbeat
+async def test_first_heartbeat_after_direct_bundle_apply_reports_running(tmp_path):
+    # Shared cloud workers build a fresh Runtime per tenant cycle and call
+    # apply_bundle() directly, so last_contact is initially None. The
+    # heartbeat itself must establish contact rather than being reported as
+    # PAUSED for one whole cycle.
+    client = FakeClient(bundle())
+    rt = make_rt(tmp_path, client)
+    await rt.apply_bundle(client.bundle)
+    assert rt.last_contact is None
+    assert rt.state == "PAUSED"  # fail-closed before any successful contact
+
+    await rt.heartbeat_once()
+
+    assert client.hbs[-1].state == "RUNNING"
+    assert rt.state == "RUNNING"
+    assert not rt.controls.global_pause
+    assert rt.entries_suspended_reason is None
+
+
 # ------------------------------------------------------------------ dead-man switch
 async def test_no_new_entries_when_the_control_plane_is_unreachable_but_exits_keep_working(tmp_path):
     clock, mono, market = Clock(), Mono(), StaticMarketData(good_market())

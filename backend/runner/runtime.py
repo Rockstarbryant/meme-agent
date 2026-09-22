@@ -271,19 +271,37 @@ class RunnerRuntime:
 
     async def heartbeat_once(self) -> None:
         await self.live_status()
+
+        # A shared cloud worker constructs a fresh RunnerRuntime for each tenant
+        # cycle. On that first heartbeat ``last_contact`` is therefore None even
+        # though this heartbeat itself is the control-plane contact we are about
+        # to make. If we build the payload before tentatively marking the contact,
+        # recompute() reports PAUSED and the control plane persists that stale
+        # state until the next cycle.
+        #
+        # Treat the current heartbeat as a tentative contact while constructing
+        # the payload, but roll it back if the request actually fails. This keeps
+        # the dead-man switch fail-closed while allowing a successful heartbeat
+        # to report RUNNING immediately.
+        previous_contact = self.last_contact
+        self.last_contact = self.mono()
+        self.recompute()
         try:
             resp = await self.client.heartbeat(self.heartbeat())
         except Revoked:
+            self.last_contact = previous_contact
             self.revoked = True
             self.recompute()
             raise
         except ControlPlaneError as e:
+            self.last_contact = previous_contact
             self._failed(e)
             self.recompute()
             return
+
         # The successful heartbeat is the proof that the control plane is
-        # reachable again. Recompute immediately so the local runtime resumes
-        # NEW-entry eligibility without waiting for the next config poll.
+        # reachable. Refresh the contact timestamp and recompute so the local
+        # runtime immediately resumes NEW-entry eligibility.
         self._touch()
         self.recompute()
         for cmd in resp.commands:
