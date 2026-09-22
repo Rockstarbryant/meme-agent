@@ -163,11 +163,8 @@ class CloudWorker:
             rt = RunnerRuntime(s, CloudControlPlaneClient(self.client, user_id), LocalStore(s.state_dir / "runtime.sqlite"), wallet=wallet)
             # Pull authoritative state before constructing the first trading cycle.
             await self._restore_state(rt, user_id, bundle.mode)
-# Fresh Runtime starts with last_contact=None → false offline pause. Touch first.
-rt._touch()
             await rt.apply_bundle(bundle)
             await rt.heartbeat_once()
-rt.recompute()
 
             if rt.engine is None or rt.controls.global_pause or rt.state == "LIVE_BLOCKED":
                 await rt.upload_once()
@@ -197,6 +194,10 @@ rt.recompute()
                     await self._persist_state(rt, user_id)
                 except Exception:
                     log.exception("tenant %s state persistence failed", user_id)
+                try:
+                    await rt.aclose()
+                except Exception:
+                    log.exception("tenant %s runtime close failed", user_id)
                 try:
                     rt.store.close()
                 except Exception:

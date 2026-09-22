@@ -12,6 +12,11 @@ from app.ai.provider import build_provider
 from app.chains.arc.adapter import ArcAdapter
 from app.chains.arc.market_data import UnavailableArcMarketData
 from app.chains.arc.market_data import BitqueryArcMarketData
+from app.chains.arc.rpc_market_data import ArcRpcMarketData
+from app.chains.arc.gecko_market_data import GeckoTerminalArcMarketData
+from app.chains.arc.uniswap_v4_rpc import ArcUniswapV4RpcMarketData
+from app.integrations.geckoterminal import GeckoTerminalClient
+from app.market_data.registry import MarketDataRegistry
 from app.chains.arc.uniswap import UniswapArcAdapter
 from app.integrations.bitquery import BitqueryClient
 from app.chains.base import MarketDataProvider
@@ -71,9 +76,13 @@ class RunnerRuntime:
         self.ceilings = settings.ceilings
         self.wallet: WalletProvider | None = build_wallet_provider(settings) if wallet is _UNSET else wallet  # type: ignore[assignment]
         self._bitquery = None
+        self._gecko = None
+        self._market_registry = None
+        self._rpc = None
         self._uniswap = None
         if chain is _UNSET:
             rpc = EvmRpcClient(settings.rpc_urls)
+            self._rpc = rpc
             # Prefer explicit wallet address from the active provider settings
             wallet_addr = (
                 settings.circle_wallet_address
@@ -93,7 +102,7 @@ class RunnerRuntime:
         self.llm = build_provider(settings) if llm is _UNSET else llm
         self.market_data: MarketDataProvider = market_data if market_data is not _UNSET else (
             DemoMarketData() if settings.data_source == "demo" else self._build_arc_market_data(settings))  # type: ignore[assignment]
-        self.data_kind = "DEMO DATA" if isinstance(self.market_data, DemoMarketData) else "arc/bitquery"
+        self.data_kind = "DEMO DATA" if isinstance(self.market_data, DemoMarketData) else getattr(self.market_data, "name", "arc/market-data")
         self.approver = TradeApprover(approval_secret(settings.state_dir) if settings.state_dir else "x" * 32)
         self.idem = SqliteIdempotencyStore(store)
         self.bus = EventBus([OutboxSink(self)])
@@ -120,10 +129,40 @@ class RunnerRuntime:
         self._tasks: list[asyncio.Task] = []
 
     def _build_arc_market_data(self, settings: RunnerSettings) -> MarketDataProvider:
-        if not settings.bitquery_api_key:
+        providers: list[tuple[str, MarketDataProvider]] = []
+        wanted = [x.strip().lower() for x in settings.market_data_providers.split(",") if x.strip()]
+        rpc = self._rpc
+        if rpc is None:
+            rpc = EvmRpcClient(settings.rpc_urls)
+            self._rpc = rpc
+        if "arc_rpc" in wanted:
+            providers.append(("arc_rpc", ArcRpcMarketData(rpc, max_tokens=settings.market_data_max_tokens, scan_blocks=settings.rpc_launch_scan_blocks, cache_s=settings.market_data_cache_s)))
+        if "uniswap_v4_rpc" in wanted:
+            providers.append(("uniswap_v4_rpc", ArcUniswapV4RpcMarketData(rpc, max_tokens=settings.market_data_max_tokens, scan_blocks=settings.uniswap_v4_scan_blocks, swap_scan_blocks=settings.uniswap_v4_swap_scan_blocks, cache_s=settings.market_data_cache_s)))
+        if "geckoterminal" in wanted:
+            key = settings.geckoterminal_api_key.get_secret_value() if settings.geckoterminal_api_key else None
+            self._gecko = GeckoTerminalClient(settings.geckoterminal_base_url, settings.geckoterminal_network, timeout_s=settings.market_data_timeout_s, api_key=key)
+            providers.append(("geckoterminal", GeckoTerminalArcMarketData(self._gecko, max_tokens=settings.market_data_max_tokens, cache_s=settings.market_data_cache_s)))
+        if "bitquery" in wanted and settings.bitquery_api_key:
+            self._bitquery = BitqueryClient(settings.bitquery_api_key.get_secret_value(), settings.bitquery_endpoint, timeout_s=settings.market_data_timeout_s)
+            providers.append(("bitquery", BitqueryArcMarketData(self._bitquery, max_tokens=settings.market_data_max_tokens)))
+        if not providers:
             return UnavailableArcMarketData()
-        self._bitquery = BitqueryClient(settings.bitquery_api_key.get_secret_value(), settings.bitquery_endpoint)
-        return BitqueryArcMarketData(self._bitquery)
+        self._market_registry = MarketDataRegistry(providers, failure_threshold=settings.market_data_failure_threshold, cooldown_s=settings.market_data_cooldown_s)
+        return self._market_registry
+
+    async def aclose(self) -> None:
+        close = getattr(self.market_data, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:
+                log.exception("failed closing market-data providers")
+        if self._rpc is not None:
+            try:
+                await self._rpc.aclose()
+            except Exception:
+                log.exception("failed closing Arc RPC client")
 
     # ------------------------------------------------------------ helpers
     def portfolio_summary(self) -> dict:

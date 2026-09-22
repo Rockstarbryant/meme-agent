@@ -24,14 +24,14 @@ CONTRACT_TO_LAUNCHPAD = {c: name for name, v in LAUNCHPADS.items() for c in v["c
 class UnavailableArcMarketData(MarketDataProvider):
     """Fail-closed provider used when no real Arc market-data source is configured."""
     async def discover_tokens(self) -> list[str]:
-        raise DataUnavailable("Arc market data unavailable: configure Bitquery or another real provider")
+        raise DataUnavailable("Arc market data unavailable: configure at least one real Arc market-data provider")
 
     async def get_market_state(self, token_address: str) -> MarketState:
-        raise DataUnavailable("Arc market data unavailable: configure Bitquery or another real provider")
+        raise DataUnavailable("Arc market data unavailable: configure at least one real Arc market-data provider")
 
 
 class BitqueryArcMarketData(MarketDataProvider):
-    """Real Arc discovery + normalized market snapshots using Bitquery production data."""
+    """Optional Bitquery Arc provider kept for indexed-data fallback/enrichment."""
 
     def __init__(self, client: BitqueryClient, *, max_tokens: int = 40, launch_window_hours: int = 24):
         self.client = client

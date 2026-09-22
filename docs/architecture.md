@@ -9,3 +9,8 @@ Exits: PositionManager (deterministic) -> TradingEngine. Everything is emitted a
 The trading core (`app/strategies|risk|portfolio|execution|wallets|ai|chains|events`) is shared code with no web/DB dependencies;
 the runner imports only that core (enforced by a test that blocks FastAPI/SQLAlchemy/Redis at import time).
 BNB, Solana and Robinhood Chain remain extension points (ChainAdapter / MarketDataProvider / LaunchpadAdapter), not integrations.
+
+
+### Multi-source market data
+
+Market data is provider-agnostic and normalized through `MarketDataRegistry`. Arc RPC owns launchpad provenance; GeckoTerminal can enrich DEX market fields; Bitquery remains optional fallback. Provider failures are isolated by a circuit breaker. The trading engine never receives fabricated values, and the execution quote still comes from the verified execution adapter rather than a market-data aggregator.

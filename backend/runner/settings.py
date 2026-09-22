@@ -52,6 +52,18 @@ class RunnerSettings(BaseSettings):
     circle_wallet_address: str = ""
 
     data_source: Literal["demo", "arc"] = "arc"  # demo = synthetic, labelled, PAPER only
+    market_data_providers: str = Field("arc_rpc,geckoterminal,bitquery", validation_alias=_alias("MARKET_DATA_PROVIDERS"))
+    market_data_max_tokens: int = Field(10, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))
+    market_data_cache_s: float = Field(60.0, validation_alias=_alias("MARKET_DATA_CACHE_S"))
+    market_data_timeout_s: float = Field(6.0, validation_alias=_alias("MARKET_DATA_TIMEOUT_S"))
+    market_data_failure_threshold: int = Field(3, validation_alias=_alias("MARKET_DATA_FAILURE_THRESHOLD"))
+    market_data_cooldown_s: float = Field(60.0, validation_alias=_alias("MARKET_DATA_COOLDOWN_S"))
+    rpc_launch_scan_blocks: int = Field(43200, validation_alias=_alias("RPC_LAUNCH_SCAN_BLOCKS"))
+    uniswap_v4_scan_blocks: int = Field(20000, validation_alias=_alias("UNISWAP_V4_SCAN_BLOCKS"))
+    uniswap_v4_swap_scan_blocks: int = Field(1800, validation_alias=_alias("UNISWAP_V4_SWAP_SCAN_BLOCKS"))
+    geckoterminal_base_url: str = Field("https://api.geckoterminal.com/api/v2", validation_alias=_alias("GECKOTERMINAL_BASE_URL"))
+    geckoterminal_network: str = Field("arc", validation_alias=_alias("GECKOTERMINAL_NETWORK"))
+    geckoterminal_api_key: SecretStr | None = Field(None, validation_alias=_alias("GECKOTERMINAL_API_KEY"))
     arc_network: Literal["mainnet", "testnet"] = "mainnet"
     arc_rpc_url: str | None = None
     arc_rpc_fallback_urls: str = ""
