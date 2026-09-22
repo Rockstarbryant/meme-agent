@@ -281,6 +281,9 @@ class RunnerRuntime:
             self._failed(e)
             self.recompute()
             return
+        # The successful heartbeat is the proof that the control plane is
+        # reachable again. Recompute immediately so the local runtime resumes
+        # NEW-entry eligibility without waiting for the next config poll.
         self._touch()
         self.recompute()
         for cmd in resp.commands:

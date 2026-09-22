@@ -172,6 +172,33 @@ async def test_heartbeat_drives_agent_status_and_online_state(env):
     assert runners[0]["online"] is False and runners[0]["version"] == "t"
 
 
+async def test_successful_cloud_heartbeat_clears_stale_control_plane_suspension(env):
+    # The shared cloud worker sends its heartbeat payload before the HTTP call
+    # succeeds, so the payload can legitimately contain the previous outage
+    # message. A successful receipt must clear that stale dead-man reason.
+    h = await env.register()
+    async with env.app.state.c.sf() as db:
+        uid = (await db.execute(select(M.User.id))).scalar_one()
+        cfg = (await db.execute(select(M.AgentConfig).where(M.AgentConfig.user_id == uid))).scalar_one()
+        cfg.execution_mode = "cloud_managed"
+        await db.commit()
+
+    env.app.state.c.settings.cloud_managed_enabled = True
+    env.app.state.c.settings.platform_worker_token = "worker-test-token"
+    headers = {"Authorization": "Bearer worker-test-token"}
+    r = await env.client.post(
+        f"/platform/tenants/{uid}/heartbeat",
+        json=hb(entries_suspended_reason="control plane unreachable for more than 60s: no NEW entries until it is back"),
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+
+    async with env.app.state.c.sf() as db:
+        runner = (await db.execute(select(M.Runner).where(M.Runner.user_id == uid))).scalar_one()
+        assert runner.last_seen_at is not None
+        assert (runner.status or {}).get("entries_suspended_reason") is None
+
+
 async def test_close_commands_are_queued_once_delivered_and_acknowledged(env):
     h = await env.register()
     pr = await pair_raw(env, h)

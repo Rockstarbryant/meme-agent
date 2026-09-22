@@ -154,6 +154,16 @@ async def tenant_heartbeat(
     r = await _cloud_runner(db, user_id)
     r.last_seen_at = utcnow()
     r.version = hb.version or r.version
+    # Receiving this heartbeat proves the worker can reach the control plane.
+    # The runner builds its heartbeat payload before making the HTTP request, so
+    # an older payload can still contain the dead-man message from the previous
+    # outage. Never persist that stale message after a successful heartbeat;
+    # otherwise the UI can show "control plane unreachable" while last_seen_at
+    # is only a few seconds old and the runner has already resumed entries.
+    entries_suspended_reason = hb.entries_suspended_reason
+    if entries_suspended_reason and entries_suspended_reason.startswith("control plane unreachable"):
+        entries_suspended_reason = None
+
     r.status = {
         "state": hb.state,
         "mode": hb.mode.value if hasattr(hb.mode, "value") else hb.mode,
@@ -168,7 +178,7 @@ async def tenant_heartbeat(
         "live": hb.live.model_dump(mode="json") if hb.live else {},
         "wallet_provider": hb.wallet_provider or "privy",
         "local_ceilings": hb.local_ceilings,
-        "entries_suspended_reason": hb.entries_suspended_reason,
+        "entries_suspended_reason": entries_suspended_reason,
         "last_error": hb.last_error,
         "execution_mode": "cloud_managed",
     }
