@@ -52,7 +52,7 @@ class RunnerSettings(BaseSettings):
     circle_wallet_address: str = ""
 
     data_source: Literal["demo", "arc"] = "arc"  # demo = synthetic, labelled, PAPER only
-    market_data_providers: str = Field("arc_rpc,geckoterminal,bitquery", validation_alias=_alias("MARKET_DATA_PROVIDERS"))
+    market_data_providers: str = Field("arc_rpc,uniswap_v4_rpc,geckoterminal", validation_alias=_alias("MARKET_DATA_PROVIDERS"))
     market_data_max_tokens: int = Field(10, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))
     market_data_cache_s: float = Field(60.0, validation_alias=_alias("MARKET_DATA_CACHE_S"))
     market_data_timeout_s: float = Field(6.0, validation_alias=_alias("MARKET_DATA_TIMEOUT_S"))
