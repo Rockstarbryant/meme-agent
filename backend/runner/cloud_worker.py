@@ -24,6 +24,7 @@ from app.domain.runner_protocol import (
 )
 from app.events.bus import IdempotencyStore
 from app.risk.per_user_policy import PerUserPolicyEnforcer
+from runner import __version__
 from runner.client import ControlPlaneError, Revoked
 from runner.runtime import RunnerRuntime
 from runner.settings import RunnerSettings
@@ -106,10 +107,6 @@ class CloudControlPlaneClient:
         return await self.platform.post_events(self.user_id, batch)
 
     async def ack_command(self, cid: str, status: str, detail: str = "") -> None:
-        # Commands queued via /agent/close/{id}, /agent/close-all, and
-        # /wallet/cloud/withdraw are delivered to cloud tenants through the
-        # normal heartbeat response (see tenant_heartbeat in routes_platform.py)
-        # and acknowledged here the same way the self-hosted runner does.
         await self.platform.ack_command(self.user_id, cid, status, detail)
 
 
@@ -124,6 +121,12 @@ class CloudWorker:
         self._privy: PrivyClient | None = None
         if settings.privy_app_id and settings.privy_app_secret:
             self._privy = PrivyClient(settings.privy_app_id, settings.privy_app_secret.get_secret_value(), base_url=settings.privy_api_url)
+        # Last heartbeat produced by each tenant's real cycle. Replayed during
+        # the sleep between cycles so the control plane's "runner online"
+        # indicator does not flap when a cycle takes longer than the server's
+        # heartbeat-timeout window (the market-data fan-out can easily run
+        # 60-90s per cycle, vs. a typical 30-60s timeout).
+        self._last_heartbeats: dict[str, Heartbeat] = {}
 
     def _wallet_for(self, privy_wallet_id: str, address: str) -> PrivyWalletProvider:
         if self._privy is None:
@@ -133,7 +136,6 @@ class CloudWorker:
                                    allow_execute=self.s.privy_allow_execute, allow_withdraw=self.s.privy_allow_withdraw)
 
     def _tenant_settings(self, tenant: dict) -> RunnerSettings:
-        # No mutable trading state is shared between tenants.
         return self.s.model_copy(update={
             "state_dir": self.state_dir / tenant["user_id"],
             "wallet_provider": "privy",
@@ -166,17 +168,7 @@ class CloudWorker:
             s = self._tenant_settings(tenant)
             wallet = self._wallet_for(tenant["privy_wallet_id"], tenant["wallet_address"])
             rt = RunnerRuntime(s, CloudControlPlaneClient(self.client, user_id), LocalStore(s.state_dir / "runtime.sqlite"), wallet=wallet)
-            # This is a fresh, ephemeral RunnerRuntime built for exactly one cycle —
-            # unlike a long-lived local runner, it has no heartbeat history yet.
-            # RunnerRuntime.recompute() treats "no prior contact" as "control plane
-            # unreachable" (a dead-man switch, correct for a runner that's been
-            # silent for a while), which would otherwise make apply_bundle() below
-            # report PAUSED for this cycle even though we are, right now, mid
-            # conversation with the control plane (we just fetched `bundle` from
-            # it). Seed contact here so recompute() reflects the real desired
-            # state instead of momentarily reporting PAUSED before the first
-            # heartbeat gets a chance to correct it.
-            # Fresh ephemeral runtime has no heartbeat history. Seed contact so
+            # Fresh ephemeral runtime has no heartbeat history; seed contact so
             # recompute() does not treat this cycle as "control plane offline".
             rt.last_contact = rt.mono()
             await self._restore_state(rt, user_id, bundle.mode)
@@ -184,14 +176,17 @@ class CloudWorker:
             rt.recompute()
 
             if rt.engine is None or rt.controls.global_pause or rt.state == "LIVE_BLOCKED":
-                # Still heartbeat so UI sees STOPPED/PAUSED + reasons, not stale idle.
                 await rt.heartbeat_once()
                 await rt.upload_once()
                 await self._persist_state(rt, user_id)
+                # Cache the freshly-built heartbeat for replay during the sleep.
+                try:
+                    self._last_heartbeats[user_id] = rt.heartbeat()
+                except Exception:
+                    pass
                 log.info(
                     "tenant %s skipped trade cycle state=%s global_pause=%s desired=%s strategies=%s data_status=%s",
-                    user_id,
-                    rt.state,
+                    user_id, rt.state,
                     rt.controls.global_pause if rt.controls else None,
                     getattr(bundle, "desired_state", None),
                     getattr(bundle, "strategies_enabled", None),
@@ -199,24 +194,24 @@ class CloudWorker:
                 )
                 return
 
-            # Trade cycle FIRST so data_status / last_activity are real before heartbeat.
+            cycle_started = time.monotonic()
             await rt.monitor_once()
             if not rt.controls.global_pause:
                 await rt.discover_once()
             await rt.monitor_once()
-
-            # Heartbeat AFTER discover so control plane stores RUNNING + real data_status
-            # instead of permanent "idle" (fresh runtime starts as idle every cycle).
             await rt.heartbeat_once()
             await rt.upload_once()
             await self._persist_state(rt, user_id)
+            try:
+                self._last_heartbeats[user_id] = rt.heartbeat()
+            except Exception:
+                pass
             log.info(
-                "tenant %s cycle complete mode=%s positions=%s state=%s data_status=%s",
-                user_id,
-                bundle.mode.value,
+                "tenant %s cycle complete mode=%s positions=%s state=%s data_status=%s cycle_s=%.1f",
+                user_id, bundle.mode.value,
                 rt.portfolio.open_count() if rt.portfolio else 0,
-                rt.state,
-                rt.data_status,
+                rt.state, rt.data_status,
+                time.monotonic() - cycle_started,
             )
         except Revoked:
             log.error("platform worker authorization revoked while processing %s", user_id)
@@ -243,31 +238,61 @@ class CloudWorker:
                     pass
             await self.client.release_lease(user_id, self.worker_id)
 
+    async def _replay_heartbeat(self, tenant: dict) -> None:
+        """Replay the last real heartbeat body for liveness only.
+
+        No market-data or RPC work happens here; we just resend the shape the
+        runtime produced at the end of the last full cycle so the control
+        plane's "runner online" timer stays fresh. The next full cycle will
+        replace the cached payload with a current one.
+        """
+        user_id = tenant.get("user_id")
+        if not user_id:
+            return
+        hb = self._last_heartbeats.get(user_id)
+        if hb is None:
+            return
+        try:
+            await self.client.heartbeat(user_id, hb)
+        except Revoked:
+            raise
+        except Exception:
+            log.debug("replay heartbeat failed for %s", user_id)
+
     async def run_forever(self, poll_s: float | None = None) -> None:
-        # Default 30s: public GeckoTerminal allows ~30 req/min. The client now
-        # paces at 2.5s min interval (~24/min) and honors Retry-After on 429,
-        # but a shared worker handling multiple tenants still benefits from a
-        # slower outer tick — it reduces overlapping discovery across tenants
-        # sharing one outbound IP and one Alchemy key.
+        # ``poll_s`` is the *full trade cycle* interval, not the outer loop
+        # interval. Heartbeats go out every ``heartbeat_s`` seconds so the
+        # control plane never sees the runner as offline between cycles.
         if poll_s is None:
             poll_s = float(os.environ.get("ARC_RUNNER_CLOUD_POLL_S", "30"))
-        poll_s = max(5.0, float(poll_s))
-        log.info("cloud worker %s starting against %s max_concurrent=%s poll_s=%s", self.worker_id, self.s.server_url, self.max_concurrent, poll_s)
+        poll_s = max(10.0, float(poll_s))
+        heartbeat_s = max(4.0, float(os.environ.get("ARC_RUNNER_CLOUD_HEARTBEAT_S", "8")))
+        log.info("cloud worker %s starting against %s max_concurrent=%s poll_s=%s heartbeat_s=%s",
+                 self.worker_id, self.s.server_url, self.max_concurrent, poll_s, heartbeat_s)
         sem = asyncio.Semaphore(self.max_concurrent)
+        last_full_cycle = 0.0
+
         while True:
-            started = time.monotonic()
+            loop_started = time.monotonic()
             try:
                 tenants = await self.client.active_tenants()
-                async def one(t: dict) -> None:
-                    async with sem:
-                        await self.process_tenant(t)
-                await asyncio.gather(*(one(t) for t in tenants), return_exceptions=False)
-                log.info("processed %d active tenants", len(tenants))
+                now = time.monotonic()
+                if now - last_full_cycle >= poll_s:
+                    async def one(t: dict) -> None:
+                        async with sem:
+                            await self.process_tenant(t)
+                    await asyncio.gather(*(one(t) for t in tenants), return_exceptions=False)
+                    last_full_cycle = time.monotonic()
+                    log.info("full cycle done, %d tenants", len(tenants))
+                else:
+                    for t in tenants:
+                        await self._replay_heartbeat(t)
             except Revoked:
                 raise
             except Exception:
                 log.exception("worker loop error")
-            await asyncio.sleep(max(1.0, poll_s - (time.monotonic() - started)))
+            elapsed = time.monotonic() - loop_started
+            await asyncio.sleep(max(1.0, heartbeat_s - elapsed))
 
 
 async def run_cloud_worker(settings: RunnerSettings | None = None) -> None:
