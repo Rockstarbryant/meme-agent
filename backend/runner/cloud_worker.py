@@ -166,35 +166,51 @@ class CloudWorker:
             s = self._tenant_settings(tenant)
             wallet = self._wallet_for(tenant["privy_wallet_id"], tenant["wallet_address"])
             rt = RunnerRuntime(s, CloudControlPlaneClient(self.client, user_id), LocalStore(s.state_dir / "runtime.sqlite"), wallet=wallet)
-            # This is a fresh, ephemeral RunnerRuntime built for exactly one cycle —
-            # unlike a long-lived local runner, it has no heartbeat history yet.
-            # RunnerRuntime.recompute() treats "no prior contact" as "control plane
-            # unreachable" (a dead-man switch, correct for a runner that's been
-            # silent for a while), which would otherwise make apply_bundle() below
-            # report PAUSED for this cycle even though we are, right now, mid
-            # conversation with the control plane (we just fetched `bundle` from
-            # it). Seed contact here so recompute() reflects the real desired
-            # state instead of momentarily reporting PAUSED before the first
-            # heartbeat gets a chance to correct it.
+            # Fresh ephemeral runtime has no heartbeat history. Seed contact so
+            # recompute() does not treat this cycle as "control plane offline"
+            # and force PAUSED before we have had a chance to trade + heartbeat.
             rt.last_contact = rt.mono()
-            # Pull authoritative state before constructing the first trading cycle.
             await self._restore_state(rt, user_id, bundle.mode)
             await rt.apply_bundle(bundle)
-            await rt.heartbeat_once()
+            # Recompute after apply so global_pause / state match desired_state
+            # and strategies_enabled from the bundle we just loaded.
+            rt.recompute()
 
             if rt.engine is None or rt.controls.global_pause or rt.state == "LIVE_BLOCKED":
+                # Still heartbeat so the UI sees STOPPED/PAUSED + reasons, not stale idle.
+                await rt.heartbeat_once()
                 await rt.upload_once()
                 await self._persist_state(rt, user_id)
+                log.info(
+                    "tenant %s skipped trade cycle state=%s global_pause=%s desired=%s strategies=%s data_status=%s",
+                    user_id,
+                    rt.state,
+                    rt.controls.global_pause if rt.controls else None,
+                    getattr(bundle, "desired_state", None),
+                    getattr(bundle, "strategies_enabled", None),
+                    rt.data_status,
+                )
                 return
 
-            # Real autonomous cycle: deterministic protection first, then discovery/entries.
+            # Trade cycle first so data_status / last_activity are real before heartbeat.
             await rt.monitor_once()
             if not rt.controls.global_pause:
                 await rt.discover_once()
             await rt.monitor_once()
+
+            # Heartbeat AFTER discover so control plane stores RUNNING + data_status=ok
+            # (or a real unavailable reason) instead of permanent "idle".
+            await rt.heartbeat_once()
             await rt.upload_once()
             await self._persist_state(rt, user_id)
-            log.info("tenant %s cycle complete mode=%s positions=%s", user_id, bundle.mode.value, rt.portfolio.open_count() if rt.portfolio else 0)
+            log.info(
+                "tenant %s cycle complete mode=%s positions=%s state=%s data_status=%s",
+                user_id,
+                bundle.mode.value,
+                rt.portfolio.open_count() if rt.portfolio else 0,
+                rt.state,
+                rt.data_status,
+            )
         except Revoked:
             log.error("platform worker authorization revoked while processing %s", user_id)
         except Exception:
