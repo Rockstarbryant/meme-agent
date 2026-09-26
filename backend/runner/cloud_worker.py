@@ -176,25 +176,48 @@ class CloudWorker:
             # it). Seed contact here so recompute() reflects the real desired
             # state instead of momentarily reporting PAUSED before the first
             # heartbeat gets a chance to correct it.
+            # Fresh ephemeral runtime has no heartbeat history. Seed contact so
+            # recompute() does not treat this cycle as "control plane offline".
             rt.last_contact = rt.mono()
-            # Pull authoritative state before constructing the first trading cycle.
             await self._restore_state(rt, user_id, bundle.mode)
             await rt.apply_bundle(bundle)
-            await rt.heartbeat_once()
+            rt.recompute()
 
             if rt.engine is None or rt.controls.global_pause or rt.state == "LIVE_BLOCKED":
+                # Still heartbeat so UI sees STOPPED/PAUSED + reasons, not stale idle.
+                await rt.heartbeat_once()
                 await rt.upload_once()
                 await self._persist_state(rt, user_id)
+                log.info(
+                    "tenant %s skipped trade cycle state=%s global_pause=%s desired=%s strategies=%s data_status=%s",
+                    user_id,
+                    rt.state,
+                    rt.controls.global_pause if rt.controls else None,
+                    getattr(bundle, "desired_state", None),
+                    getattr(bundle, "strategies_enabled", None),
+                    rt.data_status,
+                )
                 return
 
-            # Real autonomous cycle: deterministic protection first, then discovery/entries.
+            # Trade cycle FIRST so data_status / last_activity are real before heartbeat.
             await rt.monitor_once()
             if not rt.controls.global_pause:
                 await rt.discover_once()
             await rt.monitor_once()
+
+            # Heartbeat AFTER discover so control plane stores RUNNING + real data_status
+            # instead of permanent "idle" (fresh runtime starts as idle every cycle).
+            await rt.heartbeat_once()
             await rt.upload_once()
             await self._persist_state(rt, user_id)
-            log.info("tenant %s cycle complete mode=%s positions=%s", user_id, bundle.mode.value, rt.portfolio.open_count() if rt.portfolio else 0)
+            log.info(
+                "tenant %s cycle complete mode=%s positions=%s state=%s data_status=%s",
+                user_id,
+                bundle.mode.value,
+                rt.portfolio.open_count() if rt.portfolio else 0,
+                rt.state,
+                rt.data_status,
+            )
         except Revoked:
             log.error("platform worker authorization revoked while processing %s", user_id)
         except Exception:
