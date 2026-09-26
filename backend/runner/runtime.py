@@ -577,10 +577,10 @@ class RunnerRuntime:
                 self._mkt_at[m.key] = self.mono()
                 await self.bus.publish(E.MARKET_SNAPSHOT, "", market=m.model_dump(mode="json"))
             rec = await self.engine.handle_market_state(m, now)
-log.info(
-    "evaluated token=%s symbol=%s action=%s reason=%s",
-    addr, m.symbol, rec.final_action.value, rec.final_reason,
-)
+            log.info(
+                "evaluated token=%s symbol=%s action=%s reason=%s",
+                addr, m.symbol, rec.final_action.value, rec.final_reason,
+            )
             self.last_activity_at = now
             self.last_decision = {"id": rec.id, "token": rec.token_key, "symbol": m.symbol,
                                   "action": rec.final_action.value, "reason": rec.final_reason,
