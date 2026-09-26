@@ -18,6 +18,7 @@ from app.domain.runner_protocol import (Command, CommandAck, ConfigPoll, EventAc
 from app.services import control
 from app.services.ingest import ingest
 
+router = APIRouter(prefix="/platform", tags=["platform worker"])
 user_router = APIRouter(prefix="/runners", tags=["runners"])
 runner_router = APIRouter(prefix="/runner", tags=["runner (used by the Local Runner)"])
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
