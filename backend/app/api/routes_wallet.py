@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 from datetime import timedelta
 
@@ -386,3 +387,73 @@ async def disable_cloud_wallet(user: M.User = Depends(current_user), db: AsyncSe
     await repo.audit(db, user.id, user.email, "CLOUD_WALLET_DISABLED")
     await db.commit()
     return {"execution_mode": "self_hosted", "mode": user.mode}
+
+
+class CloudWithdrawIn(BaseModel):
+    to_address: str
+    amount_usdc: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _valid_address(self) -> "CloudWithdrawIn":
+        addr = self.to_address.strip().lower()
+        if not re.fullmatch(r"0x[0-9a-f]{40}", addr):
+            raise ValueError("to_address must be a 0x-prefixed 20-byte hex address")
+        self.to_address = addr
+        return self
+
+
+async def _queue_command(db: AsyncSession, user_id: str, type_: str, payload: dict) -> M.RunnerCommand:
+    existing = (await db.execute(select(M.RunnerCommand).where(
+        M.RunnerCommand.user_id == user_id, M.RunnerCommand.type == type_, M.RunnerCommand.status == "PENDING",
+    ))).scalars().all()
+    for c in existing:
+        if c.payload == payload:
+            return c  # idempotent: don't double-queue an identical withdrawal
+    cmd = M.RunnerCommand(user_id=user_id, type=type_, payload=payload)
+    db.add(cmd)
+    await db.flush()
+    return cmd
+
+
+@router.post("/cloud/withdraw", status_code=201)
+async def withdraw_cloud_wallet(
+    body: CloudWithdrawIn,
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a USDC withdrawal from the user's Privy cloud wallet to an address they control.
+
+    This only queues the request — the shared worker (or the user's Local
+    Runner, for a self-hosted Privy setup) executes it on its next heartbeat
+    and it stays fail-closed there (ARC_RUNNER_PRIVY_ALLOW_WITHDRAW) exactly
+    like LIVE trade execution. Check GET /wallet/cloud/withdrawals for status.
+    """
+    w = (await db.execute(select(M.Wallet).where(
+        M.Wallet.user_id == user.id, M.Wallet.provider == "privy", M.Wallet.external_id.is_not(None),
+    ))).scalars().first()
+    if w is None:
+        raise HTTPException(404, "no cloud (Privy) wallet found — provision one first")
+    if body.to_address == w.address.lower():
+        raise HTTPException(422, "destination address is the wallet's own address")
+    cmd = await _queue_command(db, user.id, "WITHDRAW_USDC", {"to": body.to_address, "amount_usdc": body.amount_usdc})
+    await repo.audit(db, user.id, user.email, "WALLET_WITHDRAW_REQUESTED", to=body.to_address, amount_usdc=body.amount_usdc)
+    await db.commit()
+    return {
+        "queued": True,
+        "command_id": cmd.id,
+        "to_address": body.to_address,
+        "amount_usdc": body.amount_usdc,
+        "note": "The worker executes this on its next heartbeat (seconds) if withdrawals are enabled on it; otherwise it will report FAILED with the reason.",
+    }
+
+
+@router.get("/cloud/withdrawals")
+async def list_withdrawals(user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    rows = (await db.execute(select(M.RunnerCommand).where(
+        M.RunnerCommand.user_id == user.id, M.RunnerCommand.type == "WITHDRAW_USDC",
+    ).order_by(M.RunnerCommand.created_at.desc()).limit(25))).scalars().all()
+    return [
+        {"id": r.id, "to_address": r.payload.get("to"), "amount_usdc": r.payload.get("amount_usdc"),
+         "status": r.status, "detail": r.detail, "created_at": r.created_at, "updated_at": r.updated_at}
+        for r in rows
+    ]

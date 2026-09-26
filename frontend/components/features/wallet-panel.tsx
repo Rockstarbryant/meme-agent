@@ -43,6 +43,9 @@ export function WalletPanel() {
   const [error, setError] = useState<ApiError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [revokeOpen, setRevokeOpen] = useState(false);
+  const [withdrawTo, setWithdrawTo] = useState("");
+  const [withdrawAmt, setWithdrawAmt] = useState("");
+  const [copiedAddr, setCopiedAddr] = useState<string | null>(null);
 
   if (wallet.loading && !wallet.data) return <Loading />;
   if (!wallet.data) return wallet.error ? <ErrorState error={wallet.error} onRetry={() => void wallet.reload()} /> : null;
@@ -66,6 +69,20 @@ export function WalletPanel() {
   const savePolicy = () => run("policy", () => api("/wallet/policy", { method: "POST", body: form }), "Policy saved. Existing authorizations were revoked; authorize again.");
   const authorize = () => run("authorize", () => api("/wallet/authorize", { method: "POST", body: { capability: "PER_TRADE_SIGNING", expires_in_hours: 24 } }), "Per-trade signing authorized for 24 hours.");
   const provisionCloud = () => run("cloud", () => api("/wallet/cloud/provision", { method: "POST", body: { confirm: true } }), "Privy cloud wallet provisioned. Fund the displayed address with Arc USDC before enabling LIVE.");
+  const withdrawCloud = () => run("withdraw", async () => {
+    const amount = Number(withdrawAmt);
+    if (!withdrawTo.trim()) throw new ApiError(0, "Enter a destination address.");
+    if (!Number.isFinite(amount) || amount <= 0) throw new ApiError(0, "Enter an amount greater than zero.");
+    await api("/wallet/cloud/withdraw", { method: "POST", body: { to_address: withdrawTo.trim(), amount_usdc: amount } });
+    setWithdrawTo(""); setWithdrawAmt("");
+  }, "Withdrawal queued. It runs on the worker's next heartbeat (seconds) — check Activity for the result.");
+  const copyAddress = async (addr: string) => {
+    try {
+      await navigator.clipboard.writeText(addr);
+      setCopiedAddr(addr);
+      setTimeout(() => setCopiedAddr((c) => (c === addr ? null : c)), 2000);
+    } catch { setError(new ApiError(0, "Couldn't copy — your browser blocked clipboard access.")); }
+  };
   const revoke = () => run("revoke", async () => { await api("/wallet/revoke", { method: "POST" }); setRevokeOpen(false); }, "Authorization revoked. Also revoke token approvals inside your wallet.");
   const signRequest = (r: SigningRequest) => run(`sign-${r.id}`, async () => {
     if (!verified) throw new ApiError(0, "Connect a wallet first.");
@@ -106,7 +123,26 @@ export function WalletPanel() {
       <Card>
         <CardHeader><CardTitle>Cloud agent wallet</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
-          {w.cloud_wallet ? (<><p>Provider: <strong>Privy</strong> · {w.cloud_wallet.active ? <Badge variant="success">cloud execution enabled</Badge> : <Badge variant="warning">provisioned, not active</Badge>}</p><p>Address: <code>{shortAddr(w.cloud_wallet.address)}</code></p><p className="text-xs text-muted-foreground">This is a platform app-scoped managed wallet. Privy holds the wallet key material; the shared worker can act only when the account, worker, application policy, and LIVE gates permit it.</p></>) : <><p className="text-muted-foreground">No Privy cloud wallet is provisioned.</p><Button onClick={() => void provisionCloud()} disabled={busy !== null}>Provision Privy cloud wallet</Button><p className="text-xs text-muted-foreground">Provisioning switches this account to the cloud-managed execution mode and creates a separate Privy wallet.</p></>}
+          {w.cloud_wallet ? (<>
+            <p>Provider: <strong>Privy</strong> · {w.cloud_wallet.active ? <Badge variant="success">cloud execution enabled</Badge> : <Badge variant="warning">provisioned, not active</Badge>}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <span>Address:</span>
+              <code className="break-all rounded bg-muted px-2 py-1 text-xs">{w.cloud_wallet.address}</code>
+              <Button size="sm" variant="outline" onClick={() => void copyAddress(w.cloud_wallet!.address)}>
+                {copiedAddr === w.cloud_wallet.address ? "Copied!" : "Copy"}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">This is a platform app-scoped managed wallet. Privy holds the wallet key material; the shared worker can act only when the account, worker, application policy, and LIVE gates permit it.</p>
+            <div className="space-y-2 rounded-md border p-3">
+              <p className="font-medium">Withdraw USDC</p>
+              <p className="text-xs text-muted-foreground">Moves funds out of this wallet to an address you control. Executed by the worker on its next heartbeat; it stays fail-closed there until withdrawals are explicitly enabled on that worker (same gate LIVE trading uses).</p>
+              <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                <Input placeholder="Destination address (0x...)" value={withdrawTo} onChange={(e) => setWithdrawTo(e.target.value)} />
+                <Input className="sm:w-32" placeholder="Amount USDC" inputMode="decimal" value={withdrawAmt} onChange={(e) => setWithdrawAmt(e.target.value)} />
+                <Button onClick={() => void withdrawCloud()} disabled={busy !== null}>Withdraw</Button>
+              </div>
+            </div>
+          </>) : <><p className="text-muted-foreground">No Privy cloud wallet is provisioned.</p><Button onClick={() => void provisionCloud()} disabled={busy !== null}>Provision Privy cloud wallet</Button><p className="text-xs text-muted-foreground">Provisioning switches this account to the cloud-managed execution mode and creates a separate Privy wallet.</p></>}
         </CardContent>
       </Card>
 
@@ -126,7 +162,7 @@ export function WalletPanel() {
         <CardHeader><CardTitle>Browser wallet (optional, manual signing)</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
           {w.wallets.length === 0 && <p className="text-muted-foreground">No wallet connected.</p>}
-          {w.wallets.map((x) => <p key={x.id}>{x.provider}: <code>{shortAddr(x.address)}</code> {x.ownership_verified ? <Badge variant="success">ownership verified</Badge> : <Badge>paper placeholder</Badge>}</p>)}
+          {w.wallets.map((x) => <p key={x.id} className="flex flex-wrap items-center gap-2">{x.provider}: <code>{shortAddr(x.address)}</code> <Button size="sm" variant="outline" onClick={() => void copyAddress(x.address)}>{copiedAddr === x.address ? "Copied!" : "Copy"}</Button> {x.ownership_verified ? <Badge variant="success">ownership verified</Badge> : <Badge>paper placeholder</Badge>}</p>)}
           <Button onClick={() => void connect()} disabled={busy !== null}>{verified ? "Reconnect / switch account" : "Connect wallet"}</Button>
           <p className="text-xs text-muted-foreground">Connecting asks your wallet to switch to Arc and sign a one-time message. It never asks for a private key and moves no funds.</p>
         </CardContent>

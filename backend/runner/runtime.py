@@ -14,8 +14,10 @@ from app.chains.arc.market_data import UnavailableArcMarketData
 from app.chains.arc.market_data import BitqueryArcMarketData
 from app.chains.arc.rpc_market_data import ArcRpcMarketData
 from app.chains.arc.gecko_market_data import GeckoTerminalArcMarketData
+from app.chains.arc.dexscreener_market_data import DexScreenerArcMarketData
 from app.chains.arc.uniswap_v4_rpc import ArcUniswapV4RpcMarketData
 from app.integrations.geckoterminal import GeckoTerminalClient
+from app.integrations.dexscreener import DexScreenerClient
 from app.market_data.registry import MarketDataRegistry
 from app.chains.arc.uniswap import UniswapArcAdapter
 from app.integrations.bitquery import BitqueryClient
@@ -23,7 +25,7 @@ from app.chains.base import MarketDataProvider
 from app.chains.demo import DemoMarketData
 from app.chains.evm import EvmRpcClient
 from app.core.clock import utcnow
-from app.core.errors import DataUnavailable
+from app.core.errors import DataUnavailable, IntegrationNotVerified
 from app.core.types import AIMode, TradingMode
 from app.domain.runner_protocol import (Command, ConfigBundle, EventBatch, Heartbeat, LiveStatus, RunnerEvent)
 from app.events.bus import AuditSink, Event, EventBus, EventType as E
@@ -77,6 +79,7 @@ class RunnerRuntime:
         self.wallet: WalletProvider | None = build_wallet_provider(settings) if wallet is _UNSET else wallet  # type: ignore[assignment]
         self._bitquery = None
         self._gecko = None
+        self._dexscreener = None
         self._market_registry = None
         self._rpc = None
         self._uniswap = None
@@ -143,12 +146,24 @@ class RunnerRuntime:
             key = settings.geckoterminal_api_key.get_secret_value() if settings.geckoterminal_api_key else None
             self._gecko = GeckoTerminalClient(settings.geckoterminal_base_url, settings.geckoterminal_network, timeout_s=settings.market_data_timeout_s, api_key=key)
             providers.append(("geckoterminal", GeckoTerminalArcMarketData(self._gecko, max_tokens=settings.market_data_max_tokens, cache_s=settings.market_data_cache_s)))
+        if "dexscreener" in wanted:
+            self._dexscreener = DexScreenerClient(timeout_s=settings.market_data_timeout_s)
+            providers.append(("dexscreener", DexScreenerArcMarketData(self._dexscreener, chain_id=settings.dexscreener_chain_id, cache_s=settings.dexscreener_cache_s)))
         if "bitquery" in wanted and settings.bitquery_api_key:
             self._bitquery = BitqueryClient(settings.bitquery_api_key.get_secret_value(), settings.bitquery_endpoint, timeout_s=settings.market_data_timeout_s)
             providers.append(("bitquery", BitqueryArcMarketData(self._bitquery, max_tokens=settings.market_data_max_tokens)))
         if not providers:
             return UnavailableArcMarketData()
-        self._market_registry = MarketDataRegistry(providers, failure_threshold=settings.market_data_failure_threshold, cooldown_s=settings.market_data_cooldown_s)
+        essential = [x.strip().lower() for x in settings.market_data_essential_providers.split(",") if x.strip()]
+        # Health survives across cloud-worker cycles (a fresh RunnerRuntime/registry
+        # is built every cycle there — see runner/cloud_worker.py) by round-tripping
+        # circuit-breaker state through the durable local store instead of starting
+        # every optional provider's failure count back at zero each time.
+        saved_health = self.store.kv_get("market_data_health") or {}
+        self._market_registry = MarketDataRegistry(
+            providers, failure_threshold=settings.market_data_failure_threshold, cooldown_s=settings.market_data_cooldown_s,
+            essential=essential, initial_health=saved_health, on_health_change=lambda h: self.store.kv_set("market_data_health", h),
+        )
         return self._market_registry
 
     async def aclose(self) -> None:
@@ -351,9 +366,9 @@ class RunnerRuntime:
             status, detail = "DONE", "already executed"
         else:
             try:
-                if self.engine is None or self.portfolio is None:
-                    raise RuntimeError("no active engine (LIVE blocked or not configured)")
                 if cmd.type == "CLOSE_POSITION":
+                    if self.engine is None or self.portfolio is None:
+                        raise RuntimeError("no active engine (LIVE blocked or not configured)")
                     pid = str(cmd.payload.get("position_id", ""))
                     pos = self.portfolio.positions.get(pid)
                     if pos is None or not pos.is_open:
@@ -361,10 +376,19 @@ class RunnerRuntime:
                     else:
                         await self.engine.monitor_positions(manual_close={pid})
                         detail = "close executed" if not pos.is_open else "close attempted; position still open (will retry on next request)"
-                else:
+                    status = "DONE"
+                elif cmd.type == "CLOSE_ALL":
+                    if self.engine is None or self.portfolio is None:
+                        raise RuntimeError("no active engine (LIVE blocked or not configured)")
                     await self.engine.monitor_positions(emergency_close=True)
                     detail = f"close-all executed; {self.portfolio.open_count()} still open"
-                status = "DONE"
+                    status = "DONE"
+                elif cmd.type == "WITHDRAW_USDC":
+                    status, detail = await self._handle_withdraw(cmd.payload)
+                else:
+                    # An unrecognized command type must never silently fall through
+                    # to an emergency close-all — fail it explicitly instead.
+                    status, detail = "FAILED", f"unknown command type: {cmd.type}"
             except Exception as e:  # noqa: BLE001
                 status, detail = "FAILED", f"{type(e).__name__}: {e}"
             self.store.mark_command(cmd.id)
@@ -372,6 +396,34 @@ class RunnerRuntime:
             await self.client.ack_command(cmd.id, status, detail)
         except ControlPlaneError:
             pass  # server keeps it PENDING; we re-ack from the dedupe table next heartbeat
+
+    async def _handle_withdraw(self, payload: dict) -> tuple[str, str]:
+        """Move USDC out of the runner's own wallet to a user-specified address.
+
+        Kept as its own fail-closed path (mirrors LIVE trading's own gates,
+        see live_status()/apply_bundle()) since moving funds out is strictly
+        more sensitive than a trade within an already-approved policy: it is
+        never subject to risk-limit sizing, only to the wallet provider's own
+        withdraw gate (ARC_RUNNER_PRIVY_ALLOW_WITHDRAW).
+        """
+        if self.wallet is None:
+            return "FAILED", "no wallet provider configured on this runner"
+        to = str(payload.get("to") or "")
+        amount = payload.get("amount_usdc")
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return "FAILED", "amount_usdc must be a number"
+        if amount <= 0:
+            return "FAILED", "amount_usdc must be greater than zero"
+        withdraw = getattr(self.wallet, "withdraw_usdc", None)
+        if withdraw is None:
+            return "FAILED", f"{self.wallet.name} does not support withdrawals"
+        try:
+            tx_hash = await withdraw(to, amount)
+        except IntegrationNotVerified as e:
+            return "FAILED", f"withdrawal blocked: {e}"
+        return "DONE", f"withdrawal submitted: {tx_hash}"
 
     # ------------------------------------------------------------ events
     async def upload_once(self, max_batches: int = 20) -> int:

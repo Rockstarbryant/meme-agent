@@ -14,7 +14,7 @@ from app.core.types import TradingMode
 
 DesiredState = Literal["RUNNING", "PAUSED", "STOPPED"]
 ReportedState = Literal["STARTING", "RUNNING", "PAUSED", "STOPPED", "LIVE_BLOCKED"]
-CommandType = Literal["CLOSE_POSITION", "CLOSE_ALL"]
+CommandType = Literal["CLOSE_POSITION", "CLOSE_ALL", "WITHDRAW_USDC"]
 
 
 class PairRequest(BaseModel):

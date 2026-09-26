@@ -7,7 +7,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.core.errors import PolicyViolationError
+from app.core.errors import IntegrationNotVerified, PolicyViolationError
 from app.core.types import WalletCapability
 from app.domain.trade import UnsignedTransaction
 
@@ -166,6 +166,15 @@ class WalletProvider(ABC):
 
     async def live_readiness(self) -> LiveReadiness:
         return LiveReadiness(available=False, provider=self.name, reasons=[f"{self.name}: unattended LIVE execution is not supported"])
+
+    async def withdraw_usdc(self, to_address: str, amount_usdc: float) -> str:
+        """Move USDC out of this wallet to a user-controlled address.
+
+        Fail-closed by default like every other sensitive capability in this
+        project (LIVE trading, autonomous delegation): a provider must
+        explicitly implement and gate this. Returns the chain tx hash.
+        """
+        raise IntegrationNotVerified(self.name, "withdrawals are not supported by this wallet provider")
 
     async def resolve_tx_hash(self, provider_tx_id: str) -> str | None:
         """Providers that return their own transaction id (not a chain hash) resolve it here; None = not known yet."""

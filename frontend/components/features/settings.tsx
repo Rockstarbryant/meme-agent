@@ -13,9 +13,52 @@ import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
 import type { AgentStatus, ChainInfo, LaunchpadInfo } from "@/types/api";
 
-interface ServerSettings { mode: "PAPER" | "LIVE"; live_trading_enabled_on_server: boolean; ai: { provider: string | null; model: string | null; note: string }; market_data: string; notifications: { implemented: boolean } }
+interface ServerSettings { mode: "PAPER" | "LIVE"; live_trading_enabled_on_server: boolean; ai: { provider: string | null; model: string | null; note: string }; market_data: string; notifications: { implemented: boolean; enabled: boolean; webhook_configured: boolean } }
+interface NotificationsConfig { enabled: boolean; webhook_url: string | null; events: string[]; available_events: string[] }
 interface Blacklist { tokens: string[]; creators: string[]; launchpads: string[] }
 const KINDS = [["token", "tokens"], ["creator", "creators"], ["launchpad", "launchpads"]] as const;
+
+function NotificationsCard() {
+  const n = useApi<NotificationsConfig>("/notifications");
+  const [enabled, setEnabled] = useState(false);
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [events, setEvents] = useState<string[]>([]);
+  const [error, setError] = useState<ApiError | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  if (n.data && !loaded) {
+    setEnabled(n.data.enabled); setWebhookUrl(n.data.webhook_url ?? ""); setEvents(n.data.events); setLoaded(true);
+  }
+  const toggleEvent = (e: string) => setEvents((cur) => (cur.includes(e) ? cur.filter((x) => x !== e) : [...cur, e]));
+  async function save() {
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      await api("/notifications", { method: "PUT", body: { enabled, webhook_url: webhookUrl.trim() || null, events } });
+      await n.reload();
+      setNotice("Notification settings saved.");
+    } catch (e) { setError(toApiError(e)); } finally { setBusy(false); }
+  }
+  if (n.loading && !n.data) return <Card><CardHeader><CardTitle>Notifications</CardTitle></CardHeader><CardContent><Loading /></CardContent></Card>;
+  return (
+    <Card><CardHeader><CardTitle>Notifications</CardTitle></CardHeader><CardContent className="space-y-3 text-sm">
+      {error && <ErrorState error={error} />}
+      {notice && <p className="text-xs text-emerald-600">{notice}</p>}
+      <label className="flex items-center gap-2"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Send a webhook POST for selected events</label>
+      <Input placeholder="https://your-webhook-endpoint.example/hook" value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} />
+      <div className="flex flex-wrap gap-2">
+        {(n.data?.available_events ?? []).map((e) => (
+          <button key={e} type="button" onClick={() => toggleEvent(e)}
+            className={`rounded-full border px-2 py-1 text-xs ${events.includes(e) ? "border-primary bg-primary/10" : "border-muted text-muted-foreground"}`}>
+            {e}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground">Delivery is best-effort and synchronous (5s timeout per event) — a slow endpoint never blocks or drops runner activity, it just skips that notification.</p>
+      <Button onClick={() => void save()} disabled={busy}>Save notification settings</Button>
+    </CardContent></Card>
+  );
+}
 
 function BlacklistCard() {
   const bl = useApi<Blacklist>("/controls/blacklist");
@@ -67,7 +110,7 @@ export function SettingsView() {
       <Card><CardHeader><CardTitle>AI provider</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
         <p>{s.data.ai.provider ? `${s.data.ai.provider} / ${s.data.ai.model}` : "None configured (PAPER uses deterministic entries; LIVE requires AI)"}</p><p className="text-xs text-muted-foreground">{s.data.ai.note}</p></CardContent></Card>
       <Card><CardHeader><CardTitle>Market data</CardTitle></CardHeader><CardContent className="text-sm">{s.data.market_data}</CardContent></Card>
-      <Card><CardHeader><CardTitle>Notifications</CardTitle></CardHeader><CardContent className="text-sm text-muted-foreground">Not implemented yet.</CardContent></Card>
+      <NotificationsCard />
       <Card><CardHeader><CardTitle>Kill switch</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
         {agent.data ? <EmergencyControl status={agent.data} onDone={() => agent.reload()} /> : <Loading />}
         <p className="text-xs text-muted-foreground">Emergency stop blocks all new entries and survives restarts. You must disable it explicitly.</p></CardContent></Card>

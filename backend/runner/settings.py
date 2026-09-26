@@ -52,7 +52,12 @@ class RunnerSettings(BaseSettings):
     circle_wallet_address: str = ""
 
     data_source: Literal["demo", "arc"] = "arc"  # demo = synthetic, labelled, PAPER only
-    market_data_providers: str = Field("arc_rpc,uniswap_v4_rpc,geckoterminal", validation_alias=_alias("MARKET_DATA_PROVIDERS"))
+    market_data_providers: str = Field("arc_rpc,uniswap_v4_rpc,geckoterminal,dexscreener", validation_alias=_alias("MARKET_DATA_PROVIDERS"))
+    # arc_rpc and uniswap_v4_rpc are on-chain and always free; geckoterminal and
+    # dexscreener are free public APIs used only for enrichment. bitquery is
+    # optional and NOT in the default list — add it explicitly only if you have
+    # a working subscription; see docs/market-data-failover.md.
+    market_data_essential_providers: str = Field("arc_rpc,uniswap_v4_rpc", validation_alias=_alias("MARKET_DATA_ESSENTIAL_PROVIDERS"))
     market_data_max_tokens: int = Field(10, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))
     market_data_cache_s: float = Field(60.0, validation_alias=_alias("MARKET_DATA_CACHE_S"))
     market_data_timeout_s: float = Field(6.0, validation_alias=_alias("MARKET_DATA_TIMEOUT_S"))
@@ -64,6 +69,11 @@ class RunnerSettings(BaseSettings):
     geckoterminal_base_url: str = Field("https://api.geckoterminal.com/api/v2", validation_alias=_alias("GECKOTERMINAL_BASE_URL"))
     geckoterminal_network: str = Field("arc", validation_alias=_alias("GECKOTERMINAL_NETWORK"))
     geckoterminal_api_key: SecretStr | None = Field(None, validation_alias=_alias("GECKOTERMINAL_API_KEY"))
+    # Free, no-API-key enrichment fallback (https://docs.dexscreener.com/api/reference).
+    # Coverage of a brand-new chain like Arc depends on DexScreener's own indexers;
+    # if it isn't indexed yet this provider simply contributes nothing (see its docstring).
+    dexscreener_chain_id: str = Field("arc", validation_alias=_alias("DEXSCREENER_CHAIN_ID"))
+    dexscreener_cache_s: float = Field(60.0, validation_alias=_alias("DEXSCREENER_CACHE_S"))
     arc_network: Literal["mainnet", "testnet"] = "mainnet"
     arc_rpc_url: str | None = None
     arc_rpc_fallback_urls: str = ""
@@ -85,6 +95,9 @@ class RunnerSettings(BaseSettings):
     privy_api_url: str = Field("https://api.privy.io/v1", validation_alias=_alias("PRIVY_API_URL"))
     privy_caip2: str = Field("eip155:5042", validation_alias=_alias("PRIVY_CAIP2"))  # Arc mainnet
     privy_allow_execute: bool = Field(False, validation_alias=_alias("PRIVY_ALLOW_EXECUTE"))
+    # Withdrawing user funds out of the Privy-managed wallet is a distinct, separately
+    # gated capability from trade execution: fail-closed by default like everything else.
+    privy_allow_withdraw: bool = Field(False, validation_alias=_alias("PRIVY_ALLOW_WITHDRAW"))
 
     max_offline_s: float = 60.0  # dead-man switch: no control-plane contact this long => no NEW entries
     poll_wait_s: int = 20

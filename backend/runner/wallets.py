@@ -404,6 +404,7 @@ class PrivyWalletProvider(WalletProvider):
         address: str = "",
         rpc_urls: list[str] | None = None,
         allow_execute: bool = False,
+        allow_withdraw: bool = False,
     ):
         self.client = client
         self.wallet_id = wallet_id
@@ -412,6 +413,7 @@ class PrivyWalletProvider(WalletProvider):
         self.address = address
         self.rpc_urls = rpc_urls or []
         self.allow_execute = allow_execute
+        self.allow_withdraw = allow_withdraw
         self._policy = None
         self._address_loaded = bool(address)
 
@@ -503,6 +505,36 @@ class PrivyWalletProvider(WalletProvider):
             return SubmissionResult(status="SUBMITTED", provider_tx_id=str(provider_tx_id))
         raise IntegrationNotVerified("Privy eth_sendTransaction", f"no hash in response: {body}")
 
+    async def withdraw_usdc(self, to_address: str, amount_usdc: float) -> str:
+        if not self.allow_withdraw:
+            raise IntegrationNotVerified(
+                "Privy withdraw",
+                "set ARC_RUNNER_PRIVY_ALLOW_WITHDRAW=true only after you have verified the destination "
+                "address and reviewed the wallet's funding source; this moves real USDC out of custody",
+            )
+        to = to_address.lower().strip()
+        if not re.fullmatch(r"0x[0-9a-f]{40}", to):
+            raise IntegrationNotVerified("Privy withdraw", f"invalid destination address: {to_address!r}")
+        addr = await self._ensure_address()
+        if to == addr.lower():
+            raise IntegrationNotVerified("Privy withdraw", "destination address is the wallet's own address")
+        units = int(round(amount_usdc * 10 ** USDC_ERC20_DECIMALS))
+        if units <= 0:
+            raise IntegrationNotVerified("Privy withdraw", "amount_usdc must be greater than zero")
+        # ERC-20 transfer(address,uint256) — same manual-encoding style already
+        # used for the balanceOf call in get_usdc_balance() above.
+        data = "0xa9059cbb" + to.removeprefix("0x").rjust(64, "0") + hex(units)[2:].rjust(64, "0")
+        idem = hashlib.sha256(f"withdraw:{self.wallet_id}:{to}:{units}".encode()).hexdigest()[:32]
+        body = await self.client.eth_send_transaction(
+            self.wallet_id, caip2=self.caip2, to=USDC_ERC20_ADDRESS, data=data, value=0,
+            chain_id=self.chain_id, idempotency_key=idem,
+        )
+        payload = body.get("data") if isinstance(body.get("data"), dict) else body
+        tx_hash = (payload or {}).get("hash") or (payload or {}).get("transaction_hash") or body.get("hash")
+        if not tx_hash:
+            raise IntegrationNotVerified("Privy withdraw", f"no transaction hash in response: {body}")
+        return str(tx_hash)
+
     async def live_readiness(self) -> LiveReadiness:
         reasons: list[str] = []
         if not self.wallet_id:
@@ -552,6 +584,7 @@ def _build_privy(s: RunnerSettings) -> WalletProvider | None:
         address=s.privy_wallet_address or "",
         rpc_urls=s.rpc_urls,
         allow_execute=s.privy_allow_execute,
+        allow_withdraw=s.privy_allow_withdraw,
     )
 
 

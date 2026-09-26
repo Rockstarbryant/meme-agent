@@ -9,6 +9,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models as M
@@ -88,4 +89,29 @@ async def ingest(db: AsyncSession, hub: EventHub, runner: M.Runner, batch: Event
     for ev in streamed:
         hub.publish(runner.user_id, {"id": ev.id, "type": ev.type, "at": ev.at.isoformat(), "correlation_id": ev.correlation_id,
                                      "payload": {k: v for k, v in ev.payload.items() if k not in HEAVY}})
+    await _dispatch_webhook(db, runner.user_id, streamed)
     return EventAck(last_seq=last, accepted=accepted, skipped=skipped)
+
+
+async def _dispatch_webhook(db: AsyncSession, user_id: str, streamed: list[RunnerEvent]) -> None:
+    """Best-effort push of a user's own selected events to their configured webhook.
+
+    Settings UI: GET/PUT /notifications (routes_config.py). Delivery is
+    synchronous and best-effort (a slow/unreachable endpoint only delays this
+    event-batch response by its own short timeout — it never drops or retries
+    events, and a failure here must never affect ingestion, which has already
+    committed above).
+    """
+    cfg = await repo.get_setting(db, f"user:{user_id}:notifications")
+    if not cfg or not cfg.get("enabled") or not cfg.get("webhook_url"):
+        return
+    wanted = set(cfg.get("events") or [])
+    to_send = [ev for ev in streamed if not wanted or ev.type in wanted]
+    if not to_send:
+        return
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for ev in to_send:
+            try:
+                await client.post(cfg["webhook_url"], json={"type": ev.type, "at": ev.at.isoformat(), "payload": ev.payload})
+            except Exception:  # noqa: BLE001 - never let a bad webhook affect the runner
+                log.warning("notification webhook delivery failed for user %s (%s)", user_id, ev.type)

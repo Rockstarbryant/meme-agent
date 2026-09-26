@@ -168,9 +168,54 @@ async def settings(request: Request, user: M.User = Depends(current_user), db: A
     r = await control.active_runner(db, user.id)
     st = (r.status or {}) if r else {}
     ai = st.get("ai") or {}
+    notif = await repo.get_setting(db, f"user:{user.id}:notifications") or {}
     return {"mode": user.mode, "paper_trading_enabled": s.paper_trading_enabled, "live_trading_enabled_on_server": s.live_trading_enabled,
             "chains": [{"id": "arc", "chain_id": s.arc_chain_id, "rpc_configured": bool(s.arc_rpc_urls)}],
             "ai": {"provider": ai.get("provider"), "model": ai.get("model"),
                    "note": "AI provider, model and API keys live on your Local Runner. This server never holds them."},
             "market_data": st.get("data_source") or "no runner connected: market data is configured on your Local Runner",
-            "notifications": {"implemented": False}}
+            "notifications": {"implemented": True, "enabled": bool(notif.get("enabled")), "webhook_configured": bool(notif.get("webhook_url"))}}
+
+
+# Events a user can subscribe a webhook to — a curated subset of app.services.ingest.STREAMED
+# (the events already pushed to the live UI), since those are the ones a person would plausibly
+# want pushed to Slack/Discord/etc. too.
+NOTIFICATION_EVENTS = [
+    "POSITION_OPENED", "POSITION_CLOSED", "ORDER_FILLED", "ORDER_FAILED",
+    "TAKE_PROFIT_TRIGGERED", "STOP_LOSS_TRIGGERED", "TRAILING_STOP_TRIGGERED",
+    "EMERGENCY_STOP_CHANGED", "RISK_ALERT", "AGENT_ERROR",
+]
+
+
+class NotificationsIn(BaseModel):
+    enabled: bool = False
+    webhook_url: str | None = None
+    events: list[str] = []
+
+    @model_validator(mode="after")
+    def _sane(self) -> "NotificationsIn":
+        if self.enabled:
+            if not self.webhook_url:
+                raise ValueError("webhook_url is required when enabled=true")
+            if not (self.webhook_url.startswith("https://") or self.webhook_url.startswith("http://")):
+                raise ValueError("webhook_url must start with http:// or https://")
+        unknown = set(self.events) - set(NOTIFICATION_EVENTS)
+        if unknown:
+            raise ValueError(f"unknown event type(s): {sorted(unknown)}")
+        return self
+
+
+@router.get("/notifications")
+async def get_notifications(user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    cfg = await repo.get_setting(db, f"user:{user.id}:notifications") or {}
+    return {"enabled": bool(cfg.get("enabled")), "webhook_url": cfg.get("webhook_url"),
+            "events": cfg.get("events") or [], "available_events": NOTIFICATION_EVENTS}
+
+
+@router.put("/notifications")
+async def put_notifications(body: NotificationsIn, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    data = body.model_dump()
+    await repo.put_setting(db, f"user:{user.id}:notifications", data, user.email)
+    await repo.audit(db, user.id, user.email, "NOTIFICATIONS_UPDATED", enabled=body.enabled, events=body.events)
+    await db.commit()
+    return {**data, "available_events": NOTIFICATION_EVENTS}

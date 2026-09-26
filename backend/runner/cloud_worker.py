@@ -71,6 +71,9 @@ class PlatformClient:
     async def post_events(self, user_id: str, batch: EventBatch) -> EventAck:
         return EventAck(**await self._req("POST", f"/platform/tenants/{user_id}/events", json=batch.model_dump(mode="json")))
 
+    async def ack_command(self, user_id: str, cid: str, status: str, detail: str = "") -> None:
+        await self._req("POST", f"/platform/tenants/{user_id}/commands/{cid}/ack", json={"status": status, "detail": detail})
+
     async def get_state(self, user_id: str, mode: str) -> dict:
         return await self._req("GET", f"/platform/tenants/{user_id}/state", params={"mode": mode})
 
@@ -103,9 +106,11 @@ class CloudControlPlaneClient:
         return await self.platform.post_events(self.user_id, batch)
 
     async def ack_command(self, cid: str, status: str, detail: str = "") -> None:
-        # Platform shared-worker commands are acknowledged by the platform API in
-        # a future command endpoint; current control plane returns none to cloud tenants.
-        return None
+        # Commands queued via /agent/close/{id}, /agent/close-all, and
+        # /wallet/cloud/withdraw are delivered to cloud tenants through the
+        # normal heartbeat response (see tenant_heartbeat in routes_platform.py)
+        # and acknowledged here the same way the self-hosted runner does.
+        await self.platform.ack_command(self.user_id, cid, status, detail)
 
 
 class CloudWorker:
@@ -125,7 +130,7 @@ class CloudWorker:
             raise RuntimeError("Privy credentials missing on worker")
         return PrivyWalletProvider(self._privy, privy_wallet_id, caip2=self.s.privy_caip2,
                                    chain_id=self.s.network.chain_id, address=address, rpc_urls=self.s.rpc_urls,
-                                   allow_execute=self.s.privy_allow_execute)
+                                   allow_execute=self.s.privy_allow_execute, allow_withdraw=self.s.privy_allow_withdraw)
 
     def _tenant_settings(self, tenant: dict) -> RunnerSettings:
         # No mutable trading state is shared between tenants.
@@ -161,6 +166,17 @@ class CloudWorker:
             s = self._tenant_settings(tenant)
             wallet = self._wallet_for(tenant["privy_wallet_id"], tenant["wallet_address"])
             rt = RunnerRuntime(s, CloudControlPlaneClient(self.client, user_id), LocalStore(s.state_dir / "runtime.sqlite"), wallet=wallet)
+            # This is a fresh, ephemeral RunnerRuntime built for exactly one cycle —
+            # unlike a long-lived local runner, it has no heartbeat history yet.
+            # RunnerRuntime.recompute() treats "no prior contact" as "control plane
+            # unreachable" (a dead-man switch, correct for a runner that's been
+            # silent for a while), which would otherwise make apply_bundle() below
+            # report PAUSED for this cycle even though we are, right now, mid
+            # conversation with the control plane (we just fetched `bundle` from
+            # it). Seed contact here so recompute() reflects the real desired
+            # state instead of momentarily reporting PAUSED before the first
+            # heartbeat gets a chance to correct it.
+            rt.last_contact = rt.mono()
             # Pull authoritative state before constructing the first trading cycle.
             await self._restore_state(rt, user_id, bundle.mode)
             await rt.apply_bundle(bundle)
