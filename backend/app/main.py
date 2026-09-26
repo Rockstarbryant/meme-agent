@@ -81,8 +81,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.exception("unhandled error on %s", request.url.path)
         return JSONResponse({"detail": "internal error"}, status_code=500)  # never leak internals
 
-    for r in (routes_auth_system.router, routes_runner.user_router, routes_runner.runner_router, routes_wallet.router, routes_agent.router, routes_trading.router,
-              routes_config.router, routes_stream.router, routes_platform.router):
+    # Explicit list so a missing/misnamed router fails with a clear message at boot
+    # (AttributeError: module has no attribute 'router' usually means a circular import
+    # or a deploy that shipped an incomplete routes_*.py).
+    route_modules = [
+        ("routes_auth_system", routes_auth_system, "router"),
+        ("routes_runner", routes_runner, "user_router"),
+        ("routes_runner", routes_runner, "runner_router"),
+        ("routes_wallet", routes_wallet, "router"),
+        ("routes_agent", routes_agent, "router"),
+        ("routes_trading", routes_trading, "router"),
+        ("routes_config", routes_config, "router"),
+        ("routes_stream", routes_stream, "router"),
+        ("routes_platform", routes_platform, "router"),
+    ]
+    for mod_name, mod, attr in route_modules:
+        r = getattr(mod, attr, None)
+        if r is None:
+            raise RuntimeError(
+                f"app.api.{mod_name} has no attribute {attr!r}. "
+                "Check for a circular import or that the module defines "
+                f"{attr} = APIRouter(...)."
+            )
         app.include_router(r)
     return app
-
