@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from eth_abi import decode
 
@@ -12,8 +12,6 @@ from app.chains.arc.network import USDC_ERC20_ADDRESS, USDC_ERC20_DECIMALS
 from app.core.errors import DataUnavailable
 from app.domain.market import ContractInfo, MarketState
 
-# Uniswap v4 core events. These topic0 values are the canonical v4 IPoolManager
-# events; Arc uses the same PoolManager implementation at the Arc deployment.
 POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951"
 INITIALIZE_TOPIC = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
 SWAP_TOPIC = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"
@@ -30,25 +28,22 @@ def _addr(topic: str | None) -> str | None:
     return "0x" + topic[-40:].lower()
 
 
-def _signed(value: int, bits: int) -> int:
-    if value >= 1 << (bits - 1):
-        value -= 1 << bits
-    return value
-
-
 def _time(ts: int) -> datetime | None:
     return datetime.fromtimestamp(ts, timezone.utc) if ts else None
 
 
 class ArcUniswapV4RpcMarketData(MarketDataProvider):
-    """Free Arc-native Uniswap v4 market indexer for USDC pools.
+    """Free Arc-native Uniswap v4 indexer for USDC pools.
 
-    It reads Initialize + Swap logs directly from Arc RPC. GeckoTerminal can
-    enrich liquidity/market-cap fields, while this provider supplies fresh
-    on-chain swap flow without a paid indexer.
+    Reads Initialize + Swap logs directly from Arc RPC. Both scans are
+    incremental (persisted watermarks) so each 30s cycle only walks the new
+    blocks — necessary on Alchemy Free tier where ``eth_getLogs`` is capped at
+    a 10-block range. See ``ArcRpcMarketData`` for the watermark rationale.
     """
 
-    def __init__(self, rpc: EvmRpcClient, *, max_tokens: int = 10, scan_blocks: int = 20000, swap_scan_blocks: int = 1800, cache_s: float = 20.0):
+    def __init__(self, rpc: EvmRpcClient, *, max_tokens: int = 10, scan_blocks: int = 20000, swap_scan_blocks: int = 1800, cache_s: float = 20.0,
+                 state_get: Callable[[str], object] | None = None,
+                 state_set: Callable[[str, object], None] | None = None):
         self.rpc = rpc
         self.max_tokens = max(1, max_tokens)
         self.scan_blocks = max(100, scan_blocks)
@@ -57,12 +52,39 @@ class ArcUniswapV4RpcMarketData(MarketDataProvider):
         self._pools: dict[str, dict] = {}
         self._last_pool_scan = 0.0
         self._state_cache: dict[str, tuple[float, MarketState]] = {}
+        self._state_get = state_get
+        self._state_set = state_set
+        self._watermarks: dict[str, int] = {}
+
+    def _get_watermark(self, key: str) -> int | None:
+        if key in self._watermarks:
+            return self._watermarks[key]
+        if self._state_get is not None:
+            v = self._state_get(key)
+            if isinstance(v, int) and v >= 0:
+                self._watermarks[key] = v
+                return v
+        return None
+
+    def _set_watermark(self, key: str, block: int) -> None:
+        self._watermarks[key] = block
+        if self._state_set is not None:
+            try:
+                self._state_set(key, block)
+            except Exception:
+                pass
 
     async def _scan_pools(self) -> None:
         if time.monotonic() - self._last_pool_scan < self.cache_s and self._pools:
             return
         latest = _i(await self.rpc.call("eth_blockNumber"))
         start = max(0, latest - self.scan_blocks)
+        last = self._get_watermark("pool_scan")
+        if last is not None:
+            start = max(start, last + 1)
+        if start > latest:
+            self._last_pool_scan = time.monotonic()
+            return
         usdc_topic = "0x" + "0" * 24 + USDC.removeprefix("0x")
         rows: list[dict] = []
         for topics in (
@@ -70,17 +92,14 @@ class ArcUniswapV4RpcMarketData(MarketDataProvider):
             [INITIALIZE_TOPIC, usdc_topic, None],
         ):
             try:
-                # Route through get_logs() so a range-too-large refusal narrows
-                # the window instead of repeating an identical 400 every cycle.
                 got = await self.rpc.get_logs(
-                    address=POOL_MANAGER,
-                    topics=topics,
-                    from_block=start,
-                    to_block=latest,
+                    address=POOL_MANAGER, topics=topics,
+                    from_block=start, to_block=latest,
                 ) or []
                 rows.extend(got)
             except Exception as exc:
                 raise DataUnavailable(f"Arc Uniswap v4 Initialize logs unavailable: {type(exc).__name__}") from exc
+        self._set_watermark("pool_scan", latest)
         for row in rows:
             topics = row.get("topics") or []
             if len(topics) < 3:
@@ -115,21 +134,24 @@ class ArcUniswapV4RpcMarketData(MarketDataProvider):
             raise DataUnavailable(f"no Arc Uniswap v4 USDC pool found for {token}")
         latest = _i(await self.rpc.call("eth_blockNumber"))
         start = max(pool["block"], latest - self.swap_scan_blocks)
+        wm_key = f"swap_scan:{pool['pool_id']}"
+        last = self._get_watermark(wm_key)
+        if last is not None:
+            start = max(start, last + 1)
+        if start > latest:
+            raise DataUnavailable(f"no recent swaps for Arc pool {pool['pool_id']}")
         try:
             rows = await self.rpc.get_logs(
-                address=POOL_MANAGER,
-                topics=[SWAP_TOPIC, pool["pool_id"]],
-                from_block=start,
-                to_block=latest,
+                address=POOL_MANAGER, topics=[SWAP_TOPIC, pool["pool_id"]],
+                from_block=start, to_block=latest,
             ) or []
+            self._set_watermark(wm_key, latest)
         except Exception as exc:
             raise DataUnavailable(f"Arc Uniswap v4 Swap logs unavailable: {type(exc).__name__}") from exc
         if not rows:
             raise DataUnavailable(f"no recent swaps for Arc pool {pool['pool_id']}")
         now = datetime.now(timezone.utc)
         prices: list[tuple[datetime, float]] = []
-        buys = sells = 0
-        buy_usd = sell_usd = 0.0
         buckets = {60: [0.0, 0.0, 0, 0], 300: [0.0, 0.0, 0, 0], 900: [0.0, 0.0, 0, 0]}
         token_decimals = 18
         try:
@@ -138,9 +160,8 @@ class ArcUniswapV4RpcMarketData(MarketDataProvider):
         except Exception:
             pass
         for row in rows[-250:]:
-            topics = row.get("topics") or []
             data = row.get("data") or "0x"
-            if len(topics) < 2 or len(data) < 2 + 32 * 6:
+            if len(data) < 2 + 32 * 6:
                 continue
             try:
                 amount0, amount1, sqrt_price, liquidity, tick, fee = decode(
@@ -160,13 +181,6 @@ class ArcUniswapV4RpcMarketData(MarketDataProvider):
             token_delta = int(amount1 if pool["currency0"] == USDC else amount0)
             quote_delta = int(amount0 if pool["currency0"] == USDC else amount1)
             quote_usd = abs(quote_delta) / 10 ** USDC_ERC20_DECIMALS
-            # PoolManager emits the pool balance delta. Positive token delta means
-            # the pool received tokens (the trader sold); negative means the
-            # trader received tokens (the trader bought).
-            if token_delta < 0:
-                buys += 1; buy_usd += quote_usd
-            elif token_delta > 0:
-                sells += 1; sell_usd += quote_usd
             for window, bucket in buckets.items():
                 if age <= window:
                     bucket[2] += 1 if token_delta < 0 else 0

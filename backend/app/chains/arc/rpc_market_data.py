@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Callable
 
 from app.chains.base import MarketDataProvider
 from app.chains.arc.market_data import CONTRACT_TO_LAUNCHPAD, LAUNCHPADS
@@ -41,13 +42,21 @@ def _decode_text(raw: str | None) -> str | None:
 class ArcRpcMarketData(MarketDataProvider):
     """Free Arc-native discovery/metadata provider.
 
-    It uses only Arc JSON-RPC. Market price/liquidity/flow enrichment is left to
-    another provider (normally GeckoTerminal) because Arc is currently Uniswap-v4
-    centric and reproducing a complete indexed DEX dataset from raw logs is a
-    separate indexing job. Unknown market fields remain None; nothing is guessed.
+    Uses only Arc JSON-RPC. Market price/liquidity/flow enrichment is left to
+    another provider (normally GeckoTerminal). Unknown fields stay None.
+
+    Incremental scanning: each launchpad contract carries a persisted watermark
+    (the last block successfully scanned through). A 30s cycle on Arc only walks
+    the ~15 new blocks instead of re-scanning the full catch-up window, which is
+    what makes this viable on Alchemy's Free tier where ``eth_getLogs`` is
+    capped at a 10-block range. The watermark advances only on a clean scan, so
+    a transient RPC failure re-covers the same window next cycle rather than
+    silently skipping it.
     """
 
-    def __init__(self, rpc: EvmRpcClient, *, max_tokens: int = 20, scan_blocks: int = 43200, cache_s: float = 60.0):
+    def __init__(self, rpc: EvmRpcClient, *, max_tokens: int = 20, scan_blocks: int = 43200, cache_s: float = 60.0,
+                 state_get: Callable[[str], object] | None = None,
+                 state_set: Callable[[str, object], None] | None = None):
         self.rpc = rpc
         self.max_tokens = max(1, max_tokens)
         self.scan_blocks = max(100, scan_blocks)
@@ -55,13 +64,38 @@ class ArcRpcMarketData(MarketDataProvider):
         self._launch_meta: dict[str, dict] = {}
         self._cached_tokens: list[str] = []
         self._last_discovery = 0.0
+        self._state_get = state_get
+        self._state_set = state_set
+        self._watermarks: dict[str, int] = {}
+
+    def _wm_key(self, contract: str) -> str:
+        return f"last_scanned:{contract.lower()}"
+
+    def _get_watermark(self, contract: str) -> int | None:
+        c = contract.lower()
+        if c in self._watermarks:
+            return self._watermarks[c]
+        if self._state_get is not None:
+            v = self._state_get(self._wm_key(c))
+            if isinstance(v, int) and v >= 0:
+                self._watermarks[c] = v
+                return v
+        return None
+
+    def _set_watermark(self, contract: str, block: int) -> None:
+        c = contract.lower()
+        self._watermarks[c] = block
+        if self._state_set is not None:
+            try:
+                self._state_set(self._wm_key(c), block)
+            except Exception:
+                pass
 
     async def discover_tokens(self) -> list[str]:
         import time
         if self._cached_tokens and time.monotonic() - self._last_discovery < self.cache_s:
             return self._cached_tokens[: self.max_tokens]
         latest = _hex_int(await self.rpc.call("eth_blockNumber"))
-        start = max(0, latest - self.scan_blocks)
         seen: list[str] = []
         groups: list[tuple[str, str, int, str]] = []
         for name, cfg in LAUNCHPADS.items():
@@ -70,10 +104,15 @@ class ArcRpcMarketData(MarketDataProvider):
                     groups.append((contract, sig, int(cfg["topic_index"]), name))
         any_success = False
         for contract, sig, topic_index, launchpad in groups:
+            # start = max(initial catch-up window start, watermark + 1)
+            start = max(0, latest - self.scan_blocks)
+            last = self._get_watermark(contract)
+            if last is not None:
+                start = max(start, last + 1)
+            if start > latest:
+                any_success = True  # nothing new; not a failure
+                continue
             try:
-                # Route through EvmRpcClient.get_logs() so a "range too large"
-                # refusal is narrowed automatically instead of being retried
-                # identically and 400'ing every cycle (the Alchemy-on-Arc bug).
                 rows = await self.rpc.get_logs(
                     address=contract,
                     topics=[sig if sig.startswith("0x") else "0x" + sig],
@@ -81,7 +120,8 @@ class ArcRpcMarketData(MarketDataProvider):
                     to_block=latest,
                 ) or []
                 any_success = True
-            except Exception as exc:
+                self._set_watermark(contract, latest)
+            except Exception:
                 # One broken launchpad should not disable all other venues.
                 continue
             for row in rows:

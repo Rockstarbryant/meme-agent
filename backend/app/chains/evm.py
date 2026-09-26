@@ -55,7 +55,7 @@ class EvmRpcClient:
 
     def __init__(self, urls: list[str], timeout: float = 8.0, retries: int = 2,
                  transport: httpx.AsyncBaseTransport | None = None, backoff_s: float = 0.2,
-                 max_log_range: int = 2000, min_log_range: int = 50,
+                 max_log_range: int = 2000, min_log_range: int = 10,
                  on_range_cap: Callable[[int], None] | None = None,
                  initial_range_cap: int | None = None):
         self.urls, self.retries, self.backoff_s = urls, retries, backoff_s
