@@ -242,7 +242,21 @@ class RunnerRuntime:
         key = f"portfolio:{scope}:{mode.value}"
         saved = self.store.kv_get(key) or self.store.kv_get(f"portfolio:{mode.value}")  # backward compatible
         cash = (b.wallet_policy or {}).get("allocated_capital_usdc") or self.s.paper_starting_usdc
-        self.portfolio = PortfolioState.from_dict(saved) if saved else PortfolioState(cash, mode)
+        try:
+            cash = float(cash)
+        except (TypeError, ValueError):
+            cash = float(self.s.paper_starting_usdc)
+        if cash <= 0:
+            cash = float(self.s.paper_starting_usdc)
+        if saved:
+            pf = PortfolioState.from_dict(saved)
+            # Repair broken PAPER snapshots that were persisted with $0 cash and
+            # no open positions (UI shows Available USDC $0.00 and nothing can trade).
+            if mode == TradingMode.PAPER and pf.cash_usdc <= 0 and pf.open_count() == 0:
+                pf = PortfolioState(cash, mode)
+            self.portfolio = pf
+        else:
+            self.portfolio = PortfolioState(cash, mode)
         self.mode_eff = mode
         self._portfolio_key = key
 

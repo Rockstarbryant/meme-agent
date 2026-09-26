@@ -52,12 +52,12 @@ class RunnerSettings(BaseSettings):
     circle_wallet_address: str = ""
 
     data_source: Literal["demo", "arc"] = "arc"  # demo = synthetic, labelled, PAPER only
-    market_data_providers: str = Field("arc_rpc,uniswap_v4_rpc,geckoterminal,dexscreener", validation_alias=_alias("MARKET_DATA_PROVIDERS"))
+    market_data_providers: str = Field("geckoterminal,dexscreener,arc_rpc,uniswap_v4_rpc", validation_alias=_alias("MARKET_DATA_PROVIDERS"))
     # arc_rpc and uniswap_v4_rpc are on-chain and always free; geckoterminal and
     # dexscreener are free public APIs used only for enrichment. bitquery is
     # optional and NOT in the default list — add it explicitly only if you have
     # a working subscription; see docs/market-data-failover.md.
-    market_data_essential_providers: str = Field("arc_rpc,uniswap_v4_rpc", validation_alias=_alias("MARKET_DATA_ESSENTIAL_PROVIDERS"))
+    market_data_essential_providers: str = Field("geckoterminal,arc_rpc", validation_alias=_alias("MARKET_DATA_ESSENTIAL_PROVIDERS"))
     market_data_max_tokens: int = Field(10, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))
     market_data_cache_s: float = Field(60.0, validation_alias=_alias("MARKET_DATA_CACHE_S"))
     market_data_timeout_s: float = Field(6.0, validation_alias=_alias("MARKET_DATA_TIMEOUT_S"))

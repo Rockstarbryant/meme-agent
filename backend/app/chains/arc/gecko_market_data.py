@@ -76,6 +76,14 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         self._cache: dict[str, tuple[float, MarketState]] = {}
 
     async def discover_tokens(self) -> list[str]:
+        """Discover recently listed Arc tokens from GeckoTerminal new_pools.
+
+        GeckoTerminal's Arc payload does **not** put token addresses on
+        ``attributes.base_token_address`` / ``quote_token_address`` (those are
+        always null). Addresses live under ``relationships.*.data.id`` as
+        ``arc_0x…``. Prefer relationship parsing; fall back to attribute fields
+        for networks that still populate them.
+        """
         try:
             payload = await self.client.new_pools()
         except DataUnavailable:
@@ -83,15 +91,36 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
             raise
         tokens: list[str] = []
         seen: set[str] = set()
+        included = payload.get("included") or []
+        zero = "0x" + ("0" * 40)
+
+        def _add(address: str | None) -> bool:
+            if not address:
+                return False
+            addr = str(address).lower().strip()
+            if not addr.startswith("0x") or len(addr) < 42:
+                return False
+            if addr == zero or addr in seen:
+                return False
+            # Skip obvious non-ERC20 placeholders sometimes returned for native assets.
+            if addr.startswith("0x3600") and addr.count("0") > 30:
+                return False
+            seen.add(addr)
+            tokens.append(addr)
+            return True
+
         for item in payload.get("data") or []:
             attrs = _attr(item)
+            # 1) Relationship ids (Arc / current GeckoTerminal shape)
+            for relation in ("base_token", "quote_token"):
+                _add(_related_address(item, relation, included))
+                if len(tokens) >= self.max_tokens:
+                    return tokens
+            # 2) Attribute fields (other networks / older payload shape)
             for key in ("base_token_address", "quote_token_address"):
-                address = attrs.get(key)
-                if address and str(address).lower() not in seen:
-                    seen.add(str(address).lower())
-                    tokens.append(str(address).lower())
-                    if len(tokens) >= self.max_tokens:
-                        return tokens
+                _add(attrs.get(key))
+                if len(tokens) >= self.max_tokens:
+                    return tokens
         return tokens
 
     async def get_market_state(self, token_address: str) -> MarketState:
