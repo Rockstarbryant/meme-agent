@@ -66,21 +66,53 @@ class DexPaprikaClient:
     async def networks(self) -> list[dict]:
         return await self._get("/networks")
 
-    async def filter_pools(self, network: str, *, created_after: int | None = None, created_before: int | None = None,
-                           volume_24h_min: float | None = None, txns_24h_min: int | None = None,
-                           sort_by: str = "created_at", sort_dir: str = "desc",
-                           page: int = 1, limit: int = 50) -> dict:
-        """GET /networks/{network}/pools/filter — range queries on volume, transactions, creation date."""
-        params: dict[str, Any] = {"page": page, "limit": min(100, max(1, limit)), "sort_by": sort_by, "sort_dir": sort_dir}
-        if created_after is not None:
-            params["created_after"] = created_after
-        if created_before is not None:
-            params["created_before"] = created_before
-        if volume_24h_min is not None:
-            params["volume_24h_min"] = volume_24h_min
-        if txns_24h_min is not None:
-            params["txns_24h_min"] = txns_24h_min
-        return await self._get(f"/networks/{network}/pools/filter", params)
+          async def filter_pools(self, network: str, *, created_after: int | None = None, created_before: int | None = None,
+                       volume_24h_min: float | None = None, txns_24h_min: int | None = None,
+                       sort_by: str = "created_at", sort_dir: str = "desc",
+                       page: int = 1, limit: int = 50) -> dict:
+    """Discover pools on a network.
+
+    DexPaprika retired ``/networks/{network}/pools/filter`` in favor of
+    ``/networks/{network}/pools/search`` (they returned HTTP 410 with a
+    ``replacement`` pointing at the new path). The new endpoint's exact
+    parameter names aren't guaranteed to match the old ones, so this
+    method:
+      1. Tries the new ``/pools/search`` endpoint with the same params.
+      2. Falls back to ``/pools`` (top pools, ordered by volume) if
+         search returns 400/404/410.
+    Callers receive a dict with a ``data`` (or legacy ``pools``) key and
+    should not care which endpoint answered.
+    """
+    params: dict[str, Any] = {
+        "page": page,
+        "limit": min(100, max(1, limit)),
+        "sort_by": sort_by,
+        "sort_dir": sort_dir,
+    }
+    if created_after is not None:
+        params["created_after"] = created_after
+    if created_before is not None:
+        params["created_before"] = created_before
+    if volume_24h_min is not None:
+        params["volume_24h_min"] = volume_24h_min
+    if txns_24h_min is not None:
+        params["txns_24h_min"] = txns_24h_min
+
+    try:
+        return await self._get(f"/networks/{network}/pools/search", params)
+    except DataUnavailable as exc:
+        # 400/404/410 -> the search endpoint rejected our param set or
+        # was itself renamed. Fall through to the plain top-pools list,
+        # which we have confirmed works on the free tier.
+        if "HTTP 410" in str(exc) or "HTTP 404" in str(exc) or "HTTP 400" in str(exc):
+            fallback_params = {
+                "page": page,
+                "limit": min(100, max(1, limit)),
+                "order_by": "volume_usd",
+                "sort": "desc",
+            }
+            return await self._get(f"/networks/{network}/pools", fallback_params)
+        raise
 
     async def top_pools(self, network: str, *, limit: int = 20, order_by: str = "volume_usd", sort: str = "desc") -> dict:
         return await self._get(f"/networks/{network}/pools", {"page": 1, "limit": limit, "order_by": order_by, "sort": sort})
