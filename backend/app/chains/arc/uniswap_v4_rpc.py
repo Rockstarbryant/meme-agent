@@ -70,7 +70,14 @@ class ArcUniswapV4RpcMarketData(MarketDataProvider):
             [INITIALIZE_TOPIC, usdc_topic, None],
         ):
             try:
-                got = await self.rpc.call("eth_getLogs", [{"fromBlock": hex(start), "toBlock": "latest", "address": POOL_MANAGER, "topics": topics}]) or []
+                # Route through get_logs() so a range-too-large refusal narrows
+                # the window instead of repeating an identical 400 every cycle.
+                got = await self.rpc.get_logs(
+                    address=POOL_MANAGER,
+                    topics=topics,
+                    from_block=start,
+                    to_block=latest,
+                ) or []
                 rows.extend(got)
             except Exception as exc:
                 raise DataUnavailable(f"Arc Uniswap v4 Initialize logs unavailable: {type(exc).__name__}") from exc
@@ -109,10 +116,12 @@ class ArcUniswapV4RpcMarketData(MarketDataProvider):
         latest = _i(await self.rpc.call("eth_blockNumber"))
         start = max(pool["block"], latest - self.swap_scan_blocks)
         try:
-            rows = await self.rpc.call("eth_getLogs", [{
-                "fromBlock": hex(start), "toBlock": "latest", "address": POOL_MANAGER,
-                "topics": [SWAP_TOPIC, pool["pool_id"]],
-            }]) or []
+            rows = await self.rpc.get_logs(
+                address=POOL_MANAGER,
+                topics=[SWAP_TOPIC, pool["pool_id"]],
+                from_block=start,
+                to_block=latest,
+            ) or []
         except Exception as exc:
             raise DataUnavailable(f"Arc Uniswap v4 Swap logs unavailable: {type(exc).__name__}") from exc
         if not rows:

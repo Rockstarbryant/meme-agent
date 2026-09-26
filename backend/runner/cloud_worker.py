@@ -244,10 +244,13 @@ class CloudWorker:
             await self.client.release_lease(user_id, self.worker_id)
 
     async def run_forever(self, poll_s: float | None = None) -> None:
-        # Default 20s: public GeckoTerminal allows ~30 req/min; a 5s poll + multi
-        # provider fan-out trips 429 circuits and leaves discovery empty.
+        # Default 30s: public GeckoTerminal allows ~30 req/min. The client now
+        # paces at 2.5s min interval (~24/min) and honors Retry-After on 429,
+        # but a shared worker handling multiple tenants still benefits from a
+        # slower outer tick — it reduces overlapping discovery across tenants
+        # sharing one outbound IP and one Alchemy key.
         if poll_s is None:
-            poll_s = float(os.environ.get("ARC_RUNNER_CLOUD_POLL_S", "20"))
+            poll_s = float(os.environ.get("ARC_RUNNER_CLOUD_POLL_S", "30"))
         poll_s = max(5.0, float(poll_s))
         log.info("cloud worker %s starting against %s max_concurrent=%s poll_s=%s", self.worker_id, self.s.server_url, self.max_concurrent, poll_s)
         sem = asyncio.Semaphore(self.max_concurrent)

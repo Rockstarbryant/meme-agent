@@ -71,10 +71,15 @@ class ArcRpcMarketData(MarketDataProvider):
         any_success = False
         for contract, sig, topic_index, launchpad in groups:
             try:
-                rows = await self.rpc.call("eth_getLogs", [{
-                    "fromBlock": hex(start), "toBlock": "latest", "address": contract,
-                    "topics": [sig if sig.startswith("0x") else "0x" + sig],
-                }]) or []
+                # Route through EvmRpcClient.get_logs() so a "range too large"
+                # refusal is narrowed automatically instead of being retried
+                # identically and 400'ing every cycle (the Alchemy-on-Arc bug).
+                rows = await self.rpc.get_logs(
+                    address=contract,
+                    topics=[sig if sig.startswith("0x") else "0x" + sig],
+                    from_block=start,
+                    to_block=latest,
+                ) or []
                 any_success = True
             except Exception as exc:
                 # One broken launchpad should not disable all other venues.

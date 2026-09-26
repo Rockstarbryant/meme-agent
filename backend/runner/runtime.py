@@ -49,6 +49,7 @@ from runner.wallets import build_wallet_provider
 log = logging.getLogger("arc-runner")
 _UNSET = object()
 _POSITION_EVENTS = {E.ORDER_FILLED, E.POSITION_OPENED, E.POSITION_UPDATED, E.POSITION_CLOSED}
+_RPC_CAP_KEY = "rpc_log_range_cap"
 
 
 class OutboxSink(AuditSink):
@@ -84,7 +85,7 @@ class RunnerRuntime:
         self._rpc = None
         self._uniswap = None
         if chain is _UNSET:
-            rpc = EvmRpcClient(settings.rpc_urls)
+            rpc = self._make_rpc(settings)
             self._rpc = rpc
             # Prefer explicit wallet address from the active provider settings
             wallet_addr = (
@@ -131,12 +132,28 @@ class RunnerRuntime:
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
 
+    def _make_rpc(self, settings: RunnerSettings) -> EvmRpcClient:
+        """Build the Arc RPC client with the learned eth_getLogs range cap
+        round-tripped through the durable local store.
+
+        Cloud workers rebuild the RunnerRuntime every tenant cycle, so without
+        this persistence the client would rediscover the same "range too large"
+        refusal (and the same burst of HTTP 400s) on every poll. Hydrating the
+        cap makes the second and subsequent cycles start already narrowed."""
+        saved = self.store.kv_get(_RPC_CAP_KEY)
+        initial_cap = saved if isinstance(saved, int) and saved > 0 else None
+        return EvmRpcClient(
+            settings.rpc_urls,
+            on_range_cap=lambda c: self.store.kv_set(_RPC_CAP_KEY, c),
+            initial_range_cap=initial_cap,
+        )
+
     def _build_arc_market_data(self, settings: RunnerSettings) -> MarketDataProvider:
         providers: list[tuple[str, MarketDataProvider]] = []
         wanted = [x.strip().lower() for x in settings.market_data_providers.split(",") if x.strip()]
         rpc = self._rpc
         if rpc is None:
-            rpc = EvmRpcClient(settings.rpc_urls)
+            rpc = self._make_rpc(settings)
             self._rpc = rpc
         if "arc_rpc" in wanted:
             providers.append(("arc_rpc", ArcRpcMarketData(rpc, max_tokens=settings.market_data_max_tokens, scan_blocks=settings.rpc_launch_scan_blocks, cache_s=settings.market_data_cache_s)))

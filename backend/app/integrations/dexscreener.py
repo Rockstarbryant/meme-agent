@@ -42,14 +42,20 @@ class DexScreenerClient:
                 raise DataUnavailable(f"DexScreener request failed: {type(exc).__name__}: {exc}") from exc
             finally:
                 self._last_request = time.monotonic()
-        if r.status_code == 429:
-            raise DataUnavailable("DexScreener rate limited (HTTP 429)")
-        if r.status_code >= 400:
-            raise DataUnavailable(f"DexScreener HTTP {r.status_code}: {r.text[:200]}")
-        try:
-            return r.json()
-        except ValueError as exc:
-            raise DataUnavailable(f"DexScreener returned non-JSON response: {exc}") from exc
+            if r.status_code == 429:
+                # Same Retry-After behavior as GeckoTerminalClient: wait inside
+                # the pacing lock so concurrent callers share one backoff, then
+                # surface as a normal DataUnavailable.
+                retry_after = _retry_after_s(r.headers.get("retry-after"), default=3.0)
+                await asyncio.sleep(retry_after)
+                self._last_request = time.monotonic()
+                raise DataUnavailable(f"DexScreener rate limited (HTTP 429, retry-after={retry_after:.0f}s)")
+            if r.status_code >= 400:
+                raise DataUnavailable(f"DexScreener HTTP {r.status_code}: {r.text[:200]}")
+            try:
+                return r.json()
+            except ValueError as exc:
+                raise DataUnavailable(f"DexScreener returned non-JSON response: {exc}") from exc
 
     async def token_pairs(self, chain_id: str, token_address: str) -> list[dict[str, Any]]:
         """GET /tokens/v1/{chainId}/{tokenAddresses} — up to 30 comma-separated addresses."""
@@ -62,3 +68,23 @@ class DexScreenerClient:
 
     async def close(self) -> None:
         await self.client.aclose()
+
+
+def _retry_after_s(header: str | None, *, default: float, cap: float = 30.0) -> float:
+    if not header:
+        return default
+    raw = header.strip()
+    try:
+        return max(0.0, min(cap, float(raw)))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        when = parsedate_to_datetime(raw)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        delta = (when - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, min(cap, delta))
+    except Exception:
+        return default

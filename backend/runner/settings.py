@@ -57,14 +57,26 @@ class RunnerSettings(BaseSettings):
     # dexscreener are free public APIs used only for enrichment. bitquery is
     # optional and NOT in the default list — add it explicitly only if you have
     # a working subscription; see docs/market-data-failover.md.
-    market_data_essential_providers: str = Field("geckoterminal,arc_rpc", validation_alias=_alias("MARKET_DATA_ESSENTIAL_PROVIDERS"))
-    market_data_max_tokens: int = Field(10, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))
-    market_data_cache_s: float = Field(60.0, validation_alias=_alias("MARKET_DATA_CACHE_S"))
+    #
+    # Essential default is arc_rpc alone: discovery is authoritative on-chain,
+    # and marking geckoterminal essential means a single 429 zeroes out the
+    # whole discovery pipeline for that cycle (data_status=unavailable). Leave
+    # gecko/dexscreener as enrichment-only.
+    market_data_essential_providers: str = Field("arc_rpc", validation_alias=_alias("MARKET_DATA_ESSENTIAL_PROVIDERS"))
+    # GeckoTerminal free tier is ~30 req/min per IP. get_market_state() makes
+    # two calls per token (token_pools + pool_trades) plus one discovery call,
+    # so 5 tokens × 2 + 1 = 11 calls per tenant cycle. At a 30s poll that is
+    # ~22 calls/min — comfortably under the limit. Raise only with a paid key.
+    market_data_max_tokens: int = Field(5, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))
+    market_data_cache_s: float = Field(120.0, validation_alias=_alias("MARKET_DATA_CACHE_S"))
     market_data_timeout_s: float = Field(6.0, validation_alias=_alias("MARKET_DATA_TIMEOUT_S"))
     market_data_failure_threshold: int = Field(3, validation_alias=_alias("MARKET_DATA_FAILURE_THRESHOLD"))
     market_data_cooldown_s: float = Field(60.0, validation_alias=_alias("MARKET_DATA_COOLDOWN_S"))
-    rpc_launch_scan_blocks: int = Field(43200, validation_alias=_alias("RPC_LAUNCH_SCAN_BLOCKS"))
-    uniswap_v4_scan_blocks: int = Field(20000, validation_alias=_alias("UNISWAP_V4_SCAN_BLOCKS"))
+    # Alchemy's eth_getLogs limit on most chains is 10k blocks (as low as 2k on
+    # some). EvmRpcClient.get_logs() narrows automatically if the provider
+    # refuses, but starting below the limit avoids the discovery 400 burst.
+    rpc_launch_scan_blocks: int = Field(10000, validation_alias=_alias("RPC_LAUNCH_SCAN_BLOCKS"))
+    uniswap_v4_scan_blocks: int = Field(5000, validation_alias=_alias("UNISWAP_V4_SCAN_BLOCKS"))
     uniswap_v4_swap_scan_blocks: int = Field(1800, validation_alias=_alias("UNISWAP_V4_SWAP_SCAN_BLOCKS"))
     geckoterminal_base_url: str = Field("https://api.geckoterminal.com/api/v2", validation_alias=_alias("GECKOTERMINAL_BASE_URL"))
     geckoterminal_network: str = Field("arc", validation_alias=_alias("GECKOTERMINAL_NETWORK"))

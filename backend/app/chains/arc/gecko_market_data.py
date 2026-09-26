@@ -67,6 +67,14 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
     Discovery is intentionally not authoritative here: Arc RPC discovers the
     launchpad-created contracts, while GeckoTerminal supplies DEX market data
     for those addresses. This keeps launchpad provenance on-chain.
+
+    Pacing is handled entirely inside ``GeckoTerminalClient._get`` (see its
+    docstring: 2.5s min interval, plus Retry-After honoring on 429), so this
+    provider does not add a second pacing layer. The only local resilience is
+    that ``pool_trades`` is treated as optional enrichment: when it fails
+    (rate-limited, no coverage, transient 5xx), the market state still returns
+    with the ``token_pools`` fields populated and buy/sell USD fields unset,
+    rather than raising and losing the whole cycle.
     """
 
     def __init__(self, client: GeckoTerminalClient, *, max_tokens: int = 10, cache_s: float = 60.0):
@@ -178,10 +186,15 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         unique_sellers_15m = int(_num(m15.get("sellers")) or 0) or None
 
         # One trade call gives more precise buy/sell USD pressure and a previous
-        # 5m buyer baseline. It is cached so the free 30 calls/minute API is not
-        # hammered on every runner cycle.
-        trades_payload = await self.client.pool_trades(pool_address)
-        trades = trades_payload.get("data") or []
+        # 5m buyer baseline. It is optional enrichment: if the free tier rate
+        # limits us (the client honors Retry-After before raising), or the pool
+        # has no trades endpoint coverage, we still return a usable state with
+        # those specific fields left unset instead of losing the whole cycle.
+        try:
+            trades_payload = await self.client.pool_trades(pool_address)
+            trades = trades_payload.get("data") or []
+        except DataUnavailable:
+            trades = []
         now = datetime.now(timezone.utc)
         buy_volume_5m = sell_volume_5m = 0.0
         buyers_recent: set[str] = set()
