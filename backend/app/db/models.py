@@ -18,6 +18,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     mode: Mapped[str] = mapped_column(String(8), default="PAPER")  # LIVE is never the default
+    premium_scanner: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(default=now)
 
 
@@ -365,4 +366,55 @@ class AgentConfig(Base):
     strategies_enabled: Mapped[list] = mapped_column(default=lambda: ["traction_momentum"])
     # self_hosted = user pairs Local Runner; cloud_managed = platform shared worker + per-user Privy wallet
     execution_mode: Mapped[str] = mapped_column(String(16), default="self_hosted")
+    updated_at: Mapped[datetime] = mapped_column(default=now)
+
+
+class LaunchpadTokenRow(Base):
+    """Global discovered-token registry. Identity: (chain, token_address)."""
+    __tablename__ = "launchpad_tokens"
+    id: Mapped[str] = mapped_column(String(32), **PK)
+    chain: Mapped[str] = mapped_column(String(32))
+    token_address: Mapped[str] = mapped_column(String(128))
+    launchpad: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    launchpad_contract: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    launch_event: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    launch_tx_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    creator_address: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    launched_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    discovered_at: Mapped[datetime] = mapped_column(default=now)
+    status: Mapped[str] = mapped_column(String(32), default="DISCOVERED", index=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    initial_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    priority: Mapped[str] = mapped_column(String(16), default="WARM", index=True)
+    last_monitored_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_score_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    meta: Mapped[dict] = mapped_column(default=dict)
+    last_snapshot: Mapped[dict | None] = mapped_column(nullable=True)
+    __table_args__ = (UniqueConstraint("chain", "token_address"),)
+
+
+class TokenBookmark(Base):
+    __tablename__ = "token_bookmarks"
+    id: Mapped[str] = mapped_column(String(32), **PK)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    chain: Mapped[str] = mapped_column(String(32))
+    token_address: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(default=now)
+    note: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    __table_args__ = (UniqueConstraint("user_id", "chain", "token_address"),)
+
+
+class DiscoveryCheckpointRow(Base):
+    __tablename__ = "discovery_checkpoints"
+    id: Mapped[str] = mapped_column(String(32), **PK)
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_window_start: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_window_end: Mapped[datetime | None] = mapped_column(nullable=True)
+    tokens_found: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(default=now)

@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import select
 
-from app.api import routes_agent, routes_auth_system, routes_config, routes_platform, routes_runner, routes_stream, routes_trading, routes_wallet
+from app.api import routes_agent, routes_auth_system, routes_config, routes_platform, routes_runner, routes_stream, routes_trading, routes_wallet, routes_discovery
 from app.api.deps import Container
 from app.chains.arc.adapter import ArcAdapter
 from app.chains.evm import EvmRpcClient
@@ -94,6 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ("routes_config", routes_config, "router"),
         ("routes_stream", routes_stream, "router"),
         ("routes_platform", routes_platform, "router"),
+        ("routes_discovery", routes_discovery, "router"),
     ]
     for mod_name, mod, attr in route_modules:
         r = getattr(mod, attr, None)

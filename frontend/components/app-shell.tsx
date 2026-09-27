@@ -2,7 +2,7 @@
 import { useEffect, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, Bot, Briefcase, LayoutDashboard, LogOut, Radar, Settings, SlidersHorizontal, Wallet } from "lucide-react";
+import { Activity, Bot, Briefcase, LayoutDashboard, LogOut, Radar, Settings, SlidersHorizontal, Wallet, Search } from "lucide-react";
 import { StatusBanner } from "@/components/status-banner";
 import { Button } from "@/components/ui/button";
 import { Loading } from "@/components/states";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/opportunities", label: "Opportunities", icon: Radar },
+  { href: "/discovery", label: "Discovery", icon: Search },
   { href: "/positions", label: "Positions", icon: Briefcase },
   { href: "/agent", label: "Agent", icon: Bot },
   { href: "/strategies", label: "Strategies", icon: SlidersHorizontal },

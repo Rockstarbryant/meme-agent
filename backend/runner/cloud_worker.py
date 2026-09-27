@@ -31,6 +31,7 @@ from runner.runtime import RunnerRuntime
 from runner.settings import RunnerSettings
 from runner.store import LocalStore
 from runner.wallets import PrivyClient, PrivyWalletProvider
+from app.discovery.bootstrap import GlobalPipeline
 
 log = logging.getLogger("cloud_worker")
 
@@ -195,12 +196,12 @@ class CloudWorker:
                 )
                 return
 
+            # Global discovery is NOT part of the per-tenant trade cycle.
             cycle_started = time.monotonic()
             pulse = asyncio.create_task(self._heartbeat_pulse(rt, user_id))
             try:
                 await rt.monitor_once()
-                if not rt.controls.global_pause:
-                    await rt.discover_once()
+                # No discover_once() — discovery is global
                 await rt.monitor_once()
             finally:
                 pulse.cancel()
@@ -307,27 +308,71 @@ class CloudWorker:
         sem = asyncio.Semaphore(self.max_concurrent)
         last_full_cycle = 0.0
 
-        while True:
-            loop_started = time.monotonic()
+        # GLOBAL discovery & monitoring — independent of tenant trade cycles.
+        # Shared market-data gateway + Postgres/Redis persistence so price/mcap/
+        # liquidity/holders are refreshed by monitoring, not frozen at discovery.
+        redis = None
+        session_factory = None
+        try:
+            from redis.asyncio import Redis
+            redis = Redis.from_url(getattr(self.s, "redis_url", "redis://localhost:6379/0"), decode_responses=True)
+            await redis.ping()
+        except Exception:
+            log.warning("cloud worker: Redis unavailable for global discovery cache; continuing in-memory")
+            redis = None
+        db_url = getattr(self.s, "database_url", None) or __import__("os").environ.get("DATABASE_URL")
+        if db_url:
             try:
-                tenants = await self.client.active_tenants()
-                now = time.monotonic()
-                if now - last_full_cycle >= poll_s:
-                    async def one(t: dict) -> None:
-                        async with sem:
-                            await self.process_tenant(t)
-                    await asyncio.gather(*(one(t) for t in tenants), return_exceptions=False)
-                    last_full_cycle = time.monotonic()
-                    log.info("full cycle done, %d tenants", len(tenants))
-                else:
-                    for t in tenants:
-                        await self._replay_heartbeat(t)
-            except Revoked:
-                raise
+                from app.db.session import make_engine, make_session_factory
+                # normalize like control plane
+                import re
+                db_url = re.sub(r"^postgres(ql)?://", "postgresql+asyncpg://", db_url).replace("sslmode=", "ssl=")
+                engine = make_engine(db_url)
+                session_factory = make_session_factory(engine)
             except Exception:
-                log.exception("worker loop error")
-            elapsed = time.monotonic() - loop_started
-            await asyncio.sleep(max(1.0, heartbeat_s - elapsed))
+                log.exception("cloud worker: could not open database for global registry")
+                session_factory = None
+
+        self._pipeline = GlobalPipeline(self.s, redis=redis, session_factory=session_factory)
+        await self._pipeline.start()
+        stop = asyncio.Event()
+        disc_task = asyncio.create_task(self._pipeline.discovery.scheduler_loop(stop), name="global-discovery")
+        mon_task = asyncio.create_task(self._pipeline.monitoring.scheduler_loop(stop), name="global-monitoring")
+        log.info(
+            "global discovery interval=%.0fs + monitoring started (not per-tenant); registry_size=%d",
+            self._pipeline.discovery.config.interval_s,
+            len(self._pipeline.registry.all()),
+        )
+
+        try:
+            while True:
+                loop_started = time.monotonic()
+                try:
+                    tenants = await self.client.active_tenants()
+                    now = time.monotonic()
+                    if now - last_full_cycle >= poll_s:
+                        async def one(t: dict) -> None:
+                            async with sem:
+                                await self.process_tenant(t)
+                        await asyncio.gather(*(one(t) for t in tenants), return_exceptions=False)
+                        last_full_cycle = time.monotonic()
+                        log.info("full cycle done, %d tenants (discovery is global)", len(tenants))
+                    else:
+                        for t in tenants:
+                            await self._replay_heartbeat(t)
+                except Revoked:
+                    raise
+                except Exception:
+                    log.exception("worker loop error")
+                elapsed = time.monotonic() - loop_started
+                await asyncio.sleep(max(1.0, heartbeat_s - elapsed))
+        finally:
+            stop.set()
+            disc_task.cancel()
+            mon_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await disc_task
+                await mon_task
 
 
 async def run_cloud_worker(settings: RunnerSettings | None = None) -> None:

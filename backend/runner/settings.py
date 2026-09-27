@@ -52,6 +52,12 @@ class RunnerSettings(BaseSettings):
     circle_wallet_address: str = ""
 
     data_source: Literal["demo", "arc"] = "arc"
+    # Optional: worker-side Redis/Postgres for global discovery persistence
+    redis_url: str = Field("redis://localhost:6379/0", validation_alias=_alias("REDIS_URL"))
+    database_url: str | None = Field(None, validation_alias=_alias("DATABASE_URL"))
+    market_data_cache_ttl_s: float = Field(15.0, validation_alias=_alias("MARKET_DATA_CACHE_TTL_S"))
+    global_candidate_score_threshold: float = Field(40.0, validation_alias=_alias("GLOBAL_CANDIDATE_SCORE_THRESHOLD"))
+
 
     # ------------------------------------------------------------------ providers
     # Order is provider *preference*: the registry tries them in the order they
@@ -172,6 +178,13 @@ class RunnerSettings(BaseSettings):
     heartbeat_interval_s: float = 5.0
     upload_interval_s: float = 1.0
     discovery_interval_s: float = 15.0
+    # Global discovery (default 3 hours). Trade cycles must NOT run discovery.
+    global_discovery_interval_s: float = 3 * 3600
+    global_discovery_lookback_s: float = 15 * 60
+    global_discovery_enabled: bool = True
+    monitor_hot_interval_s: float = 30.0
+    monitor_warm_interval_s: float = 120.0
+    monitor_cold_interval_s: float = 600.0
     monitor_interval_s: float = 5.0
     snapshot_interval_s: float = 60.0
     market_snapshot_every_s: float = 15.0

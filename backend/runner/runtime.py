@@ -683,13 +683,16 @@ class RunnerRuntime:
         if cached:
             await self.apply_bundle(ConfigBundle(**cached))
         s = self.s
+        # Discovery is GLOBAL (app.discovery). Local demo opt-in only.
+        enable_local_discovery = __import__("os").environ.get("ARC_RUNNER_ENABLE_LOCAL_DISCOVERY", "").lower() in ("1", "true", "yes")
         loops = [
             ("config", lambda: self.poll_config_once(s.poll_wait_s), 0.2),
             ("heartbeat", self.heartbeat_once, s.heartbeat_interval_s),
             ("upload", self.upload_once, s.upload_interval_s),
-            ("discovery", self.discover_once, s.discovery_interval_s),
             ("monitor", self.monitor_once, s.monitor_interval_s),
         ]
+        if enable_local_discovery:
+            loops.append(("discovery", self.discover_once, s.discovery_interval_s))
         self._tasks = [asyncio.create_task(self._loop(n, f, i), name=n) for n, f, i in loops]
         await self._stop.wait()
         for t in self._tasks:
