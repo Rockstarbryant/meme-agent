@@ -334,6 +334,11 @@ class Runner(Base):
     created_at: Mapped[datetime] = mapped_column(default=now)
     last_seen_at: Mapped[datetime | None] = mapped_column(nullable=True)
     last_seq: Mapped[int] = mapped_column(Integer, default=0)  # highest event sequence ingested (replay protection)
+    # Opaque id of the runner's local event-outbox instance that produced `last_seq`.
+    # The local seq counter is only monotonic within one such instance (see
+    # app/services/ingest.py for why this exists and runner/runtime.py for how
+    # it's generated).
+    last_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[dict] = mapped_column(default=dict)         # latest heartbeat
     revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
 

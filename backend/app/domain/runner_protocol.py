@@ -119,6 +119,13 @@ class RunnerEvent(BaseModel):
 
 class EventBatch(BaseModel):
     events: list[RunnerEvent] = Field(max_length=200)
+    # Opaque id of the runner's local event-outbox instance (see runner/store.py
+    # and runner/runtime.py). Lets the server tell "the local seq counter
+    # restarted" (ephemeral disk, redeploy, crash) apart from "this is a
+    # replay of something already ingested" -- see app/services/ingest.py.
+    # Empty string ("") means "unknown/legacy runner" and preserves the old
+    # (pre-fix) comparison behaviour for that batch.
+    run_id: str = Field("", max_length=64)
 
 
 class EventAck(BaseModel):

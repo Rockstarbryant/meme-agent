@@ -63,7 +63,24 @@ async def _handle(db: AsyncSession, user_id: str, ev: RunnerEvent) -> bool:
 
 async def ingest(db: AsyncSession, hub: EventHub, runner: M.Runner, batch: EventBatch) -> EventAck:
     accepted = skipped = 0
-    last = runner.last_seq
+    # The runner's `seq` is only monotonic WITHIN one local event-outbox
+    # instance (see runner/store.py's `outbox` AUTOINCREMENT and
+    # runner/runtime.py's `run_id`). If that local storage was recreated
+    # (ephemeral disk, redeploy, crash/restart -- routine for a cloud worker
+    # container) the counter restarts at 1, while `runner.last_seq` here
+    # stays at whatever high number the PREVIOUS run reached. Comparing the
+    # new run's seq against that stale watermark would make every future
+    # event look like an old replay (`seq <= last_seq`) and get silently
+    # dropped forever, even though it has never been seen before. A run_id
+    # change means "new local sequence space": reset the baseline instead of
+    # comparing across runs. An empty run_id ("") means an old/legacy runner
+    # that doesn't send one yet, so we keep the previous (pre-fix) behaviour
+    # for that batch rather than guessing.
+    run_id = batch.run_id
+    run_changed = bool(run_id) and run_id != (runner.last_run_id or "")
+    last = 0 if run_changed else runner.last_seq
+    if run_id and run_id != runner.last_run_id:
+        runner.last_run_id = run_id
     streamed: list[RunnerEvent] = []
     for ev in sorted(batch.events, key=lambda e: e.seq):
         if ev.seq <= last:

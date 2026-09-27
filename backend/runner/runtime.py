@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from datetime import datetime
 from typing import Callable
 
@@ -79,6 +80,19 @@ class RunnerRuntime:
                  mono: Callable[[], float] = time.monotonic):
         self.s, self.client, self.store, self.clock, self.mono = settings, client, store, clock, mono
         self.ceilings = settings.ceilings
+        # Opaque id for THIS local event-outbox instance. Persisted in the same
+        # local store as the outbox itself, so it naturally changes exactly
+        # when (and only when) the local outbox's seq counter would otherwise
+        # silently restart at 1 -- e.g. an ephemeral disk being recreated on
+        # redeploy/restart of a cloud worker container. The server uses this
+        # to avoid comparing a fresh run's seq against a stale high-water mark
+        # from a previous run (see app/services/ingest.py).
+        saved_run = self.store.kv_get("runner_run_id")
+        if saved_run and saved_run.get("id"):
+            self.run_id = str(saved_run["id"])
+        else:
+            self.run_id = uuid.uuid4().hex
+            self.store.kv_set("runner_run_id", {"id": self.run_id})
         self.wallet: WalletProvider | None = build_wallet_provider(settings) if wallet is _UNSET else wallet
         self._bitquery = None
         self._gecko = None
@@ -534,7 +548,7 @@ class RunnerRuntime:
             rows = self.store.outbox_pending(100)
             if not rows:
                 break
-            batch = EventBatch(events=[RunnerEvent(seq=seq, **ev) for seq, ev in rows])
+            batch = EventBatch(events=[RunnerEvent(seq=seq, **ev) for seq, ev in rows], run_id=self.run_id)
             try:
                 await self.client.post_events(batch)
             except Revoked:
