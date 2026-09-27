@@ -3,13 +3,33 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import C, current_user, get_db
 from app.db import models as M
+from app.db import repo
 
 router = APIRouter(tags=["trading"])
+
+
+class BuyAnywayIn(BaseModel):
+    amount_usdc: float | None = None
+
+
+async def _queue_command(db: AsyncSession, user_id: str, type_: str, payload: dict) -> M.RunnerCommand:
+    """Mirrors app.api.routes_agent._queue: idempotent, don't double-queue the same command."""
+    existing = (await db.execute(select(M.RunnerCommand).where(
+        M.RunnerCommand.user_id == user_id, M.RunnerCommand.type == type_, M.RunnerCommand.status == "PENDING"
+    ))).scalars().all()
+    for c in existing:
+        if c.payload == payload:
+            return c
+    cmd = M.RunnerCommand(user_id=user_id, type=type_, payload=payload)
+    db.add(cmd)
+    await db.flush()
+    return cmd
 
 
 def _ratio(m: dict):
@@ -71,6 +91,33 @@ async def token_detail(token_key: str, user: M.User = Depends(current_user), db:
             "price_series": [{"at": s.at, "price": s.data.get("price"), "liquidity": s.data.get("liquidity")} for s in reversed(snaps)],
             "latest_decision": _opp(latest) if latest else None,
             "decision_history": [_opp(d) for d in decisions]}
+
+
+@router.post("/decisions/{decision_id}/buy-anyway")
+async def buy_anyway(decision_id: str, body: BuyAnywayIn, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Manual override: force a BUY on a WATCH-listed opportunity even though the
+    strategy/AI did not qualify it. This only skips the strategy/AI *opinion* --
+    the risk engine still re-runs against FRESH market data on the runner right
+    before anything is bought, and can still refuse the trade (bad liquidity, an
+    unsafe/unsellable contract, exposure or position limits, etc.)."""
+    d = await db.get(M.Decision, decision_id)
+    if d is None or d.user_id != user.id:
+        raise HTTPException(404, "not found")
+    if d.final_action != "WATCH":
+        raise HTTPException(409, "'buy anyway' is only offered for WATCH opportunities "
+                                  "(REJECT was blocked by a risk/safety check; BUY already went through)")
+    if d.mode != user.mode:
+        raise HTTPException(409, f"this opportunity was evaluated in {d.mode} mode; switch to {d.mode} mode to buy it")
+    token_address = (d.market or {}).get("token_address")
+    if not token_address:
+        raise HTTPException(422, "this decision has no token address on record")
+    payload = {"decision_id": decision_id, "token_address": token_address, "amount_usdc": body.amount_usdc}
+    cmd = await _queue_command(db, user.id, "FORCE_BUY", payload)
+    await repo.audit(db, user.id, user.email, "MANUAL_BUY_REQUESTED", decision_id=decision_id, token=d.token_key)
+    await db.commit()
+    return {"queued": True, "command_id": cmd.id,
+            "note": "Your Local Runner re-checks current market data and risk limits before buying (seconds). "
+                    "It can still refuse the trade if conditions changed or a safety check fails."}
 
 
 @router.get("/decisions/{decision_id}")

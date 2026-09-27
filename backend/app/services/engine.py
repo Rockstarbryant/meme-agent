@@ -39,6 +39,23 @@ class TradingEngine:
     async def handle_market_state(self, m: MarketState, now: datetime | None = None) -> DecisionRecord:
         now = now or utcnow()
         rec = await self.pipeline.evaluate(m, self.portfolio, self.controls, self.mode, now)
+        rec, _ = await self._finalize(rec)
+        return rec
+
+    async def force_buy(self, m: MarketState, amount_override: float | None = None,
+                        now: datetime | None = None) -> ExecutionResult | None:
+        """Manual 'BUY ANYWAY' override for a WATCH-listed opportunity (see
+        DecisionPipeline.evaluate_manual_override for exactly what this does
+        and does not skip). Returns None if the risk engine still vetoes the
+        trade or the order could not be placed; either way the decision is
+        recorded/published like any other, so it shows up in Activity."""
+        now = now or utcnow()
+        rec = await self.pipeline.evaluate_manual_override(m, self.portfolio, self.controls, self.mode, now,
+                                                            amount_override)
+        _, res = await self._finalize(rec)
+        return res
+
+    async def _finalize(self, rec: DecisionRecord) -> tuple[DecisionRecord, ExecutionResult | None]:
         cid = rec.id
         await self.bus.publish(E.STRATEGY_SIGNAL_CREATED, cid, score=rec.signal.score, qualified=rec.signal.qualified,
                                version=rec.strategy_version)
@@ -50,10 +67,11 @@ class TradingEngine:
         await self.bus.publish(E.DECISION_RECORDED, cid, action=rec.final_action.value, reason=rec.final_reason,
                                token=rec.token_key, mode=self.mode.value, decision=rec.model_dump(mode="json", exclude={"approved_trade"}))
         if rec.final_action == Action.BUY and rec.approved_trade is not None:
-            await self._enter(rec)
-        elif rec.final_action == Action.REJECT:
+            res = await self._enter(rec)
+            return rec, res
+        if rec.final_action == Action.REJECT:
             await self.bus.publish(E.BUY_REJECTED, cid, reason=rec.final_reason)
-        return rec
+        return rec, None
 
     async def _enter(self, rec: DecisionRecord) -> ExecutionResult | None:
         approved = rec.approved_trade

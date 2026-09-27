@@ -137,3 +137,43 @@ class DecisionPipeline:
                   ai=ai_out, final_risk=final, amount=final_amount, approved_trade=approved)
         out.id = decision_id
         return out
+
+    async def evaluate_manual_override(self, m: MarketState, portfolio: PortfolioState, controls: ControlState,
+                                       mode: TradingMode, now: datetime | None = None,
+                                       amount_override: float | None = None) -> DecisionRecord:
+        """Explicit user 'BUY ANYWAY' override on a WATCH-listed opportunity.
+
+        Skips the strategy-qualification and AI-agreement stages entirely --
+        the user is overriding the agent's opinion on THIS token, not asking
+        for a second opinion -- but still runs the SAME risk engine
+        assessment as an ordinary entry, at the same amount an ordinary entry
+        would use unless the caller overrides it. A risk veto (bad liquidity,
+        an unverified/unsellable contract, exposure/position limits, etc.)
+        still blocks the trade: "anyway" means "skip the strategy/AI opinion",
+        never "skip the safety checks".
+        """
+        now = now or utcnow()
+        limits = tighten_limits(self.limits, self.policy)
+        signal = self.strategy.score(m, now)  # recorded for context/audit; not gated on here
+        amount = amount_override if amount_override else max_entry_amount(m, portfolio, limits)
+        assess = self._assess(m, amount, mode, portfolio, controls, now, limits)
+
+        def rec(action: Action, reason: str, **kw) -> DecisionRecord:
+            return DecisionRecord(created_at=now, mode=mode, token_key=m.key, strategy_id=self.strategy.strategy_id,
+                                  strategy_version=self.strategy.version, strategy_config=self.strategy.config_snapshot(),
+                                  risk_limits=limits.model_dump(mode="json"), controls=controls.snapshot(),
+                                  wallet_policy=self.policy.model_dump(mode="json") if self.policy else None,
+                                  market=m.model_dump(mode="json"), signal=signal, pre_risk=assess,
+                                  ai_mode=self.ai_mode.value, final_action=action, final_reason=reason,
+                                  sized_amount_usdc=kw.pop("amount", amount), **kw)
+
+        if assess.decision == RiskDecision.REJECT:
+            return rec(Action.REJECT, f"MANUAL_OVERRIDE_STILL_RISK_VETOED: {assess.summary()}")
+        decision_id = uuid.uuid4().hex
+        req = self._request(m, amount, mode, now, decision_id, limits.max_slippage_pct)
+        approved = self.approver.approve(req, assess)
+        out = rec(Action.BUY,
+                  "MANUAL_OVERRIDE: user chose BUY ANYWAY on a WATCH opportunity; risk engine re-checked and approved",
+                  final_risk=assess, amount=amount, approved_trade=approved)
+        out.id = decision_id
+        return out

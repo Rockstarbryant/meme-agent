@@ -87,6 +87,34 @@ class RunnerSettings(BaseSettings):
     dexpaprika_min_volume_24h_usd: float = Field(100.0, validation_alias=_alias("DEXPAPRIKA_MIN_VOLUME_24H_USD"))
     dexpaprika_lookback_hours: int = Field(24, validation_alias=_alias("DEXPAPRIKA_LOOKBACK_HOURS"))
 
+    # ------------------------------------------------------------- scanning mode
+    # Two discovery modes, independently toggleable (both default on today):
+    #   scan_new_launches   -> brand-new pools (age < established_min_age_hours).
+    #                          Highest churn, highest risk, incomplete data more
+    #                          often (see traction_momentum's required_data_present
+    #                          gate) -- intended to become an opt-in/premium mode
+    #                          later; left ON by default for now.
+    #   scan_established    -> pools older than established_min_age_hours, re-run
+    #                          every cycle and additionally required to clear the
+    #                          holder-count and market-cap floors below once
+    #                          enriched. A token that goes quiet just stops
+    #                          reappearing near the top of results; one that keeps
+    #                          trending keeps getting re-evaluated. This is the
+    #                          default/steadier mode.
+    # NOTE: "passed the bonding curve" is not independently verifiable from any
+    # currently-configured data source (DexPaprika/GeckoTerminal don't expose
+    # Arc launchpad graduation state) -- age + holder count + market cap is used
+    # as a practical proxy, since by ~1 day old with 70+ holders and $50k+ mcap
+    # an Arc meme token has, in practice, essentially always left its bonding
+    # curve. Treat established_min_age_hours=24 as a placeholder pending
+    # confirmation: for meme-coin momentum trading a *shorter* window (hours,
+    # not days) is more typical, so double check this before relying on it.
+    scan_new_launches: bool = Field(True, validation_alias=_alias("SCAN_NEW_LAUNCHES"))
+    scan_established: bool = Field(True, validation_alias=_alias("SCAN_ESTABLISHED"))
+    established_min_age_hours: float = Field(24.0, validation_alias=_alias("ESTABLISHED_MIN_AGE_HOURS"))
+    established_min_holders: int = Field(70, validation_alias=_alias("ESTABLISHED_MIN_HOLDERS"))
+    established_min_market_cap_usdc: float = Field(50_000.0, validation_alias=_alias("ESTABLISHED_MIN_MARKET_CAP_USDC"))
+
     # ------------------------------------------------------------------ goldsky
     # When set, ARC_RUNNER_ARC_RPC_URL is expected to point at Goldsky and the
     # old scan-window settings below become irrelevant (Goldsky allows 20k).

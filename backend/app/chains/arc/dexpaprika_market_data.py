@@ -37,11 +37,25 @@ def _ts(v: Any) -> datetime | None:
 class DexPaprikaArcMarketData(MarketDataProvider):
     """DexPaprika provider for Arc.
 
-    Two roles:
-    - Discovery: ``/networks/arc/pools/filter`` returns recently created pools
-      that already have activity (``txns_24h_min``), which is a much better
-      signal than GeckoTerminal's raw ``new_pools`` list — most brand-new pools
-      are dead on arrival. We filter to pools with at least one transaction.
+    Three roles:
+    - New-launch discovery: ``/networks/arc/pools/search`` (``created_after``)
+      returns recently created pools that already have activity
+      (``txns_24h_min``), which is a much better signal than GeckoTerminal's
+      raw ``new_pools`` list — most brand-new pools are dead on arrival. We
+      filter to pools with at least one transaction. Continuous scanning of
+      brand-new launches is the higher-risk, higher-churn mode; it is kept on
+      by default today (``scan_new_launches=True``) but is intended to become
+      an opt-in/premium mode later — see ``scan_new_launches``.
+    - Established-token discovery (``scan_established``): the SAME endpoint
+      with ``created_before`` instead of ``created_after`` — pools older than
+      ``established_min_age_hours``. These are naturally "tracked while there
+      is momentum, dropped once there isn't": the query re-runs every cycle
+      and a token that has gone quiet simply stops appearing near the top of
+      results, while one still trading actively keeps showing up. The actual
+      holder-count/market-cap floor (``established_min_holders`` /
+      ``established_min_market_cap_usdc``) is enforced by the caller once the
+      token is enriched (see ``runner.runtime.RunnerRuntime.discover_once``),
+      because holder count isn't known until then.
     - Enrichment: ``/networks/arc/tokens/{addr}`` gives price, market cap,
       multi-window volume, and buy/sell counts. ``/networks/arc/pools/{pool}``
       gives liquidity for the specific pool discovered earlier.
@@ -54,7 +68,9 @@ class DexPaprikaArcMarketData(MarketDataProvider):
 
     def __init__(self, client: DexPaprikaClient, *, max_tokens: int = 20, cache_s: float = 60.0,
                  min_txns_24h: int = 1, min_volume_24h_usd: float = 100.0,
-                 lookback_hours: int = 24, network: str = "arc"):
+                 lookback_hours: int = 24, network: str = "arc",
+                 scan_new_launches: bool = True, scan_established: bool = True,
+                 established_min_age_hours: float = 24.0):
         self.client = client
         self.max_tokens = max(1, max_tokens)
         self.cache_s = max(5.0, cache_s)
@@ -62,29 +78,17 @@ class DexPaprikaArcMarketData(MarketDataProvider):
         self.min_volume_24h_usd = min_volume_24h_usd
         self.lookback_hours = max(1, lookback_hours)
         self.network = network
+        self.scan_new_launches = scan_new_launches
+        self.scan_established = scan_established
+        self.established_min_age_hours = max(1.0, established_min_age_hours)
         self._cached_tokens: list[str] = []
         self._last_discovery = 0.0
+        self._established_cached_tokens: list[str] = []
+        self._last_established_discovery = 0.0
         self._pool_by_token: dict[str, str] = {}
         self._state_cache: dict[str, tuple[float, MarketState]] = {}
 
-    async def discover_tokens(self) -> list[str]:
-        if self._cached_tokens and time.monotonic() - self._last_discovery < self.cache_s:
-            return self._cached_tokens[: self.max_tokens]
-        import time as _t
-        cutoff = int(_t.time()) - self.lookback_hours * 3600
-        try:
-            payload = await self.client.filter_pools(
-                self.network,
-                created_after=cutoff,
-                txns_24h_min=self.min_txns_24h,
-                volume_24h_min=self.min_volume_24h_usd,
-                sort_by="created_at",
-                sort_dir="desc",
-                limit=min(100, self.max_tokens * 3),
-            )
-        except DataUnavailable:
-            raise
-        pools = payload.get("data") or payload.get("pools") or []
+    def _extract_tokens(self, pools: list[dict], budget: int) -> list[str]:
         tokens: list[str] = []
         seen: set[str] = set()
         zero = "0x" + "0" * 40
@@ -115,15 +119,80 @@ class DexPaprikaArcMarketData(MarketDataProvider):
                     pool_addr = pool.get("address") or pool.get("id") or pool.get("pool_address")
                     if pool_addr:
                         self._pool_by_token[a] = str(pool_addr).lower()
-                    if len(tokens) >= self.max_tokens:
+                    if len(tokens) >= budget:
                         break
-                if len(tokens) >= self.max_tokens:
+                if len(tokens) >= budget:
                     break
-            if len(tokens) >= self.max_tokens:
+            if len(tokens) >= budget:
                 break
+        return tokens
+
+    async def _discover_new(self, budget: int) -> list[str]:
+        if self._cached_tokens and time.monotonic() - self._last_discovery < self.cache_s:
+            return self._cached_tokens[:budget]
+        import time as _t
+        cutoff = int(_t.time()) - self.lookback_hours * 3600
+        payload = await self.client.filter_pools(
+            self.network, created_after=cutoff, txns_24h_min=self.min_txns_24h,
+            volume_24h_min=self.min_volume_24h_usd, sort_by="created_at", sort_dir="desc",
+            limit=min(100, budget * 3),
+        )
+        pools = payload.get("data") or payload.get("pools") or []
+        tokens = self._extract_tokens(pools, budget)
         self._cached_tokens = tokens
         self._last_discovery = time.monotonic()
         return tokens
+
+    async def _discover_established(self, budget: int) -> list[str]:
+        if self._established_cached_tokens and time.monotonic() - self._last_established_discovery < self.cache_s:
+            return self._established_cached_tokens[:budget]
+        import time as _t
+        cutoff = int(_t.time()) - int(self.established_min_age_hours * 3600)
+        payload = await self.client.filter_pools(
+            self.network, created_before=cutoff, txns_24h_min=self.min_txns_24h,
+            volume_24h_min=self.min_volume_24h_usd, sort_by="created_at", sort_dir="desc",
+            limit=min(100, budget * 3),
+        )
+        pools = payload.get("data") or payload.get("pools") or []
+        tokens = self._extract_tokens(pools, budget)
+        self._established_cached_tokens = tokens
+        self._last_established_discovery = time.monotonic()
+        return tokens
+
+    async def discover_tokens(self) -> list[str]:
+        if not self.scan_new_launches and not self.scan_established:
+            return []
+        # Split the token budget between the two buckets when both are on, so
+        # new launches can't crowd established candidates out entirely (or
+        # vice versa).
+        if self.scan_new_launches and self.scan_established:
+            new_budget = max(1, self.max_tokens // 2)
+            established_budget = max(1, self.max_tokens - new_budget)
+        else:
+            new_budget = established_budget = self.max_tokens
+
+        found: list[str] = []
+        seen: set[str] = set()
+        errors: list[str] = []
+        if self.scan_new_launches:
+            try:
+                for a in await self._discover_new(new_budget):
+                    if a not in seen:
+                        seen.add(a)
+                        found.append(a)
+            except DataUnavailable as exc:
+                errors.append(f"new-launch discovery: {exc}")
+        if self.scan_established:
+            try:
+                for a in await self._discover_established(established_budget):
+                    if a not in seen:
+                        seen.add(a)
+                        found.append(a)
+            except DataUnavailable as exc:
+                errors.append(f"established-token discovery: {exc}")
+        if not found and errors:
+            raise DataUnavailable("; ".join(errors))
+        return found[: self.max_tokens]
 
     async def get_market_state(self, token_address: str) -> MarketState:
         token = token_address.lower()

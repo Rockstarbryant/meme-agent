@@ -9,6 +9,7 @@ more than one worker replica is running.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
@@ -195,10 +196,16 @@ class CloudWorker:
                 return
 
             cycle_started = time.monotonic()
-            await rt.monitor_once()
-            if not rt.controls.global_pause:
-                await rt.discover_once()
-            await rt.monitor_once()
+            pulse = asyncio.create_task(self._heartbeat_pulse(rt, user_id))
+            try:
+                await rt.monitor_once()
+                if not rt.controls.global_pause:
+                    await rt.discover_once()
+                await rt.monitor_once()
+            finally:
+                pulse.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pulse
             await rt.heartbeat_once()
             await rt.upload_once()
             await self._persist_state(rt, user_id)
@@ -237,6 +244,34 @@ class CloudWorker:
                 except Exception:
                     pass
             await self.client.release_lease(user_id, self.worker_id)
+
+    async def _heartbeat_pulse(self, rt: RunnerRuntime, user_id: str, interval_s: float = 12.0) -> None:
+        """Keep the control plane's 'runner online' signal fresh WHILE a full
+        trade cycle is running (not just between cycles, which is all
+        ``_replay_heartbeat`` covers).
+
+        ``discover_once()`` fans out to several rate-limited market-data APIs
+        sequentially, one per candidate token, and can easily take 60-100+
+        seconds end to end -- comfortably longer than the server's online-
+        staleness window (``ONLINE_WINDOW_S`` in app/services/control.py).
+        Historically the only heartbeat a cycle sent was a single one at the
+        very end, so the UI flipped to OFFLINE partway through every cycle
+        and back to ONLINE once it finished, even though the runner never
+        actually stopped. This task runs concurrently with the cycle and
+        just resends a fresh liveness snapshot every ``interval_s`` seconds --
+        same shape and same "fire and forget" behaviour as
+        ``_replay_heartbeat``, so it's safe to run alongside the cycle's own
+        work (``rt.heartbeat()`` only reads current runtime state to build the
+        payload; it does not mutate anything or process the response).
+        """
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await self.client.heartbeat(user_id, rt.heartbeat())
+            except Revoked:
+                raise
+            except Exception:
+                log.debug("mid-cycle heartbeat pulse failed for %s", user_id)
 
     async def _replay_heartbeat(self, tenant: dict) -> None:
         """Replay the last real heartbeat body for liveness only.

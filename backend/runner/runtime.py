@@ -199,6 +199,9 @@ class RunnerRuntime:
                 min_volume_24h_usd=settings.dexpaprika_min_volume_24h_usd,
                 lookback_hours=settings.dexpaprika_lookback_hours,
                 network=settings.dexpaprika_network,
+                scan_new_launches=settings.scan_new_launches,
+                scan_established=settings.scan_established,
+                established_min_age_hours=settings.established_min_age_hours,
             )))
 
         # --- Goldsky-backed on-chain providers -----------------------------
@@ -511,6 +514,8 @@ class RunnerRuntime:
                     status = "DONE"
                 elif cmd.type == "WITHDRAW_USDC":
                     status, detail = await self._handle_withdraw(cmd.payload)
+                elif cmd.type == "FORCE_BUY":
+                    status, detail = await self._handle_force_buy(cmd.payload)
                 else:
                     status, detail = "FAILED", f"unknown command type: {cmd.type}"
             except Exception as e:
@@ -520,6 +525,32 @@ class RunnerRuntime:
             await self.client.ack_command(cmd.id, status, detail)
         except ControlPlaneError:
             pass
+
+    async def _handle_force_buy(self, payload: dict) -> tuple[str, str]:
+        """User clicked 'BUY ANYWAY' on a WATCH opportunity. Always re-fetches
+        current market data (never trusts the snapshot the decision was made
+        from -- it may be minutes old by the time the user acts on it) and
+        still runs it through the risk engine; see TradingEngine.force_buy /
+        DecisionPipeline.evaluate_manual_override for exactly what is and
+        is not skipped."""
+        if self.engine is None or self.portfolio is None:
+            return "FAILED", "no active engine (LIVE blocked or not configured)"
+        token_address = str(payload.get("token_address") or "")
+        if not token_address:
+            return "FAILED", "token_address missing from command payload"
+        try:
+            m = await self.market_data.get_market_state(token_address)
+        except DataUnavailable as e:
+            return "FAILED", f"market data unavailable: {e}"
+        amount = payload.get("amount_usdc")
+        try:
+            amount = float(amount) if amount else None
+        except (TypeError, ValueError):
+            return "FAILED", "amount_usdc must be a number"
+        res = await self.engine.force_buy(m, amount_override=amount)
+        if res is None:
+            return "DONE", "risk engine still vetoed this trade after re-checking current market data (see Activity for the reason); no order was placed"
+        return "DONE", f"order status={getattr(res.status, 'value', res.status)}"
 
     async def _handle_withdraw(self, payload: dict) -> tuple[str, str]:
         if self.wallet is None:
@@ -586,6 +617,24 @@ class RunnerRuntime:
                 m = await self.market_data.get_market_state(addr)
             except DataUnavailable:
                 continue
+            # Which bucket a token is in is decided from its OWN enriched data
+            # (age/holders/market cap), not from which discovery query happened
+            # to surface its address -- see DexPaprikaArcMarketData's docstring.
+            age = m.age_seconds(now)
+            # Unknown age is treated as "not a confirmed new launch": we never
+            # fabricate an age, so an unverifiable one falls through to the
+            # established-token floor below rather than being waved through.
+            is_new_launch = age is not None and age < self.s.established_min_age_hours * 3600
+            if is_new_launch:
+                if not self.s.scan_new_launches:
+                    continue
+            else:
+                if not self.s.scan_established:
+                    continue
+                if (m.holder_count or 0) < self.s.established_min_holders:
+                    continue
+                if (m.market_cap or 0) < self.s.established_min_market_cap_usdc:
+                    continue
             self._evaluated[addr.lower()] = now
             if self.mono() - self._mkt_at.get(m.key, -1e9) >= self.s.market_snapshot_every_s:
                 self._mkt_at[m.key] = self.mono()

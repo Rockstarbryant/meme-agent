@@ -28,7 +28,12 @@ from app.strategies.traction_momentum import TractionMomentumConfig
 from app.wallets.base import WalletPolicy
 
 LIVE_CONFIRMATION_PHRASE = "ENABLE LIVE TRADING"
-ONLINE_WINDOW_S = 30
+# Must stay comfortably above the cloud worker's mid-cycle heartbeat pulse
+# interval (runner/cloud_worker.py's CloudWorker._heartbeat_pulse, 12s) so a
+# single slow/retried network call doesn't make the UI flap between
+# ONLINE/OFFLINE. See CloudWorker._heartbeat_pulse's docstring for why a
+# pulse exists at all.
+ONLINE_WINDOW_S = 45
 
 
 def default_limits(s: Settings) -> RiskLimits:
