@@ -32,7 +32,11 @@ def build_global_market_data(settings: Any):
     from app.market_data.registry import MarketDataRegistry
 
     providers: list[tuple[str, Any]] = []
-    wanted = [x.strip().lower() for x in getattr(settings, "market_data_providers", "dexpaprika").split(",") if x.strip()]
+    wanted = [
+        x.strip().lower()
+        for x in getattr(settings, "market_data_providers", "dexpaprika").split(",")
+        if x.strip()
+    ]
     data_source = getattr(settings, "data_source", "arc")
     timeout = float(getattr(settings, "market_data_timeout_s", 20.0))
     max_tokens = int(getattr(settings, "market_data_max_tokens", 40))
@@ -51,14 +55,12 @@ def build_global_market_data(settings: Any):
         try:
             from app.integrations.dexpaprika import DexPaprikaClient
             from app.chains.arc.dexpaprika_market_data import DexPaprikaArcMarketData
+
             key = None
             if getattr(settings, "dexpaprika_api_key", None):
                 key = settings.dexpaprika_api_key.get_secret_value()
-            client = DexPaprikaClient(
-                getattr(settings, "dexpaprika_base_url", "https://api.dexpaprika.com"),
-                api_key=key,
-                timeout_s=timeout,
-            )
+            # DexPaprikaClient is keyword-only: timeout_s=, api_key=
+            client = DexPaprikaClient(api_key=key, timeout_s=timeout)
             providers.append(("dexpaprika", DexPaprikaArcMarketData(
                 client,
                 max_tokens=max_tokens,
@@ -79,13 +81,21 @@ def build_global_market_data(settings: Any):
         try:
             from app.integrations.geckoterminal import GeckoTerminalClient
             from app.chains.arc.gecko_market_data import GeckoTerminalArcMarketData
-            key = settings.geckoterminal_api_key.get_secret_value() if getattr(settings, "geckoterminal_api_key", None) else None
+
+            key = (
+                settings.geckoterminal_api_key.get_secret_value()
+                if getattr(settings, "geckoterminal_api_key", None)
+                else None
+            )
             gecko = GeckoTerminalClient(
                 getattr(settings, "geckoterminal_base_url", "https://api.geckoterminal.com/api/v2"),
                 getattr(settings, "geckoterminal_network", "arc"),
-                timeout_s=timeout, api_key=key,
+                timeout_s=timeout,
+                api_key=key,
             )
-            providers.append(("geckoterminal", GeckoTerminalArcMarketData(gecko, max_tokens=max_tokens, cache_s=cache_s)))
+            providers.append(("geckoterminal", GeckoTerminalArcMarketData(
+                gecko, max_tokens=max_tokens, cache_s=cache_s,
+            )))
         except Exception:
             log.exception("gecko provider init failed")
 
@@ -94,6 +104,7 @@ def build_global_market_data(settings: Any):
         try:
             from app.integrations.dexscreener import DexScreenerClient
             from app.chains.arc.dexscreener_market_data import DexScreenerArcMarketData
+
             ds = DexScreenerClient(timeout_s=timeout)
             providers.append(("dexscreener", DexScreenerArcMarketData(
                 ds,
@@ -107,6 +118,7 @@ def build_global_market_data(settings: Any):
     if "bitquery" in wanted and getattr(settings, "bitquery_api_key", None):
         try:
             from app.integrations.bitquery import BitqueryClient
+
             client = BitqueryClient(
                 settings.bitquery_api_key.get_secret_value(),
                 getattr(settings, "bitquery_endpoint", "https://streaming.bitquery.io/graphql"),
@@ -120,7 +132,11 @@ def build_global_market_data(settings: Any):
         log.warning("no market-data providers configured for global discovery")
         return UnavailableArcMarketData()
 
-    essential = [x.strip().lower() for x in getattr(settings, "market_data_essential_providers", "dexpaprika").split(",") if x.strip()]
+    essential = [
+        x.strip().lower()
+        for x in getattr(settings, "market_data_essential_providers", "dexpaprika").split(",")
+        if x.strip()
+    ]
     return MarketDataRegistry(
         providers,
         failure_threshold=int(getattr(settings, "market_data_failure_threshold", 3)),
@@ -193,12 +209,20 @@ class GlobalPipeline:
             cold_interval_s=float(getattr(settings, "monitor_cold_interval_s", 600)),
         )
         self.discovery = GlobalDiscoveryService(
-            self.registry, redis=redis, config=disc_cfg,
-            discover_fn=self._discover, screen_fn=self._screen, store=self.store,
+            self.registry,
+            redis=redis,
+            config=disc_cfg,
+            discover_fn=self._discover,
+            screen_fn=self._screen,
+            store=self.store,
         )
         self.monitoring = GlobalMonitoringService(
-            self.registry, redis=redis, config=mon_cfg,
-            fetch_state_fn=self._fetch_state, score_fn=self._score, store=self.store,
+            self.registry,
+            redis=redis,
+            config=mon_cfg,
+            fetch_state_fn=self._fetch_state,
+            score_fn=self._score,
+            store=self.store,
         )
 
     async def start(self) -> None:
@@ -229,9 +253,11 @@ class GlobalPipeline:
         for addr in addrs:
             try:
                 m = await self.gateway.get(
-                    "arc", addr,
+                    "arc",
+                    addr,
                     lambda a=addr: self.market_data.get_market_state(a),
-                    kind="state", ttl_s=30.0,
+                    kind="state",
+                    ttl_s=30.0,
                 )
             except Exception:
                 out.append({"chain": "arc", "token_address": str(addr).lower()})
@@ -240,7 +266,11 @@ class GlobalPipeline:
                 out.append({"chain": "arc", "token_address": str(addr).lower()})
                 continue
             if m.token_created_at is not None:
-                created = m.token_created_at if m.token_created_at.tzinfo else m.token_created_at.replace(tzinfo=timezone.utc)
+                created = (
+                    m.token_created_at
+                    if m.token_created_at.tzinfo
+                    else m.token_created_at.replace(tzinfo=timezone.utc)
+                )
                 age_h = (utcnow() - created).total_seconds() / 3600
                 if age_h > 72 and (created < start or created > end):
                     continue
@@ -260,7 +290,8 @@ class GlobalPipeline:
         if not snap:
             try:
                 m = await self.gateway.get(
-                    token.chain, token.token_address,
+                    token.chain,
+                    token.token_address,
                     lambda: self.market_data.get_market_state(token.token_address),
                 )
                 if isinstance(m, MarketState):
@@ -313,7 +344,9 @@ class GlobalPipeline:
         async def _fetch():
             return await self.market_data.get_market_state(token.token_address)
 
-        m = await self.gateway.get(token.chain, token.token_address, _fetch, kind="state", ttl_s=12.0)
+        m = await self.gateway.get(
+            token.chain, token.token_address, _fetch, kind="state", ttl_s=12.0,
+        )
         if isinstance(m, MarketState):
             snap = market_state_to_snapshot(m)
             if m.launchpad and not token.launchpad:
