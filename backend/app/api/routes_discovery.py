@@ -6,17 +6,16 @@ Monitoring (not discovery) is what keeps price/mcap/liquidity/holders fresh.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
-from sqlalchemy import select, delete
+from pydantic import BaseModel
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import Container, get_container, current_user
+from app.api.deps import current_user, get_db
 from app.core.clock import utcnow
 from app.db import models as M
 from app.db.base import uid
-from app.discovery.store import dict_to_token, token_to_dict
 
 router = APIRouter(prefix="/discovery", tags=["discovery"])
 
@@ -99,10 +98,10 @@ async def historical_24h(
     launchpad: str | None = None,
     min_score: float | None = None,
     status: str | None = None,
-    user=Depends(current_user),
-    c: Container = Depends(get_container),
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    return await _historical(hours=24, launchpad=launchpad, min_score=min_score, status=status, c=c)
+    return await _historical(db, hours=24, launchpad=launchpad, min_score=min_score, status=status)
 
 
 @router.get("/historical/72h", response_model=HistoricalResponse)
@@ -110,38 +109,37 @@ async def historical_72h(
     launchpad: str | None = None,
     min_score: float | None = None,
     status: str | None = None,
-    user=Depends(current_user),
-    c: Container = Depends(get_container),
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    return await _historical(hours=72, launchpad=launchpad, min_score=min_score, status=status, c=c)
+    return await _historical(db, hours=72, launchpad=launchpad, min_score=min_score, status=status)
 
 
 async def _historical(
+    db: AsyncSession,
     hours: int,
     launchpad: str | None,
     min_score: float | None,
     status: str | None,
-    c: Container,
 ) -> HistoricalResponse:
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=hours)
     tokens: list[TokenCard] = []
-    async with c.sf() as db:
-        q = (
-            select(M.LaunchpadTokenRow)
-            .where(M.LaunchpadTokenRow.discovered_at >= since)
-            .order_by(M.LaunchpadTokenRow.discovered_at.desc())
-            .limit(300)
-        )
-        rows = (await db.execute(q)).scalars().all()
-        for r in rows:
-            if launchpad and r.launchpad != launchpad:
-                continue
-            if status and r.status != status:
-                continue
-            if min_score is not None and (r.current_score or 0) < min_score:
-                continue
-            tokens.append(_row_to_card(r, now))
+    q = (
+        select(M.LaunchpadTokenRow)
+        .where(M.LaunchpadTokenRow.discovered_at >= since)
+        .order_by(M.LaunchpadTokenRow.discovered_at.desc())
+        .limit(300)
+    )
+    rows = (await db.execute(q)).scalars().all()
+    for r in rows:
+        if launchpad and r.launchpad != launchpad:
+            continue
+        if status and r.status != status:
+            continue
+        if min_score is not None and (r.current_score or 0) < min_score:
+            continue
+        tokens.append(_row_to_card(r, now))
     return HistoricalResponse(window=f"{hours}h", tokens=tokens, count=len(tokens))
 
 
@@ -150,30 +148,29 @@ async def search_tokens(
     q: str = Query(..., min_length=1),
     launchpad: str | None = None,
     min_score: float | None = None,
-    user=Depends(current_user),
-    c: Container = Depends(get_container),
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Search global registry. Does NOT trigger launchpad discovery."""
     q_lower = q.lower().strip()
     results = []
-    async with c.sf() as db:
-        rows = (
-            await db.execute(
-                select(M.LaunchpadTokenRow).order_by(M.LaunchpadTokenRow.discovered_at.desc()).limit(500)
-            )
-        ).scalars().all()
-        now = datetime.now(timezone.utc)
-        for r in rows:
-            hay = " ".join(filter(None, [r.token_address, r.symbol, r.name, r.launchpad])).lower()
-            if q_lower not in hay and not r.token_address.lower().startswith(q_lower):
-                continue
-            if launchpad and r.launchpad != launchpad:
-                continue
-            if min_score is not None and (r.current_score or 0) < min_score:
-                continue
-            results.append(_row_to_card(r, now).model_dump(mode="json"))
-            if len(results) >= 50:
-                break
+    rows = (
+        await db.execute(
+            select(M.LaunchpadTokenRow).order_by(M.LaunchpadTokenRow.discovered_at.desc()).limit(500)
+        )
+    ).scalars().all()
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        hay = " ".join(filter(None, [r.token_address, r.symbol, r.name, r.launchpad])).lower()
+        if q_lower not in hay and not r.token_address.lower().startswith(q_lower):
+            continue
+        if launchpad and r.launchpad != launchpad:
+            continue
+        if min_score is not None and (r.current_score or 0) < min_score:
+            continue
+        results.append(_row_to_card(r, now).model_dump(mode="json"))
+        if len(results) >= 50:
+            break
     return {"query": q, "results": results, "count": len(results)}
 
 
@@ -181,49 +178,49 @@ async def search_tokens(
 async def token_detail(
     chain: str,
     address: str,
-    user=Depends(current_user),
-    c: Container = Depends(get_container),
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Token detail with latest snapshot (updated by monitoring, not frozen at discovery)."""
-    async with c.sf() as db:
-        row = (
-            await db.execute(
-                select(M.LaunchpadTokenRow).where(
-                    M.LaunchpadTokenRow.chain == chain,
-                    M.LaunchpadTokenRow.token_address == address.lower(),
-                )
+    row = (
+        await db.execute(
+            select(M.LaunchpadTokenRow).where(
+                M.LaunchpadTokenRow.chain == chain,
+                M.LaunchpadTokenRow.token_address == address.lower(),
             )
-        ).scalar_one_or_none()
-        if not row:
-            raise HTTPException(404, "token not in global registry")
-        card = _row_to_card(row, datetime.now(timezone.utc))
-        # recent snapshots for performance chart
-        snaps = (
-            await db.execute(
-                select(M.MarketSnapshot)
-                .where(M.MarketSnapshot.token_key == f"{chain}:{address.lower()}")
-                .order_by(M.MarketSnapshot.at.desc())
-                .limit(48)
-            )
-        ).scalars().all()
-        history = [{"at": s.at.isoformat(), "data": s.data} for s in reversed(list(snaps))]
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "token not in global registry")
+    card = _row_to_card(row, datetime.now(timezone.utc))
+    snaps = (
+        await db.execute(
+            select(M.MarketSnapshot)
+            .where(M.MarketSnapshot.token_key == f"{chain}:{address.lower()}")
+            .order_by(M.MarketSnapshot.at.desc())
+            .limit(48)
+        )
+    ).scalars().all()
+    history = [{"at": s.at.isoformat(), "data": s.data} for s in reversed(list(snaps))]
     return {"token": card.model_dump(mode="json"), "history": history}
 
 
 @router.get("/status")
-async def scanner_status(user=Depends(current_user), c: Container = Depends(get_container)):
+async def scanner_status(
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
     premium = bool(getattr(user, "premium_scanner", False))
-    async with c.sf() as db:
-        cp = (
-            await db.execute(select(M.DiscoveryCheckpointRow).where(M.DiscoveryCheckpointRow.name == "global"))
-        ).scalar_one_or_none()
-        active = (
-            await db.execute(
-                select(M.LaunchpadTokenRow).where(
-                    M.LaunchpadTokenRow.status.in_(["WATCHING", "IMPROVING", "QUALIFIED", "SCREENING"])
-                )
+    cp = (
+        await db.execute(select(M.DiscoveryCheckpointRow).where(M.DiscoveryCheckpointRow.name == "global"))
+    ).scalar_one_or_none()
+    active = (
+        await db.execute(
+            select(M.LaunchpadTokenRow).where(
+                M.LaunchpadTokenRow.status.in_(["WATCHING", "IMPROVING", "QUALIFIED", "SCREENING"])
             )
-        ).scalars().all()
+        )
+    ).scalars().all()
     return {
         "premium_scanner_enabled": premium,
         "discovery_interval_hours": 3,
@@ -246,87 +243,99 @@ async def scanner_status(user=Depends(current_user), c: Container = Depends(get_
 @router.post("/premium")
 async def set_premium(
     enabled: bool = True,
-    user=Depends(current_user),
-    c: Container = Depends(get_container),
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Toggle premium scanner for the current user (admin/billing integration point)."""
-    async with c.sf() as db:
-        u = await db.get(M.User, user.id)
-        if not u:
-            raise HTTPException(404, "user not found")
-        u.premium_scanner = bool(enabled)
-        await db.commit()
+    u = await db.get(M.User, user.id)
+    if not u:
+        raise HTTPException(404, "user not found")
+    u.premium_scanner = bool(enabled)
+    await db.commit()
     return {"premium_scanner_enabled": bool(enabled)}
 
 
-# ---- Bookmarks (reference global token identity; no premium required) ----
-
 @router.get("/bookmarks", response_model=list[BookmarkOut])
-async def list_bookmarks(user=Depends(current_user), c: Container = Depends(get_container)):
+async def list_bookmarks(
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
     now = datetime.now(timezone.utc)
     out: list[BookmarkOut] = []
-    async with c.sf() as db:
-        bms = (
+    bms = (
+        await db.execute(
+            select(M.TokenBookmark).where(M.TokenBookmark.user_id == user.id).order_by(M.TokenBookmark.created_at.desc())
+        )
+    ).scalars().all()
+    for b in bms:
+        row = (
             await db.execute(
-                select(M.TokenBookmark).where(M.TokenBookmark.user_id == user.id).order_by(M.TokenBookmark.created_at.desc())
-            )
-        ).scalars().all()
-        for b in bms:
-            row = (
-                await db.execute(
-                    select(M.LaunchpadTokenRow).where(
-                        M.LaunchpadTokenRow.chain == b.chain,
-                        M.LaunchpadTokenRow.token_address == b.token_address.lower(),
-                    )
+                select(M.LaunchpadTokenRow).where(
+                    M.LaunchpadTokenRow.chain == b.chain,
+                    M.LaunchpadTokenRow.token_address == b.token_address.lower(),
                 )
-            ).scalar_one_or_none()
-            card = _row_to_card(row, now) if row else None
-            out.append(BookmarkOut(
-                id=b.id, chain=b.chain, token_address=b.token_address,
-                note=b.note, created_at=b.created_at, token=card,
-            ))
+            )
+        ).scalar_one_or_none()
+        card = _row_to_card(row, now) if row else None
+        out.append(BookmarkOut(
+            id=b.id, chain=b.chain, token_address=b.token_address,
+            note=b.note, created_at=b.created_at, token=card,
+        ))
     return out
 
 
 @router.post("/bookmarks", response_model=BookmarkOut)
-async def add_bookmark(body: BookmarkIn, user=Depends(current_user), c: Container = Depends(get_container)):
+async def add_bookmark(
+    body: BookmarkIn,
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
     addr = body.token_address.lower()
-    async with c.sf() as db:
-        existing = (
-            await db.execute(
-                select(M.TokenBookmark).where(
-                    M.TokenBookmark.user_id == user.id,
-                    M.TokenBookmark.chain == body.chain,
-                    M.TokenBookmark.token_address == addr,
-                )
+    existing = (
+        await db.execute(
+            select(M.TokenBookmark).where(
+                M.TokenBookmark.user_id == user.id,
+                M.TokenBookmark.chain == body.chain,
+                M.TokenBookmark.token_address == addr,
             )
-        ).scalar_one_or_none()
-        if existing:
-            raise HTTPException(409, "already bookmarked")
-        bm = M.TokenBookmark(id=uid(), user_id=user.id, chain=body.chain, token_address=addr, note=body.note, created_at=utcnow())
-        db.add(bm)
-        await db.commit()
-        row = (
-            await db.execute(
-                select(M.LaunchpadTokenRow).where(
-                    M.LaunchpadTokenRow.chain == body.chain,
-                    M.LaunchpadTokenRow.token_address == addr,
-                )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, "already bookmarked")
+    bm = M.TokenBookmark(
+        id=uid(), user_id=user.id, chain=body.chain, token_address=addr,
+        note=body.note, created_at=utcnow(),
+    )
+    db.add(bm)
+    await db.commit()
+    row = (
+        await db.execute(
+            select(M.LaunchpadTokenRow).where(
+                M.LaunchpadTokenRow.chain == body.chain,
+                M.LaunchpadTokenRow.token_address == addr,
             )
-        ).scalar_one_or_none()
-        card = _row_to_card(row, datetime.now(timezone.utc)) if row else None
-        return BookmarkOut(id=bm.id, chain=bm.chain, token_address=bm.token_address, note=bm.note, created_at=bm.created_at, token=card)
+        )
+    ).scalar_one_or_none()
+    card = _row_to_card(row, datetime.now(timezone.utc)) if row else None
+    return BookmarkOut(
+        id=bm.id, chain=bm.chain, token_address=bm.token_address,
+        note=bm.note, created_at=bm.created_at, token=card,
+    )
 
 
 @router.delete("/bookmarks/{chain}/{address}")
-async def remove_bookmark(chain: str, address: str, user=Depends(current_user), c: Container = Depends(get_container)):
-    async with c.sf() as db:
-        await db.execute(
-            delete(M.TokenBookmark).where(
-                M.TokenBookmark.user_id == user.id,
-                M.TokenBookmark.chain == chain,
-                M.TokenBookmark.token_address == address.lower(),
-            )
+async def remove_bookmark(
+    chain: str,
+    address: str,
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(
+        delete(M.TokenBookmark).where(
+            M.TokenBookmark.user_id == user.id,
+            M.TokenBookmark.chain == chain,
+            M.TokenBookmark.token_address == address.lower(),
         )
-        await db.commit()
+    )
+    await db.commit()
     return {"ok": True}

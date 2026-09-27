@@ -18,6 +18,16 @@ type TokenCard = {
 type HistResp = { window: string; tokens: TokenCard[]; count: number };
 type Bookmark = { id: string; chain: string; token_address: string; note?: string | null; token?: TokenCard | null };
 
+function statusVariant(passed?: boolean): "success" | "default" {
+  return passed ? "success" : "default";
+}
+
+function priorityVariant(p?: string | null): "warning" | "success" | "default" {
+  if (p === "HOT") return "warning";
+  if (p === "WARM") return "success";
+  return "default";
+}
+
 export default function DiscoveryPage() {
   const [window, setWindow] = useState<"24h" | "72h">("24h");
   const [data, setData] = useState<HistResp | null>(null);
@@ -27,47 +37,47 @@ export default function DiscoveryPage() {
   const [status, setStatus] = useState<any>(null);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
 
-  const loadHist = () => {
+  useEffect(() => {
     setLoading(true);
-    api(`/discovery/historical/${window}`)
-      .then((r) => setData(r as HistResp))
+    api<HistResp>(`/discovery/historical/${window}`)
+      .then((r) => setData(r))
       .catch(() => setData({ window, tokens: [], count: 0 }))
       .finally(() => setLoading(false));
-  };
-  useEffect(() => { loadHist(); }, [window]);
+  }, [window]);
+
   useEffect(() => {
     api("/discovery/status").then(setStatus).catch(() => {});
-    api("/discovery/bookmarks").then((r) => setBookmarks(Array.isArray(r) ? r : [])).catch(() => setBookmarks([]));
+    api<Bookmark[]>("/discovery/bookmarks").then((r) => setBookmarks(Array.isArray(r) ? r : [])).catch(() => setBookmarks([]));
   }, []);
 
   const doSearch = () => {
     if (!q.trim()) return;
-    api(`/discovery/search?q=${encodeURIComponent(q)}`)
-      .then((r: any) => setSearchResults(r.results || []))
+    api<{ results: TokenCard[] }>(`/discovery/search?q=${encodeURIComponent(q)}`)
+      .then((r) => setSearchResults(r.results || []))
       .catch(() => setSearchResults([]));
   };
 
   const bookmark = async (t: TokenCard) => {
     try {
       await api("/discovery/bookmarks", { method: "POST", body: { chain: t.chain, token_address: t.token_address } });
-      const bms = await api("/discovery/bookmarks");
+      const bms = await api<Bookmark[]>("/discovery/bookmarks");
       setBookmarks(Array.isArray(bms) ? bms : []);
     } catch { /* ignore dup */ }
   };
 
   const unbookmark = async (chain: string, address: string) => {
-    await api(`/discovery/bookmarks/${chain}/${address}`, { method: "DELETE" });
+    await api(`/discovery/bookmarks/\( {chain}/ \){address}`, { method: "DELETE" });
     setBookmarks((prev) => prev.filter((b) => !(b.chain === chain && b.token_address === address)));
   };
 
   const TokenRow = ({ t, showBookmark = true }: { t: TokenCard; showBookmark?: boolean }) => (
-    <Card key={`${t.chain}:${t.token_address}`}>
+    <Card key={`\( {t.chain}: \){t.token_address}`}>
       <CardHeader className="pb-1">
         <div className="flex items-start justify-between gap-2">
-          <CardTitle className="text-base">{t.symbol || t.token_address.slice(0, 12)}…</CardTitle>
+          <CardTitle className="text-base">{t.symbol || `${t.token_address.slice(0, 12)}…`}</CardTitle>
           <div className="flex gap-1">
-            <Badge variant={t.global_screening_passed ? "default" : "secondary"}>{t.status || "—"}</Badge>
-            {t.priority && <Badge variant="outline">{t.priority}</Badge>}
+            <Badge variant={statusVariant(t.global_screening_passed)}>{t.status || "—"}</Badge>
+            {t.priority ? <Badge variant={priorityVariant(t.priority)}>{t.priority}</Badge> : null}
           </div>
         </div>
         <p className="text-xs text-muted-foreground">{t.launchpad || "unknown"} · {t.token_address.slice(0, 10)}…</p>
@@ -75,11 +85,11 @@ export default function DiscoveryPage() {
       <CardContent className="space-y-2">
         <div className="grid grid-cols-2 gap-1 text-xs">
           <span>Score: {t.score != null ? t.score.toFixed(1) : "—"}</span>
-          <span>Δ: {t.score_delta != null ? (t.score_delta > 0 ? "+" : "") + t.score_delta.toFixed(1) : "—"}</span>
+          <span>Δ: {t.score_delta != null ? `\( {t.score_delta > 0 ? "+" : ""} \){t.score_delta.toFixed(1)}` : "—"}</span>
           <span>Price: {t.price != null ? t.price.toPrecision(4) : "—"}</span>
           <span>Holders: {t.holders != null ? t.holders : "—"}</span>
-          <span>MCap: {t.market_cap != null ? `$${Math.round(t.market_cap).toLocaleString()}` : "—"}</span>
-          <span>Liq: {t.liquidity != null ? `$${Math.round(t.liquidity).toLocaleString()}` : "—"}</span>
+          <span>MCap: {t.market_cap != null ? `\[ {Math.round(t.market_cap).toLocaleString()}` : "—"}</span>
+          <span>Liq: {t.liquidity != null ? ` \]{Math.round(t.liquidity).toLocaleString()}` : "—"}</span>
         </div>
         {t.last_monitored_at && (
           <p className="text-[10px] text-muted-foreground">Last monitored: {new Date(t.last_monitored_at).toLocaleString()}</p>
@@ -97,7 +107,7 @@ export default function DiscoveryPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-xl font-bold">Token Discovery</h1>
           {status && (
-            <Badge variant="outline" className="text-xs">
+            <Badge variant={status.premium_scanner_enabled ? "success" : "default"}>
               {status.premium_scanner_enabled ? "Premium on" : "Premium off"} · global · every {status.discovery_interval_hours ?? 3}h
             </Badge>
           )}
@@ -116,8 +126,12 @@ export default function DiscoveryPage() {
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-base">Search tokens</CardTitle></CardHeader>
           <CardContent className="flex gap-2">
-            <Input placeholder="name, symbol, address, launchpad…" value={q} onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && doSearch()} />
+            <Input
+              placeholder="name, symbol, address, launchpad…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && doSearch()}
+            />
             <Button onClick={doSearch}>Search</Button>
           </CardContent>
         </Card>
@@ -134,10 +148,14 @@ export default function DiscoveryPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               {bookmarks.map((b) => (
                 <div key={b.id} className="space-y-1">
-                  {b.token ? <TokenRow t={b.token} showBookmark={false} /> : (
+                  {b.token ? (
+                    <TokenRow t={b.token} showBookmark={false} />
+                  ) : (
                     <Card><CardContent className="p-3 text-sm">{b.chain}:{b.token_address}</CardContent></Card>
                   )}
-                  <Button size="sm" variant="ghost" className="w-full" onClick={() => void unbookmark(b.chain, b.token_address)}>Remove bookmark</Button>
+                  <Button size="sm" variant="ghost" className="w-full" onClick={() => void unbookmark(b.chain, b.token_address)}>
+                    Remove bookmark
+                  </Button>
                 </div>
               ))}
             </div>
@@ -145,11 +163,15 @@ export default function DiscoveryPage() {
         )}
 
         <h2 className="text-lg font-semibold">Discovered · {window}</h2>
-        {loading ? <Loading label="Loading historical tokens…" /> : !data || data.count === 0 ? (
-          <Empty title="No tokens in window" description="Global discovery has not populated candidates for this period yet." />
+        {loading ? (
+          <Loading label="Loading historical tokens…" />
+        ) : !data || data.count === 0 ? (
+          <Empty>
+            No tokens in this window yet. Global discovery has not populated candidates for this period.
+          </Empty>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
-            {data.tokens.map((t) => <TokenRow key={`${t.chain}:${t.token_address}`} t={t} />)}
+            {data.tokens.map((t) => <TokenRow key={`\( {t.chain}: \){t.token_address}`} t={t} />)}
           </div>
         )}
       </div>
