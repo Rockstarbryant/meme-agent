@@ -19,6 +19,27 @@ def _num(v: Any) -> float | None:
         return None
 
 
+def _estimate_buy_sell_usd(
+    volume_5m: float | None,
+    buys_5m: int | None,
+    sells_5m: int | None,
+) -> tuple[float | None, float | None]:
+    """Split total USD volume by txn counts when the API has no buy/sell USD.
+
+    DexScreener exposes m5 buy/sell *counts* and total volume, not USD per side.
+    Estimating by count share is enough for buy_sell_volume_ratio and strategy
+    pressure gates; Gecko trade history can overwrite with real USD later.
+    """
+    if volume_5m is None or volume_5m <= 0:
+        return None, None
+    b = int(buys_5m or 0)
+    s = int(sells_5m or 0)
+    total = b + s
+    if total <= 0:
+        return None, None
+    return volume_5m * (b / total), volume_5m * (s / total)
+
+
 class DexScreenerArcMarketData(MarketDataProvider):
     """Free, no-API-key enrichment provider (https://docs.dexscreener.com/api/reference).
 
@@ -65,6 +86,12 @@ class DexScreenerArcMarketData(MarketDataProvider):
         created_ms = pair.get("pairCreatedAt")
         created = datetime.fromtimestamp(created_ms / 1000, timezone.utc) if isinstance(created_ms, (int, float)) else None
         now = datetime.now(timezone.utc)
+
+        volume_5m = _num(vol.get("m5"))
+        buys_5m = int(_num(m5.get("buys")) or 0) or None
+        sells_5m = int(_num(m5.get("sells")) or 0) or None
+        buy_volume_5m, sell_volume_5m = _estimate_buy_sell_usd(volume_5m, buys_5m, sells_5m)
+
         state = MarketState(
             chain="arc", token_address=token, timestamp=now,
             pool_address=str(pair.get("pairAddress") or "") or None,
@@ -74,8 +101,9 @@ class DexScreenerArcMarketData(MarketDataProvider):
             market_cap=_num(pair.get("marketCap")) or _num(pair.get("fdv")),
             liquidity=_num(liq.get("usd")),
             price_change_5m=_num(chg.get("m5")), price_change_15m=None, price_change_1m=None,
-            volume_5m=_num(vol.get("m5")), volume_15m=None, volume_1m=None,
-            buys_5m=int(_num(m5.get("buys")) or 0) or None, sells_5m=int(_num(m5.get("sells")) or 0) or None,
+            volume_5m=volume_5m, volume_15m=None, volume_1m=None,
+            buy_volume_5m=buy_volume_5m, sell_volume_5m=sell_volume_5m,
+            buys_5m=buys_5m, sells_5m=sells_5m,
             contract=ContractInfo(verified=None),
             data_sources=["dexscreener:pairs"], is_demo=False,
         )

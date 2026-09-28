@@ -34,6 +34,22 @@ def _ts(v: Any) -> datetime | None:
         return None
 
 
+def _estimate_buy_sell_usd(
+    volume_5m: float | None,
+    buys_5m: int | None,
+    sells_5m: int | None,
+) -> tuple[float | None, float | None]:
+    """Split total USD volume by txn counts when the API has no buy/sell USD."""
+    if volume_5m is None or volume_5m <= 0:
+        return None, None
+    b = int(buys_5m or 0)
+    s = int(sells_5m or 0)
+    total = b + s
+    if total <= 0:
+        return None, None
+    return volume_5m * (b / total), volume_5m * (s / total)
+
+
 class DexPaprikaArcMarketData(MarketDataProvider):
     """DexPaprika provider for Arc.
 
@@ -244,14 +260,20 @@ class DexPaprikaArcMarketData(MarketDataProvider):
         name = summary.get("name")
         created = _ts(summary.get("created_at") or summary.get("pool_created_at"))
 
+        volume_5m = vol("5m")
+        buys_5m = buys("5m")
+        sells_5m = sells("5m")
+        buy_volume_5m, sell_volume_5m = _estimate_buy_sell_usd(volume_5m, buys_5m, sells_5m)
+
         state = MarketState(
             chain="arc", token_address=token, timestamp=now,
             pool_address=pool_address, pool_id=pool_address, symbol=symbol or name,
             token_created_at=created, price=price, market_cap=market_cap, liquidity=liquidity,
             price_change_1m=price_change_1m, price_change_5m=price_change_5m, price_change_15m=price_change_15m,
-            volume_1m=vol("1m"), volume_5m=vol("5m"), volume_15m=vol("15m"),
+            volume_1m=vol("1m"), volume_5m=volume_5m, volume_15m=vol("15m"),
+            buy_volume_5m=buy_volume_5m, sell_volume_5m=sell_volume_5m,
             buys_1m=buys("1m"), sells_1m=sells("1m"),
-            buys_5m=buys("5m"), sells_5m=sells("5m"),
+            buys_5m=buys_5m, sells_5m=sells_5m,
             contract=ContractInfo(verified=None),
             data_sources=["dexpaprika:tokens", "dexpaprika:pools"], is_demo=False,
         )

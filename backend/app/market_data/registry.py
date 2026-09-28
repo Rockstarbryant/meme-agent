@@ -19,7 +19,7 @@ log = logging.getLogger("market_data")
 # what keeps an unstable/quota-limited *last* provider (e.g. a paid Bitquery
 # plan that started rejecting requests) from being hit on every single token
 # lookup once the free sources already answered the question.
-_CORE_FIELDS = ("price", "liquidity", "volume_5m", "holder_count", "price_change_5m")
+_CORE_FIELDS = ("price", "liquidity", "volume_5m", "buy_volume_5m", "sell_volume_5m", "price_change_5m")
 
 
 def _is_complete(state: MarketState) -> bool:
@@ -171,16 +171,23 @@ class MarketDataRegistry(MarketDataProvider):
             raise DataUnavailable("no token candidates discovered by configured market-data providers")
         return found
 
+    # Prefer real Gecko trade USD split over count-based estimates.
+    _VOLUME_SPLIT_FIELDS = ("buy_volume_5m", "sell_volume_5m")
+
     @staticmethod
     def _merge(primary: MarketState, extra: MarketState) -> MarketState:
         data = primary.model_dump()
         extra_data = extra.model_dump()
-        # The first provider owns non-null values. Later providers only fill gaps,
-        # except for data_sources which is always unioned for auditability.
+        extra_sources = extra.data_sources or []
+        gecko_quality = any("geckoterminal" in str(s) for s in extra_sources)
         for key, value in extra_data.items():
             if key == "data_sources":
                 continue
-            if data.get(key) is None and value is not None:
+            if value is None:
+                continue
+            if data.get(key) is None:
+                data[key] = value
+            elif key in MarketDataRegistry._VOLUME_SPLIT_FIELDS and gecko_quality:
                 data[key] = value
         data["data_sources"] = list(dict.fromkeys([*(primary.data_sources or []), *(extra.data_sources or [])]))
         return MarketState(**data)
