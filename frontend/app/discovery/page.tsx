@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -9,14 +10,31 @@ import { api } from "@/lib/api";
 import { Loading, Empty } from "@/components/states";
 
 type TokenCard = {
-  chain: string; token_address: string; symbol?: string | null; name?: string | null;
-  launchpad?: string | null; market_cap?: number | null; liquidity?: number | null;
-  holders?: number | null; score?: number | null; score_delta?: number | null;
-  status?: string | null; priority?: string | null; price?: number | null;
-  global_screening_passed?: boolean; last_monitored_at?: string | null;
+  chain: string;
+  token_address: string;
+  symbol?: string | null;
+  name?: string | null;
+  launchpad?: string | null;
+  market_cap?: number | null;
+  liquidity?: number | null;
+  holders?: number | null;
+  score?: number | null;
+  score_delta?: number | null;
+  status?: string | null;
+  priority?: string | null;
+  price?: number | null;
+  global_screening_passed?: boolean;
+  last_monitored_at?: string | null;
 };
+
 type HistResp = { window: string; tokens: TokenCard[]; count: number };
-type Bookmark = { id: string; chain: string; token_address: string; note?: string | null; token?: TokenCard | null };
+type Bookmark = {
+  id: string;
+  chain: string;
+  token_address: string;
+  note?: string | null;
+  token?: TokenCard | null;
+};
 
 function statusVariant(passed?: boolean): "success" | "default" {
   return passed ? "success" : "default";
@@ -28,139 +46,338 @@ function priorityVariant(p?: string | null): "warning" | "success" | "default" {
   return "default";
 }
 
+function fmtScore(n?: number | null): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return n.toFixed(1);
+}
+
+function fmtDelta(n?: number | null): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return sign + n.toFixed(1);
+}
+
+function fmtPrice(n?: number | null): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  if (n === 0) return "0";
+  if (n < 0.0001) return n.toExponential(2);
+  return n.toPrecision(4);
+}
+
+function fmtUsd(n?: number | null): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return "$" + Math.round(n).toLocaleString();
+}
+
+function fmtHolders(n?: number | null): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return String(n);
+}
+
+function shortAddr(a: string): string {
+  if (!a || a.length < 12) return a || "—";
+  return a.slice(0, 10) + "…";
+}
+
 export default function DiscoveryPage() {
   const [window, setWindow] = useState<"24h" | "72h">("24h");
   const [data, setData] = useState<HistResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [searchResults, setSearchResults] = useState<TokenCard[]>([]);
-  const [status, setStatus] = useState<any>(null);
+  const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   useEffect(() => {
     setLoading(true);
-    api<HistResp>(`/discovery/historical/${window}`)
-      .then((r) => setData(r))
-      .catch(() => setData({ window, tokens: [], count: 0 }))
-      .finally(() => setLoading(false));
+    api<HistResp>("/discovery/historical/" + window)
+      .then(function (r) {
+        setData(r);
+      })
+      .catch(function () {
+        setData({ window: window, tokens: [], count: 0 });
+      })
+      .finally(function () {
+        setLoading(false);
+      });
   }, [window]);
 
   useEffect(() => {
-    api("/discovery/status").then(setStatus).catch(() => {});
-    api<Bookmark[]>("/discovery/bookmarks").then((r) => setBookmarks(Array.isArray(r) ? r : [])).catch(() => setBookmarks([]));
+    api("/discovery/status")
+      .then(function (r) {
+        setStatus(r as Record<string, unknown>);
+      })
+      .catch(function () {});
+    api<Bookmark[]>("/discovery/bookmarks")
+      .then(function (r) {
+        setBookmarks(Array.isArray(r) ? r : []);
+      })
+      .catch(function () {
+        setBookmarks([]);
+      });
   }, []);
 
-  const doSearch = () => {
+  function doSearch() {
     if (!q.trim()) return;
-    api<{ results: TokenCard[] }>(`/discovery/search?q=${encodeURIComponent(q)}`)
-      .then((r) => setSearchResults(r.results || []))
-      .catch(() => setSearchResults([]));
-  };
+    api<{ results: TokenCard[] }>("/discovery/search?q=" + encodeURIComponent(q))
+      .then(function (r) {
+        setSearchResults(r.results || []);
+      })
+      .catch(function () {
+        setSearchResults([]);
+      });
+  }
 
-  const bookmark = async (t: TokenCard) => {
+  async function bookmark(t: TokenCard) {
     try {
-      await api("/discovery/bookmarks", { method: "POST", body: { chain: t.chain, token_address: t.token_address } });
+      await api("/discovery/bookmarks", {
+        method: "POST",
+        body: { chain: t.chain, token_address: t.token_address },
+      });
       const bms = await api<Bookmark[]>("/discovery/bookmarks");
       setBookmarks(Array.isArray(bms) ? bms : []);
-    } catch { /* ignore dup */ }
-  };
+    } catch {
+      /* ignore dup */
+    }
+  }
 
-  const unbookmark = async (chain: string, address: string) => {
-    await api(`/discovery/bookmarks/\( {chain}/ \){address}`, { method: "DELETE" });
-    setBookmarks((prev) => prev.filter((b) => !(b.chain === chain && b.token_address === address)));
-  };
+  async function unbookmark(chain: string, address: string) {
+    await api("/discovery/bookmarks/" + chain + "/" + address, { method: "DELETE" });
+    setBookmarks(function (prev) {
+      return prev.filter(function (b) {
+        return !(b.chain === chain && b.token_address === address);
+      });
+    });
+  }
 
-  const TokenRow = ({ t, showBookmark = true }: { t: TokenCard; showBookmark?: boolean }) => (
-    <Card key={`\( {t.chain}: \){t.token_address}`}>
-      <CardHeader className="pb-1">
-        <div className="flex items-start justify-between gap-2">
-          <CardTitle className="text-base">{t.symbol || `${t.token_address.slice(0, 12)}…`}</CardTitle>
-          <div className="flex gap-1">
-            <Badge variant={statusVariant(t.global_screening_passed)}>{t.status || "—"}</Badge>
-            {t.priority ? <Badge variant={priorityVariant(t.priority)}>{t.priority}</Badge> : null}
+  async function openDetail(t: TokenCard) {
+    const key = t.chain + ":" + t.token_address;
+    if (expanded === key) {
+      setExpanded(null);
+      setDetail(null);
+      return;
+    }
+    setExpanded(key);
+    setDetailLoading(true);
+    setDetail(null);
+    try {
+      const d = await api<Record<string, unknown>>(
+        "/discovery/tokens/" + t.chain + "/" + t.token_address
+      );
+      setDetail(d);
+    } catch {
+      setDetail({ token: t, history: [], error: "Could not load detail" });
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  function TokenRow(props: { t: TokenCard; showBookmark?: boolean }) {
+    const t = props.t;
+    const showBookmark = props.showBookmark !== false;
+    const key = t.chain + ":" + t.token_address;
+    const isOpen = expanded === key;
+    const title = t.symbol || shortAddr(t.token_address);
+    const subtitle = (t.launchpad || "unknown") + " · " + shortAddr(t.token_address);
+
+    return (
+      <Card key={key}>
+        <CardHeader className="pb-1">
+          <button
+            type="button"
+            className="w-full text-left"
+            onClick={function () {
+              void openDetail(t);
+            }}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <CardTitle className="text-base hover:underline">{title}</CardTitle>
+              <div className="flex gap-1">
+                <Badge variant={statusVariant(t.global_screening_passed)}>
+                  {t.status || "—"}
+                </Badge>
+                {t.priority ? (
+                  <Badge variant={priorityVariant(t.priority)}>{t.priority}</Badge>
+                ) : null}
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">{subtitle}</p>
+          </button>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <div className="grid grid-cols-2 gap-1 text-xs">
+            <span>Score: {fmtScore(t.score)}</span>
+            <span>Δ: {fmtDelta(t.score_delta)}</span>
+            <span>Price: {fmtPrice(t.price)}</span>
+            <span>Holders: {fmtHolders(t.holders)}</span>
+            <span>MCap: {fmtUsd(t.market_cap)}</span>
+            <span>Liq: {fmtUsd(t.liquidity)}</span>
           </div>
-        </div>
-        <p className="text-xs text-muted-foreground">{t.launchpad || "unknown"} · {t.token_address.slice(0, 10)}…</p>
-      </CardHeader>
-      <CardContent className="space-y-2">
-        <div className="grid grid-cols-2 gap-1 text-xs">
-          <span>Score: {t.score != null ? t.score.toFixed(1) : "—"}</span>
-          <span>Δ: {t.score_delta != null ? `\( {t.score_delta > 0 ? "+" : ""} \){t.score_delta.toFixed(1)}` : "—"}</span>
-          <span>Price: {t.price != null ? t.price.toPrecision(4) : "—"}</span>
-          <span>Holders: {t.holders != null ? t.holders : "—"}</span>
-          <span>MCap: {t.market_cap != null ? `\[ {Math.round(t.market_cap).toLocaleString()}` : "—"}</span>
-          <span>Liq: {t.liquidity != null ? ` \]{Math.round(t.liquidity).toLocaleString()}` : "—"}</span>
-        </div>
-        {t.last_monitored_at && (
-          <p className="text-[10px] text-muted-foreground">Last monitored: {new Date(t.last_monitored_at).toLocaleString()}</p>
-        )}
-        {showBookmark && (
-          <Button size="sm" variant="outline" className="w-full" onClick={() => void bookmark(t)}>Bookmark</Button>
-        )}
-      </CardContent>
-    </Card>
-  );
+          {t.last_monitored_at ? (
+            <p className="text-[10px] text-muted-foreground">
+              Last monitored: {new Date(t.last_monitored_at).toLocaleString()}
+            </p>
+          ) : null}
+
+          {isOpen ? (
+            <div className="rounded-md border p-2 text-xs space-y-1">
+              {detailLoading ? (
+                <Loading label="Loading detail…" />
+              ) : detail ? (
+                <>
+                  <p className="font-medium break-all">
+                    {t.chain}:{t.token_address}
+                  </p>
+                  <p className="text-muted-foreground">
+                    Metrics refresh via monitoring. Thin data → low score → REJECTED/COLD is normal until holders and buy/sell enrich.
+                  </p>
+                  <p>
+                    <Link href="/opportunities" className="text-primary underline">
+                      Open Opportunities
+                    </Link>
+                    {" "}
+                    for agent decisions and Buy anyway (after a WATCH decision exists).
+                  </p>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1"
+              onClick={function () {
+                void openDetail(t);
+              }}
+            >
+              {isOpen ? "Hide detail" : "Details"}
+            </Button>
+            {showBookmark ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="flex-1"
+                onClick={function () {
+                  void bookmark(t);
+                }}
+              >
+                Bookmark
+              </Button>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const premiumOn = Boolean(status && status.premium_scanner_enabled);
+  const intervalH = (status && status.discovery_interval_hours) || 3;
+  const statusMsg = status && typeof status.message === "string" ? status.message : null;
 
   return (
     <AppShell>
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h1 className="text-xl font-bold">Token Discovery</h1>
-          {status && (
-            <Badge variant={status.premium_scanner_enabled ? "success" : "default"}>
-              {status.premium_scanner_enabled ? "Premium on" : "Premium off"} · global · every {status.discovery_interval_hours ?? 3}h
+          {status ? (
+            <Badge variant={premiumOn ? "success" : "default"}>
+              {premiumOn ? "Premium on" : "Premium off"} · global · every {String(intervalH)}h
             </Badge>
-          )}
+          ) : null}
         </div>
         <p className="text-sm text-muted-foreground">
-          Historical tokens from the global registry. Market data (price, mcap, liquidity, holders) is refreshed by monitoring — not frozen at discovery.
-          Opening this page does not trigger a launchpad scan.
+          Historical tokens from the global registry. Market data is refreshed by monitoring.
+          Opening this page does not trigger a launchpad scan. For Buy anyway, use Opportunities after the agent records a WATCH decision.
         </p>
-        {status?.message && <p className="text-xs text-muted-foreground">{status.message}</p>}
+        {statusMsg ? (
+          <p className="text-xs text-muted-foreground">{statusMsg}</p>
+        ) : null}
 
         <div className="flex gap-2">
-          <Button size="sm" variant={window === "24h" ? "default" : "outline"} onClick={() => setWindow("24h")}>Last 24 Hours</Button>
-          <Button size="sm" variant={window === "72h" ? "default" : "outline"} onClick={() => setWindow("72h")}>Last 72 Hours</Button>
+          <Button
+            size="sm"
+            variant={window === "24h" ? "default" : "outline"}
+            onClick={function () {
+              setWindow("24h");
+            }}
+          >
+            Last 24 Hours
+          </Button>
+          <Button
+            size="sm"
+            variant={window === "72h" ? "default" : "outline"}
+            onClick={function () {
+              setWindow("72h");
+            }}
+          >
+            Last 72 Hours
+          </Button>
         </div>
 
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-base">Search tokens</CardTitle></CardHeader>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Search tokens</CardTitle>
+          </CardHeader>
           <CardContent className="flex gap-2">
             <Input
               placeholder="name, symbol, address, launchpad…"
               value={q}
-              onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && doSearch()}
+              onChange={function (e) {
+                setQ(e.target.value);
+              }}
+              onKeyDown={function (e) {
+                if (e.key === "Enter") doSearch();
+              }}
             />
             <Button onClick={doSearch}>Search</Button>
           </CardContent>
         </Card>
 
-        {searchResults.length > 0 && (
+        {searchResults.length > 0 ? (
           <div className="grid gap-3 sm:grid-cols-2">
-            {searchResults.map((t) => <TokenRow key={`s-${t.token_address}`} t={t} />)}
+            {searchResults.map(function (t) {
+              return <TokenRow key={"s-" + t.token_address} t={t} />;
+            })}
           </div>
-        )}
+        ) : null}
 
-        {bookmarks.length > 0 && (
+        {bookmarks.length > 0 ? (
           <div className="space-y-2">
             <h2 className="text-lg font-semibold">Bookmarks</h2>
             <div className="grid gap-3 sm:grid-cols-2">
-              {bookmarks.map((b) => (
-                <div key={b.id} className="space-y-1">
-                  {b.token ? (
-                    <TokenRow t={b.token} showBookmark={false} />
-                  ) : (
-                    <Card><CardContent className="p-3 text-sm">{b.chain}:{b.token_address}</CardContent></Card>
-                  )}
-                  <Button size="sm" variant="ghost" className="w-full" onClick={() => void unbookmark(b.chain, b.token_address)}>
-                    Remove bookmark
-                  </Button>
-                </div>
-              ))}
+              {bookmarks.map(function (b) {
+                return (
+                  <div key={b.id} className="space-y-1">
+                    {b.token ? (
+                      <TokenRow t={b.token} showBookmark={false} />
+                    ) : (
+                      <Card>
+                        <CardContent className="p-3 text-sm">
+                          {b.chain}:{b.token_address}
+                        </CardContent>
+                      </Card>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="w-full"
+                      onClick={function () {
+                        void unbookmark(b.chain, b.token_address);
+                      }}
+                    >
+                      Remove bookmark
+                    </Button>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        )}
+        ) : null}
 
         <h2 className="text-lg font-semibold">Discovered · {window}</h2>
         {loading ? (
@@ -171,7 +388,11 @@ export default function DiscoveryPage() {
           </Empty>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
-            {data.tokens.map((t) => <TokenRow key={`\( {t.chain}: \){t.token_address}`} t={t} />)}
+            {data.tokens.map(function (t) {
+              return (
+                <TokenRow key={t.chain + ":" + t.token_address} t={t} />
+              );
+            })}
           </div>
         )}
       </div>
