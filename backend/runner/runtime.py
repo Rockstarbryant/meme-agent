@@ -101,6 +101,7 @@ class RunnerRuntime:
         self._market_registry = None
         self._rpc = None
         self._uniswap = None
+        self._enrichment = None
         if chain is _UNSET:
             rpc = self._make_rpc(settings)
             self._rpc = rpc
@@ -116,10 +117,13 @@ class RunnerRuntime:
         else:
             self.chain = chain
         self.llm = build_provider(settings) if llm is _UNSET else llm
-        self.market_data: MarketDataProvider = market_data if market_data is not _UNSET else (
+        base_market_data: MarketDataProvider = market_data if market_data is not _UNSET else (
             DemoMarketData() if settings.data_source == "demo" else self._build_arc_market_data(settings)
         )
-        self.data_kind = "DEMO DATA" if isinstance(self.market_data, DemoMarketData) else getattr(self.market_data, "name", "arc/market-data")
+        self.market_data: MarketDataProvider = base_market_data
+        if market_data is _UNSET and settings.data_source != "demo":
+            self.market_data = self._maybe_wrap_enrichment(settings, base_market_data)
+        self.data_kind = "DEMO DATA" if isinstance(base_market_data, DemoMarketData) else getattr(base_market_data, "name", "arc/market-data")
         self.approver = TradeApprover(approval_secret(settings.state_dir) if settings.state_dir else "x" * 32)
         self.idem = SqliteIdempotencyStore(store)
         self.bus = EventBus([OutboxSink(self)])
@@ -275,6 +279,50 @@ class RunnerRuntime:
         )
         return self._market_registry
 
+    def _maybe_wrap_enrichment(self, settings: RunnerSettings, inner: MarketDataProvider) -> MarketDataProvider:
+        """Layers contract/holder/creator/MEV enrichment onto the base provider (see app/enrichment/).
+
+        Holder-growth needs the previous scan's holder_count; that snapshot is kept in the same local SQLite
+        store as everything else the runner persists across restarts (``enrich:snap:<chain>:<addr>``).
+        """
+        try:
+            from app.enrichment.wrapper import EnrichingMarketDataProvider, build_enrichment_service
+
+            rpc = self._rpc
+            svc = build_enrichment_service(settings, rpc=rpc)
+            if svc is None:
+                return inner
+            self._enrichment = svc
+
+            async def _previous(key: str):
+                from datetime import datetime
+
+                from app.domain.market import MarketState
+
+                raw = self.store.kv_get(f"enrich:snap:{key}")
+                if not raw:
+                    return None
+                try:
+                    chain, addr = key.split(":", 1)
+                    return MarketState(chain=chain, token_address=addr,
+                                       timestamp=datetime.fromisoformat(raw["timestamp"]),
+                                       holder_count=raw.get("holder_count"))
+                except Exception:
+                    return None
+
+            async def _record(m) -> None:
+                if m.holder_count is None:
+                    return
+                self.store.kv_set(f"enrich:snap:{m.key}", {
+                    "timestamp": m.timestamp.isoformat(), "holder_count": m.holder_count,
+                })
+
+            log.info("enrichment enabled: sources=%s", svc.sources())
+            return EnrichingMarketDataProvider(inner, svc, previous_lookup=_previous, record_fn=_record)
+        except Exception:
+            log.exception("enrichment setup failed; continuing without contract/holder enrichment")
+            return inner
+
     async def aclose(self) -> None:
         close = getattr(self.market_data, "aclose", None)
         if close is not None:
@@ -282,6 +330,13 @@ class RunnerRuntime:
                 await close()
             except Exception:
                 log.exception("failed closing market-data providers")
+        if self._enrichment is not None:
+            for client in (self._enrichment.blockscout, self._enrichment.etherscan):
+                if client is not None:
+                    try:
+                        await client.aclose()
+                    except Exception:
+                        log.exception("failed closing enrichment explorer client")
         if self._rpc is not None:
             try:
                 await self._rpc.aclose()

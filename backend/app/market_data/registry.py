@@ -19,11 +19,15 @@ log = logging.getLogger("market_data")
 # what keeps an unstable/quota-limited *last* provider (e.g. a paid Bitquery
 # plan that started rejecting requests) from being hit on every single token
 # lookup once the free sources already answered the question.
-_CORE_FIELDS = ("price", "liquidity", "volume_5m", "buy_volume_5m", "sell_volume_5m", "price_change_5m")
+#
+# ``unique_buyers_5m`` is part of the set because the strategy's ``buyer_growth`` component (a REQUIRED gate)
+# is missing without it, and only some providers supply it. The buy/sell ratio is checked through
+# ``buy_sell_volume_ratio()`` so a count-based ratio counts as present.
+_CORE_FIELDS = ("price", "liquidity", "volume_5m", "price_change_5m", "unique_buyers_5m")
 
 
 def _is_complete(state: MarketState) -> bool:
-    return all(getattr(state, f, None) is not None for f in _CORE_FIELDS)
+    return all(getattr(state, f, None) is not None for f in _CORE_FIELDS) and state.buy_sell_volume_ratio() is not None
 
 
 @dataclass
@@ -171,24 +175,39 @@ class MarketDataRegistry(MarketDataProvider):
             raise DataUnavailable("no token candidates discovered by configured market-data providers")
         return found
 
-    # Prefer real Gecko trade USD split over count-based estimates.
-    _VOLUME_SPLIT_FIELDS = ("buy_volume_5m", "sell_volume_5m")
+    # Prefer a real trade-history USD split over count-based estimates.
+    _VOLUME_SPLIT_FIELDS = ("buy_volume_5m", "sell_volume_5m", "buy_sell_basis")
 
     @staticmethod
     def _merge(primary: MarketState, extra: MarketState) -> MarketState:
         data = primary.model_dump()
         extra_data = extra.model_dump()
         extra_sources = extra.data_sources or []
-        gecko_quality = any("geckoterminal" in str(s) for s in extra_sources)
+        real_split = extra.buy_sell_basis == "usd" or (
+            any("geckoterminal" in str(s) for s in extra_sources) and extra.buy_volume_5m is not None
+        )
         for key, value in extra_data.items():
             if key == "data_sources":
                 continue
-            if value is None:
+            if key == "contract":
+                # Field-wise: a later provider may know one contract fact the earlier one did not.
+                merged_c = dict(data.get("contract") or {})
+                for ck, cv in (value or {}).items():
+                    if cv in (None, []):
+                        continue
+                    if merged_c.get(ck) in (None, []):
+                        merged_c[ck] = cv
+                data["contract"] = merged_c
                 continue
-            if data.get(key) is None:
+            if value is None or value == []:
+                continue
+            if key in MarketDataRegistry._VOLUME_SPLIT_FIELDS and real_split:
                 data[key] = value
-            elif key in MarketDataRegistry._VOLUME_SPLIT_FIELDS and gecko_quality:
+                continue
+            if data.get(key) is None or data.get(key) == []:
                 data[key] = value
+            elif key == "enrichment_gaps":
+                data[key] = list(dict.fromkeys([*data[key], *value]))
         data["data_sources"] = list(dict.fromkeys([*(primary.data_sources or []), *(extra.data_sources or [])]))
         return MarketState(**data)
 
@@ -210,6 +229,11 @@ class MarketDataRegistry(MarketDataProvider):
                 state = await provider.get_market_state(token_address)
                 self._ok(name)
                 sources.append(name)
+                if not state.data_sources:
+                    # Provenance: a provider that does not label its own fields is still recorded by name.
+                    state = state.model_copy(update={"data_sources": [name]})
+                # Derive per-provider so a real USD split from a later provider can still override an estimate.
+                state.derive_buy_sell()
                 merged = state if merged is None else self._merge(merged, state)
             except DataUnavailable as exc:
                 self._fail(name, exc)
@@ -220,6 +244,8 @@ class MarketDataRegistry(MarketDataProvider):
         if merged is None:
             raise DataUnavailable("all market-data providers failed for " + token_address + ("; " + " | ".join(errors)[:800] if errors else ""))
         self.last_state_sources[token_address.lower()] = sources
+        merged.derive_buy_sell()
+        merged.scanned_at = datetime.now(timezone.utc)
         return merged
 
     async def aclose(self) -> None:

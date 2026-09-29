@@ -124,22 +124,37 @@ def contract_rules(x: RiskContext) -> list[RiskFlag]:
         out.append(_veto("CONTRACT_UNVERIFIED", K, "contract source not verified"))
     elif c.verified is None:
         out.append(_warn("CONTRACT_VERIFICATION_UNKNOWN", K, "contract verification status unknown"))
-    if c.mint_authority_active and L.veto_active_mint_authority:
+    # Admin powers are tri-state: True (capability + live admin) / False (absent or renounced) / None (capability
+    # detected in bytecode but the admin model itself could not be read — e.g. no owner()). None is a real gap,
+    # not a pass: it warns rather than silently letting a token with, say, an unassessable mint function through.
+    if c.mint_authority_active is True and L.veto_active_mint_authority:
         out.append(_veto("MINT_AUTHORITY_ACTIVE", K, "mint authority still active"))
-    if c.blacklist_capability and L.veto_blacklist_capability:
+    elif c.mint_authority_active is None:
+        out.append(_warn("MINT_AUTHORITY_UNKNOWN", K, "mint capability present but admin state could not be verified"))
+    if c.blacklist_capability is True and L.veto_blacklist_capability:
         out.append(_veto("BLACKLIST_CAPABILITY", K, "token can blacklist holders"))
+    elif c.blacklist_capability is None:
+        out.append(_warn("BLACKLIST_CAPABILITY_UNKNOWN", K, "blacklist capability present but admin state could not be verified"))
     if c.transfer_restricted:
         out.append(_veto("TRANSFER_RESTRICTED", K, "transfers are restricted"))
-    if c.pausable and L.veto_pausable:
+    if c.pausable is True and L.veto_pausable:
         out.append(_veto("PAUSABLE", K, "token transfers can be paused"))
+    elif c.pausable is None:
+        out.append(_warn("PAUSABLE_UNKNOWN", K, "pause capability present but admin state could not be verified"))
     for name, tax in (("BUY_TAX", c.buy_tax_pct), ("SELL_TAX", c.sell_tax_pct)):
         if tax is not None and tax > L.max_tax_pct:
             out.append(_veto(f"{name}_TOO_HIGH", K, f"{name.lower()} above limit", tax, L.max_tax_pct))
     if c.sell_simulation_ok is False:
-        out.append(_veto("SELL_SIMULATION_FAILED", K, "sell simulation failed (possible honeypot)"))
+        method = c.sell_check_method or "unknown method"
+        out.append(_veto("SELL_SIMULATION_FAILED", K, f"sell check failed via {method} (possible honeypot)"))
     elif c.sell_simulation_ok is None:
         f = _veto if live else _warn
         out.append(f("SELLABILITY_UNVERIFIED", K, "could not verify the token can be sold"))
+    elif c.sell_check_method and c.sell_check_method != "router_simulation":
+        # A holder-transfer probe passing is meaningfully weaker evidence than a real router/pool sell simulation
+        # (it cannot see pool-level taxes or hook logic). Surface that distinction instead of implying certainty.
+        out.append(_warn("SELLABILITY_HEURISTIC_ONLY", K,
+                         f"sellability confirmed only via {c.sell_check_method}, not a full router simulation"))
     if c.is_proxy:
         out.append(_warn("UPGRADEABLE_PROXY", K, "contract is an upgradeable proxy"))
     return out

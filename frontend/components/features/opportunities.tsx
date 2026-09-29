@@ -9,32 +9,47 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
-import { compact, duration, num, plainPct, price, shortAddr } from "@/lib/format";
+import { ago, compact, duration, num, plainPct, price, shortAddr } from "@/lib/format";
 import type { Action, Opportunity } from "@/types/api";
 
 const FILTERS: (Action | "ALL")[] = ["ALL", "BUY", "WATCH", "REJECT"];
-const Cell = ({ label, value }: { label: string; value: React.ReactNode }) => (
-  <div><dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="text-sm tabular-nums">{value}</dd></div>
+const Cell = ({ label, value, title }: { label: string; value: React.ReactNode; title?: string }) => (
+  <div title={title}><dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="text-sm tabular-nums">{value}</dd></div>
 );
 
 export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnyway?: (o: Opportunity) => void }) {
   const creator = o.creator_known ? (o.creator_sold_pct != null ? `sold ${plainPct(o.creator_sold_pct)}` : "known") : "unverified";
+  const launchpad = o.launchpad ?? o.launchpad_detected;
+  const launchpadTitle = !o.launchpad && o.launchpad_detected
+    ? `Detected from creation tx (${o.launchpad_evidence ?? "on-chain"}); not confirmed against the launchpad allowlist`
+    : undefined;
+  const ratioTitle = o.buy_sell_basis === "usd" ? "From real buy/sell USD volume"
+    : o.buy_sell_basis === "estimated_from_counts" ? "Estimated: total volume split by buy/sell transaction counts"
+    : o.buy_sell_basis === "counts" ? "From buy/sell transaction counts only (no USD volume available)" : undefined;
   return (
     <Card><CardContent className="space-y-2 pt-4">
       <div className="flex flex-wrap items-center gap-2">
         <Link className="font-semibold underline" href={`/tokens/${encodeURIComponent(o.token_key)}`}>{o.symbol ?? shortAddr(o.token_key)}</Link>
-        <span className="text-xs text-muted-foreground">{o.chain}{o.launchpad ? ` · ${o.launchpad}` : ""}</span>
+        <span className="text-xs text-muted-foreground" title={launchpadTitle}>
+          {o.chain}{launchpad ? ` · ${launchpad}${launchpadTitle ? " (detected)" : ""}` : ""}
+        </span>
         <ActionBadge action={o.final_action} /><DataLabel label={o.data_label} />
         <Link className="ml-auto text-xs underline" href={`/decisions/${o.decision_id}`}>why?</Link>
       </div>
       <dl className="grid grid-cols-3 gap-2 md:grid-cols-6 lg:grid-cols-7">
-        <Cell label="Age" value={duration(o.age_seconds)} /><Cell label="Price" value={price(o.price)} /><Cell label="Market cap" value={compact(o.market_cap)} />
+        <Cell label="Age" value={duration(o.age_seconds)} /><Cell label="Scanned" value={ago(o.scanned_at)} title="When our scanner last refreshed this token's data" />
+        <Cell label="Price" value={price(o.price)} /><Cell label="Market cap" value={compact(o.market_cap)} />
         <Cell label="Liquidity" value={compact(o.liquidity)} /><Cell label="Volume 5m" value={compact(o.volume_5m)} /><Cell label="Buyers 5m" value={o.unique_buyers_5m ?? "—"} />
-        <Cell label="Buy/sell" value={num(o.buy_sell_ratio)} /><Cell label="Holder growth" value={plainPct(o.holder_growth_pct)} /><Cell label="Top-10 holders" value={plainPct(o.top10_holder_pct)} />
+        <Cell label="Buy/sell" value={o.buy_sell_ratio != null && o.buy_sell_basis && o.buy_sell_basis !== "usd" ? `~${num(o.buy_sell_ratio)}` : num(o.buy_sell_ratio)} title={ratioTitle} />
+        <Cell label="Holder growth" value={plainPct(o.holder_growth_pct)} /><Cell label="Top-10 holders" value={plainPct(o.top10_holder_pct)} />
         <Cell label="Creator" value={creator} /><Cell label="Strategy score" value={num(o.strategy_score, 1)} /><Cell label="Risk score" value={num(o.risk_score, 0)} />
         <Cell label="AI" value={o.ai_status} />
+        <Cell label="MEV" value={o.mev_risk_score != null ? num(o.mev_risk_score, 2) : "—"} title={o.mev_method ? `Heuristic estimate (${o.mev_method}), not a mempool simulation` : undefined} />
       </dl>
       <p className="text-xs text-muted-foreground">{o.final_reason}</p>
+      {o.enrichment_gaps.length > 0 && (
+        <p className="text-[11px] text-muted-foreground">Not enriched: {o.enrichment_gaps.slice(0, 3).join("; ")}{o.enrichment_gaps.length > 3 ? "…" : ""}</p>
+      )}
       {o.final_action === "WATCH" && onBuyAnyway && (
         <Button size="sm" variant="outline" onClick={() => onBuyAnyway(o)}>Buy anyway</Button>
       )}

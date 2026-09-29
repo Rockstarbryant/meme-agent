@@ -151,26 +151,110 @@ def market_state_to_snapshot(m: MarketState) -> dict:
         "token_address": m.token_address,
         "timestamp": m.timestamp.isoformat() if m.timestamp else None,
         "launchpad": m.launchpad,
+        "launchpad_detected": m.launchpad_detected,
+        "launchpad_evidence": m.launchpad_evidence,
         "pool_address": m.pool_address,
         "symbol": m.symbol,
         "creator_address": m.creator_address,
+        "creator_known": m.creator_known,
+        "creator_balance_pct": m.creator_balance_pct,
+        "creator_sold_pct": m.creator_sold_pct,
         "token_created_at": m.token_created_at.isoformat() if m.token_created_at else None,
         "price": m.price,
         "market_cap": m.market_cap,
         "liquidity": m.liquidity,
+        "liquidity_change_5m_pct": m.liquidity_change_5m_pct,
         "volume_5m": m.volume_5m,
         "volume_15m": m.volume_15m,
+        "buy_volume_5m": m.buy_volume_5m,
+        "sell_volume_5m": m.sell_volume_5m,
+        "buy_sell_basis": m.buy_sell_basis,
         "buys_5m": m.buys_5m,
         "sells_5m": m.sells_5m,
         "unique_buyers_5m": m.unique_buyers_5m,
         "unique_sellers_5m": m.unique_sellers_5m,
+        "unique_buyers_prev_5m": m.unique_buyers_prev_5m,
+        "unique_buyers_1m": m.unique_buyers_1m,
         "holder_count": m.holder_count,
         "holder_growth_pct": m.holder_growth_pct,
+        "holder_growth_window_s": m.holder_growth_window_s,
+        "holder_basis": m.holder_basis,
+        "top5_holder_pct": m.top5_holder_pct,
         "top10_holder_pct": m.top10_holder_pct,
+        "top20_holder_pct": m.top20_holder_pct,
         "price_change_5m": m.price_change_5m,
         "price_change_15m": m.price_change_15m,
+        "expected_price_impact_pct": m.expected_price_impact_pct,
+        "mev_risk_score": m.mev_risk_score,
+        "mev_method": m.mev_method,
+        "scanned_at": m.scanned_at.isoformat() if m.scanned_at else None,
+        "enriched_at": m.enriched_at.isoformat() if m.enriched_at else None,
+        "enrichment_gaps": m.enrichment_gaps,
+        "data_sources": m.data_sources,
         "contract": m.contract.model_dump() if m.contract else {},
     }
+
+
+def _parse_dt(v: Any) -> datetime | None:
+    if isinstance(v, str):
+        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+    return v if isinstance(v, datetime) else None
+
+
+def market_state_from_snapshot(snap: dict, token: "LaunchpadToken") -> MarketState:
+    """Inverse of ``market_state_to_snapshot``. Falls back to the registry token for a few identity fields
+    (chain/address/launchpad/symbol/creator/created-at) so an older snapshot predating a field still reconstructs."""
+    from app.domain.market import ContractInfo
+
+    timestamp = _parse_dt(snap.get("timestamp")) or utcnow()
+    created = _parse_dt(snap.get("token_created_at"))
+    contract_snap = snap.get("contract") or {}
+    return MarketState(
+        chain=snap.get("chain") or token.chain,
+        token_address=snap.get("token_address") or token.token_address,
+        timestamp=timestamp,
+        launchpad=snap.get("launchpad") or token.launchpad,
+        launchpad_detected=snap.get("launchpad_detected"),
+        launchpad_evidence=snap.get("launchpad_evidence"),
+        symbol=snap.get("symbol") or token.symbol,
+        creator_address=snap.get("creator_address") or token.creator_address,
+        creator_known=bool(snap.get("creator_known") or False),
+        creator_balance_pct=snap.get("creator_balance_pct"),
+        creator_sold_pct=snap.get("creator_sold_pct"),
+        token_created_at=created or token.launched_at,
+        price=snap.get("price"),
+        market_cap=snap.get("market_cap"),
+        liquidity=snap.get("liquidity"),
+        liquidity_change_5m_pct=snap.get("liquidity_change_5m_pct"),
+        volume_5m=snap.get("volume_5m"),
+        volume_15m=snap.get("volume_15m"),
+        buy_volume_5m=snap.get("buy_volume_5m"),
+        sell_volume_5m=snap.get("sell_volume_5m"),
+        buy_sell_basis=snap.get("buy_sell_basis"),
+        buys_5m=snap.get("buys_5m"),
+        sells_5m=snap.get("sells_5m"),
+        unique_buyers_5m=snap.get("unique_buyers_5m"),
+        unique_sellers_5m=snap.get("unique_sellers_5m"),
+        unique_buyers_prev_5m=snap.get("unique_buyers_prev_5m"),
+        unique_buyers_1m=snap.get("unique_buyers_1m"),
+        holder_count=snap.get("holder_count"),
+        holder_growth_pct=snap.get("holder_growth_pct"),
+        holder_growth_window_s=snap.get("holder_growth_window_s"),
+        holder_basis=snap.get("holder_basis"),
+        top5_holder_pct=snap.get("top5_holder_pct"),
+        top10_holder_pct=snap.get("top10_holder_pct"),
+        top20_holder_pct=snap.get("top20_holder_pct"),
+        price_change_5m=snap.get("price_change_5m"),
+        price_change_15m=snap.get("price_change_15m"),
+        expected_price_impact_pct=snap.get("expected_price_impact_pct"),
+        mev_risk_score=snap.get("mev_risk_score"),
+        mev_method=snap.get("mev_method"),
+        scanned_at=_parse_dt(snap.get("scanned_at")),
+        enriched_at=_parse_dt(snap.get("enriched_at")),
+        enrichment_gaps=snap.get("enrichment_gaps") or [],
+        data_sources=snap.get("data_sources") or [],
+        contract=ContractInfo(**contract_snap) if contract_snap else ContractInfo(),
+    )
 
 
 def _parse(v: str | None) -> datetime | None:
@@ -194,7 +278,8 @@ class GlobalPipeline:
             redis=redis,
             default_ttl_s=float(getattr(settings, "market_data_cache_ttl_s", 15.0)),
         )
-        self.market_data = build_global_market_data(settings)
+        self._base_market_data = build_global_market_data(settings)
+        self.market_data = self._maybe_wrap_enrichment(settings)
         self.strategy = TractionMomentum(TractionMomentumConfig())
 
         disc_cfg = DiscoveryConfig(
@@ -224,6 +309,49 @@ class GlobalPipeline:
             score_fn=self._score,
             store=self.store,
         )
+
+    def _maybe_wrap_enrichment(self, settings: Any):
+        """Layers contract/holder/creator/MEV enrichment onto the base market-data provider (see app/enrichment/).
+
+        Uses a plain JSON-RPC client (independent of the market-data providers above) for the on-chain probes,
+        and the in-memory registry's own ``meta["last_snapshot"]`` for holder-growth's "previous scan" lookup —
+        the same snapshot discovery/monitoring already thread through, so no extra storage is needed.
+        """
+        try:
+            from app.chains.evm import EvmRpcClient
+            from app.enrichment.wrapper import EnrichingMarketDataProvider, build_enrichment_service
+
+            self._enrich_rpc = None
+            rpc_urls = [u for u in (
+                [getattr(settings, "arc_rpc_url", None)] +
+                str(getattr(settings, "arc_rpc_fallback_urls", "") or "").split(",")
+            ) if u and u.strip()]
+            self._enrich_rpc = EvmRpcClient(rpc_urls) if rpc_urls else None
+            svc = build_enrichment_service(settings, rpc=self._enrich_rpc)
+            if svc is None:
+                self._enrichment = None
+                return self._base_market_data
+            self._enrichment = svc
+            log.info("global pipeline enrichment enabled: sources=%s", svc.sources())
+            return EnrichingMarketDataProvider(self._base_market_data, svc, previous_lookup=self._previous_snapshot)
+        except Exception:
+            log.exception("enrichment setup failed for global pipeline; continuing without it")
+            self._enrichment = None
+            return self._base_market_data
+
+    async def _previous_snapshot(self, key: str) -> MarketState | None:
+        try:
+            chain, addr = key.split(":", 1)
+        except ValueError:
+            return None
+        token = self.registry.get(chain, addr)
+        if token is None:
+            return None
+        snap = (token.meta or {}).get("last_snapshot") or (token.meta or {}).get("initial_snapshot")
+        if not snap or not snap.get("holder_count"):
+            return None
+        ts = _parse(snap.get("timestamp")) or utcnow()
+        return MarketState(chain=chain, token_address=addr, timestamp=ts, holder_count=snap.get("holder_count"))
 
     async def start(self) -> None:
         n = await hydrate_registry(self.registry, self.store)
@@ -366,39 +494,7 @@ class GlobalPipeline:
 
     async def _score_from_snap(self, token: LaunchpadToken, snap: dict) -> float:
         try:
-            ts = snap.get("timestamp")
-            if isinstance(ts, str):
-                timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            elif isinstance(ts, datetime):
-                timestamp = ts
-            else:
-                timestamp = utcnow()
-            created = snap.get("token_created_at")
-            if isinstance(created, str):
-                created = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            m = MarketState(
-                chain=snap.get("chain") or token.chain,
-                token_address=snap.get("token_address") or token.token_address,
-                timestamp=timestamp,
-                launchpad=snap.get("launchpad") or token.launchpad,
-                symbol=snap.get("symbol") or token.symbol,
-                creator_address=snap.get("creator_address") or token.creator_address,
-                token_created_at=created or token.launched_at,
-                price=snap.get("price"),
-                market_cap=snap.get("market_cap"),
-                liquidity=snap.get("liquidity"),
-                volume_5m=snap.get("volume_5m"),
-                volume_15m=snap.get("volume_15m"),
-                buys_5m=snap.get("buys_5m"),
-                sells_5m=snap.get("sells_5m"),
-                unique_buyers_5m=snap.get("unique_buyers_5m"),
-                unique_sellers_5m=snap.get("unique_sellers_5m"),
-                holder_count=snap.get("holder_count"),
-                holder_growth_pct=snap.get("holder_growth_pct"),
-                top10_holder_pct=snap.get("top10_holder_pct"),
-                price_change_5m=snap.get("price_change_5m"),
-                price_change_15m=snap.get("price_change_15m"),
-            )
+            m = market_state_from_snapshot(snap, token)
             sig = self.strategy.score(m, utcnow())
             return float(sig.score) if sig and sig.score is not None else 0.0
         except Exception:

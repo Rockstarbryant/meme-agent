@@ -15,12 +15,29 @@ export function DecisionDetail({ decisionId }: { decisionId: string }) {
   if (res.loading && !res.data) return <Loading />;
   if (!res.data) return res.error ? <ErrorState error={res.error} onRetry={() => void res.reload()} /> : null;
   const d = res.data, sig = d.strategy.signal, saw = d.what_the_agent_saw as Record<string, unknown>;
+  const bv = saw["buy_volume_5m"], sv = saw["sell_volume_5m"], bc = saw["buys_5m"], sc = saw["sells_5m"];
+  const buySellRatio = typeof bv === "number" && typeof sv === "number" && (bv > 0 || sv > 0)
+    ? (sv === 0 ? 10 : bv / sv)
+    : typeof bc === "number" && typeof sc === "number" && (bc > 0 || sc > 0)
+    ? (sc === 0 ? 10 : Math.min(bc / sc, 10))
+    : null;
+  const basis = saw["buy_sell_basis"] as string | undefined;
+  const basisNote = basis === "estimated_from_counts" ? "estimated from counts" : basis === "counts" ? "counts only" : null;
+  const scannedAt = (saw["scanned_at"] as string | undefined) ?? (saw["enriched_at"] as string | undefined) ?? null;
+  const launchpadLabel = (saw["launchpad"] as string | null) ?? (saw["launchpad_detected"] as string | null | undefined) ?? null;
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2"><ActionBadge action={d.decision.final_action} /><h2 className="text-lg font-semibold">{d.decision.token_key}</h2><DataLabel label={d.decision.data_label} /><Badge>{d.decision.mode}</Badge></div>
       <p className="text-sm">{d.decision.final_reason}</p>
       <Card><CardHeader><CardTitle>1. What the agent saw</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
-        {(["price", "liquidity", "volume_5m", "unique_buyers_5m", "top10_holder_pct", "price_change_5m"] as const).map((k) => <div key={k}><p className="text-xs text-muted-foreground">{k.replaceAll("_", " ")}</p><p>{typeof saw[k] === "number" ? (k === "price" ? price(saw[k] as number) : num(saw[k] as number)) : "—"}</p></div>)}</CardContent></Card>
+        {([["price", "price"], ["liquidity", "num"], ["volume_5m", "num"], ["unique_buyers_5m", "num"],
+           ["top10_holder_pct", "pct"], ["price_change_5m", "pct"], ["holder_growth_pct", "pct"], ["mev_risk_score", "num"]] as const)
+          .map(([k, kind]) => <div key={k}><p className="text-xs text-muted-foreground">{k.replaceAll("_", " ")}</p>
+            <p>{typeof saw[k] === "number" ? (kind === "price" ? price(saw[k] as number) : kind === "pct" ? `${(saw[k] as number).toFixed(1)}%` : num(saw[k] as number)) : "—"}</p></div>)}
+        <div><p className="text-xs text-muted-foreground">buy/sell ratio</p>
+          <p>{buySellRatio == null ? "—" : num(buySellRatio)}{basisNote ? <span className="ml-1 text-xs text-muted-foreground">({basisNote})</span> : null}</p></div>
+        <div><p className="text-xs text-muted-foreground">scanned</p><p>{scannedAt ? new Date(scannedAt).toLocaleTimeString() : "—"}</p></div>
+        <div><p className="text-xs text-muted-foreground">launchpad</p><p>{launchpadLabel ?? "unknown"}</p></div></CardContent></Card>
       <Card><CardHeader><CardTitle>2. Strategy: {d.strategy.id} v{d.strategy.version}</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
         {sig ? (<><p>Score <strong>{num(sig.score, 1)}</strong> (needs {String((d.strategy.config_snapshot as { min_score?: number }).min_score ?? "?")}) · {sig.qualified ? "qualified" : "not qualified"}</p>
           <div className="flex flex-wrap gap-1">{Object.entries(sig.gates).map(([k, ok]) => <Badge key={k} variant={ok ? "success" : "destructive"}>{ok ? "pass" : "fail"}: {k.replaceAll("_", " ")}</Badge>)}</div>

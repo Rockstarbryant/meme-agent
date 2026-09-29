@@ -41,10 +41,13 @@ export interface Portfolio {
 
 export interface Opportunity {
   decision_id: string; token_key: string; symbol: string | null; chain: string | null; launchpad: string | null;
-  age_seconds: number | null; price: number | null; market_cap: number | null; liquidity: number | null;
-  volume_5m: number | null; unique_buyers_5m: number | null; buy_sell_ratio: number | null;
-  holder_growth_pct: number | null; top10_holder_pct: number | null; creator_known: boolean | null;
-  creator_sold_pct: number | null; strategy_score: number; risk_score: number; ai_status: string;
+  launchpad_detected: string | null; launchpad_evidence: string | null;
+  age_seconds: number | null; scanned_at: string | null; price: number | null; market_cap: number | null; liquidity: number | null;
+  volume_5m: number | null; unique_buyers_5m: number | null; buy_sell_ratio: number | null; buy_sell_basis: string | null;
+  holder_growth_pct: number | null; holder_growth_window_s: number | null; top10_holder_pct: number | null; holder_basis: string | null;
+  creator_known: boolean | null; creator_sold_pct: number | null;
+  mev_risk_score: number | null; mev_method: string | null; enrichment_gaps: string[];
+  strategy_score: number; risk_score: number; ai_status: string;
   final_action: Action; final_reason: string; strategy_version: number; mode: Mode;
   data_label: "DEMO DATA" | "LIVE DATA"; at: string;
 }

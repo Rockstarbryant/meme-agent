@@ -51,6 +51,12 @@ class GlobalTokenRegistry:
     def upsert(self, token: LaunchpadToken) -> LaunchpadToken:
         key = token.token_key
         existing = self._by_key.get(key)
+        if existing is token:
+            # Same object already live in the registry (e.g. monitoring mutated it in place before calling
+            # upsert). Re-deriving score_delta etc. here would double-apply the update the caller already made
+            # and silently zero it out (current_score - current_score). Nothing more to merge.
+            self._by_key[key] = token
+            return token
         if existing:
             for field in ("launchpad", "launchpad_contract", "launch_event", "launch_tx_hash", "creator_address", "launched_at", "symbol", "name"):
                 val = getattr(token, field)

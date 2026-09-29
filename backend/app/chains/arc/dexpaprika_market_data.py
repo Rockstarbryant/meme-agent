@@ -272,6 +272,7 @@ class DexPaprikaArcMarketData(MarketDataProvider):
             price_change_1m=price_change_1m, price_change_5m=price_change_5m, price_change_15m=price_change_15m,
             volume_1m=vol("1m"), volume_5m=volume_5m, volume_15m=vol("15m"),
             buy_volume_5m=buy_volume_5m, sell_volume_5m=sell_volume_5m,
+            buy_sell_basis=("estimated_from_counts" if buy_volume_5m is not None else None),
             buys_1m=buys("1m"), sells_1m=sells("1m"),
             buys_5m=buys_5m, sells_5m=sells_5m,
             contract=ContractInfo(verified=None),

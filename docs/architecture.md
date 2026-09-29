@@ -14,3 +14,10 @@ BNB, Solana and Robinhood Chain remain extension points (ChainAdapter / MarketDa
 ### Multi-source market data
 
 Market data is provider-agnostic and normalized through `MarketDataRegistry`. Arc RPC owns launchpad provenance; GeckoTerminal can enrich DEX market fields; Bitquery remains optional fallback. Provider failures are isolated by a circuit breaker. The trading engine never receives fabricated values, and the execution quote still comes from the verified execution adapter rather than a market-data aggregator.
+
+### Enrichment layer
+
+`app/enrichment/` sits between the raw market-data providers and the strategy/risk engine (`EnrichingMarketDataProvider`
+wraps `self.market_data` in both `runner/runtime.py` and `app/discovery/bootstrap.py::GlobalPipeline`). It fills what
+no market-data provider supplies: contract verification and sellability, top-holder concentration and growth, creator
+identity, launchpad provenance, and a MEV-exposure heuristic. See docs/enrichment.md.

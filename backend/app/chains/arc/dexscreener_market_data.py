@@ -88,8 +88,9 @@ class DexScreenerArcMarketData(MarketDataProvider):
         now = datetime.now(timezone.utc)
 
         volume_5m = _num(vol.get("m5"))
-        buys_5m = int(_num(m5.get("buys")) or 0) or None
-        sells_5m = int(_num(m5.get("sells")) or 0) or None
+        _b, _s = _num(m5.get("buys")), _num(m5.get("sells"))
+        buys_5m = None if _b is None else int(_b)
+        sells_5m = None if _s is None else int(_s)
         buy_volume_5m, sell_volume_5m = _estimate_buy_sell_usd(volume_5m, buys_5m, sells_5m)
 
         state = MarketState(
@@ -103,6 +104,7 @@ class DexScreenerArcMarketData(MarketDataProvider):
             price_change_5m=_num(chg.get("m5")), price_change_15m=None, price_change_1m=None,
             volume_5m=volume_5m, volume_15m=None, volume_1m=None,
             buy_volume_5m=buy_volume_5m, sell_volume_5m=sell_volume_5m,
+            buy_sell_basis=("estimated_from_counts" if buy_volume_5m is not None else None),
             buys_5m=buys_5m, sells_5m=sells_5m,
             contract=ContractInfo(verified=None),
             data_sources=["dexscreener:pairs"], is_demo=False,

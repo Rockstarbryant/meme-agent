@@ -19,6 +19,12 @@ def _num(v: Any) -> float | None:
         return None
 
 
+def _count(v: Any) -> int | None:
+    """Non-negative integer count that PRESERVES zero. Zero buyers is real data ("nobody bought"), not a gap."""
+    x = _num(v)
+    return None if x is None else int(x)
+
+
 def _pct(v: Any) -> float | None:
     x = _num(v)
     return x
@@ -174,16 +180,11 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         m1 = txs.get("m1") or {}
         m5 = txs.get("m5") or {}
         m15 = txs.get("m15") or {}
-        buys_1m = int(_num(m1.get("buys")) or 0)
-        sells_1m = int(_num(m1.get("sells")) or 0)
-        buys_5m = int(_num(m5.get("buys")) or 0)
-        sells_5m = int(_num(m5.get("sells")) or 0)
-        unique_buyers_5m = int(_num(m5.get("buyers")) or 0) or None
-        unique_sellers_5m = int(_num(m5.get("sellers")) or 0) or None
-        unique_buyers_1m = int(_num(m1.get("buyers")) or 0) or None
-        unique_sellers_1m = int(_num(m1.get("sellers")) or 0) or None
-        unique_buyers_15m = int(_num(m15.get("buyers")) or 0) or None
-        unique_sellers_15m = int(_num(m15.get("sellers")) or 0) or None
+        buys_1m, sells_1m = _count(m1.get("buys")), _count(m1.get("sells"))
+        buys_5m, sells_5m = _count(m5.get("buys")), _count(m5.get("sells"))
+        unique_buyers_5m, unique_sellers_5m = _count(m5.get("buyers")), _count(m5.get("sellers"))
+        unique_buyers_1m, unique_sellers_1m = _count(m1.get("buyers")), _count(m1.get("sellers"))
+        unique_buyers_15m, unique_sellers_15m = _count(m15.get("buyers")), _count(m15.get("sellers"))
 
         # One trade call gives more precise buy/sell USD pressure and a previous
         # 5m buyer baseline. It is optional enrichment: if the free tier rate
@@ -223,9 +224,13 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
             if p:
                 recent_prices.append(p)
         unique_buyers_prev_5m = len(buyers_prev) or None
+        basis = "usd"
         if not buy_volume_5m and not sell_volume_5m:
+            # No usable trade rows (rate limited / empty page). Leave the split unset; the registry derives a
+            # count-based estimate from buys/sells and labels it as such.
             buy_volume_5m = None
             sell_volume_5m = None
+            basis = None
 
         recent_high = max(recent_prices, default=price or 0.0) or None
         state = MarketState(
@@ -235,7 +240,7 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
             price_change_1m=None, price_change_5m=price_change_5m, price_change_15m=price_change_15m,
             recent_high=recent_high, volume_1m=volume_1m, volume_5m=volume_5m, volume_15m=volume_15m,
             buy_volume_5m=buy_volume_5m, sell_volume_5m=sell_volume_5m,
-            buys_1m=buys_1m or None, sells_1m=sells_1m or None, buys_5m=buys_5m or None, sells_5m=sells_5m or None,
+            buys_1m=buys_1m, sells_1m=sells_1m, buys_5m=buys_5m, sells_5m=sells_5m, buy_sell_basis=basis,
             unique_buyers_1m=unique_buyers_1m, unique_buyers_5m=unique_buyers_5m,
             unique_buyers_15m=unique_buyers_15m, unique_buyers_prev_5m=unique_buyers_prev_5m,
             unique_sellers_1m=unique_sellers_1m, unique_sellers_5m=unique_sellers_5m, unique_sellers_15m=unique_sellers_15m,

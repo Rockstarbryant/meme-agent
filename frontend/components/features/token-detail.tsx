@@ -6,7 +6,7 @@ import { PriceChart } from "@/components/price-chart";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useApi } from "@/hooks/use-api";
-import { compact, num, plainPct, price } from "@/lib/format";
+import { ago, compact, num, plainPct, price } from "@/lib/format";
 import type { DecisionDetail, TokenDetail as TD } from "@/types/api";
 
 const tri = (v: unknown) => (v === true ? "yes" : v === false ? "no" : "unknown");
@@ -21,10 +21,18 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
   const t = res.data, m = t.latest_market, c = (m.contract ?? {}) as Record<string, unknown>;
   const sig = dec.data?.strategy.signal;
   const ai = dec.data?.ai[0];
+  const launchpad = (m.launchpad as string | null) ?? (m.launchpad_detected as string | null);
+  const launchpadDetected = !m.launchpad && m.launchpad_detected;
+  const gaps = (m.enrichment_gaps as string[] | undefined) ?? [];
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{(m.symbol as string) ?? t.token_key}</h2><DataLabel label={t.data_label} />
         {t.latest_decision && <ActionBadge action={t.latest_decision.final_action} />}<span className="break-all text-xs text-muted-foreground">{t.token_key}</span></div>
+      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+        <span>Launchpad: {launchpad ?? "unknown"}{launchpadDetected ? ` (detected, ${(m.launchpad_evidence as string) ?? "on-chain"})` : ""}</span>
+        <span>Scanned: {ago((m.scanned_at as string) ?? (m.enriched_at as string) ?? null)}</span>
+      </div>
+      {gaps.length > 0 && <p className="text-xs text-muted-foreground">Not enriched: {gaps.join("; ")}</p>}
       <Card><CardContent className="space-y-3 pt-4"><div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Price" value={price(n(m, "price"))} /><Stat label="Market cap" value={compact(n(m, "market_cap"))} /><Stat label="Liquidity" value={compact(n(m, "liquidity"))} />
         <Stat label="Volume 1m / 5m / 15m" value={`${compact(n(m, "volume_1m"))} / ${compact(n(m, "volume_5m"))} / ${compact(n(m, "volume_15m"))}`} /></div>
@@ -43,9 +51,14 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
         <Card><CardHeader><CardTitle>Contract risk</CardTitle></CardHeader><CardContent><dl className="grid grid-cols-2 gap-1 text-sm">
           {(["verified", "owner_renounced", "mint_authority_active", "pausable", "blacklist_capability", "transfer_restricted", "is_proxy", "sell_simulation_ok"] as const).map((k) => (
             <div key={k} className="flex justify-between gap-2"><dt className="text-muted-foreground">{k.replaceAll("_", " ")}</dt><dd>{tri(c[k])}</dd></div>))}
-          <div className="flex justify-between gap-2"><dt className="text-muted-foreground">buy / sell tax</dt><dd>{plainPct(typeof c.buy_tax_pct === "number" ? c.buy_tax_pct : null)} / {plainPct(typeof c.sell_tax_pct === "number" ? c.sell_tax_pct : null)}</dd></div></dl></CardContent></Card>
+          <div className="flex justify-between gap-2"><dt className="text-muted-foreground">buy / sell tax</dt><dd>{plainPct(typeof c.buy_tax_pct === "number" ? c.buy_tax_pct : null)} / {plainPct(typeof c.sell_tax_pct === "number" ? c.sell_tax_pct : null)}</dd></div></dl>
+          <p className="mt-2 text-xs text-muted-foreground">
+            verification: {(c.verification_source as string) ?? "unavailable"} · sellability check: {(c.sell_check_method as string) ?? "unavailable"}
+            {c.sell_check_method && c.sell_check_method !== "router_simulation" ? " (holder-transfer probe, not a full router simulation)" : ""}
+          </p></CardContent></Card>
         <Card><CardHeader><CardTitle>Execution risk</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
-          <p>Expected price impact: {plainPct(n(m, "expected_price_impact_pct"), 2)}</p><p>MEV risk score: {num(n(m, "mev_risk_score"))}</p></CardContent></Card>
+          <p>Expected price impact: {plainPct(n(m, "expected_price_impact_pct"), 2)}</p>
+          <p>MEV risk score: {num(n(m, "mev_risk_score"))}{m.mev_method ? ` (${m.mev_method as string} — heuristic estimate, not a mempool simulation)` : ""}</p></CardContent></Card>
         <Card><CardHeader><CardTitle>Strategy analysis</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
           {sig ? (<><p>Score {num(sig.score, 1)} · {sig.qualified ? <Badge variant="success">qualified</Badge> : <Badge variant="warning">not qualified</Badge>}</p>
             {Object.entries(sig.components).map(([k, v]) => <div key={k} className="flex justify-between"><span className="text-muted-foreground">{k.replaceAll("_", " ")}</span><span>{v == null ? "missing" : num(v, 0)}</span></div>)}</>) : <p className="text-muted-foreground">No analysis yet.</p>}</CardContent></Card>

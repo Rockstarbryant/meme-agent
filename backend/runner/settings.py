@@ -147,6 +147,21 @@ class RunnerSettings(BaseSettings):
     dexscreener_chain_id: str = Field("arc", validation_alias=_alias("DEXSCREENER_CHAIN_ID"))
     dexscreener_cache_s: float = Field(60.0, validation_alias=_alias("DEXSCREENER_CACHE_S"))
 
+    # ------------------------------------------------------------------ enrichment (contract/holders/creator/MEV)
+    # Fills gaps a bare market-data provider leaves: contract verification, sellability, top-holder concentration,
+    # holder growth, creator identity and (a heuristic) MEV exposure. See app/enrichment/.
+    enrichment_enabled: bool = Field(True, validation_alias=_alias("ENRICHMENT_ENABLED"))
+    blockscout_enabled: bool = Field(True, validation_alias=_alias("BLOCKSCOUT_ENABLED"))
+    blockscout_api_key: SecretStr | None = Field(None, validation_alias=_alias("BLOCKSCOUT_API_KEY"))
+    blockscout_pro_root: str = Field("https://api.blockscout.com", validation_alias=_alias("BLOCKSCOUT_PRO_ROOT"))
+    blockscout_public_root: str = Field("https://explorer.arc.io", validation_alias=_alias("BLOCKSCOUT_PUBLIC_ROOT"))
+    blockscout_daily_credit_budget: int = Field(90_000, validation_alias=_alias("BLOCKSCOUT_DAILY_CREDIT_BUDGET"))
+    etherscan_enabled: bool = Field(True, validation_alias=_alias("ETHERSCAN_ENABLED"))
+    etherscan_api_key: SecretStr | None = Field(None, validation_alias=_alias("ETHERSCAN_API_KEY"))
+    enrichment_holders_ttl_s: float = Field(300.0, validation_alias=_alias("ENRICHMENT_HOLDERS_TTL_S"))
+    enrichment_static_ttl_s: float = Field(21_600.0, validation_alias=_alias("ENRICHMENT_STATIC_TTL_S"))
+    enrichment_probe_ttl_s: float = Field(900.0, validation_alias=_alias("ENRICHMENT_PROBE_TTL_S"))
+
     # ------------------------------------------------------------------ network
     arc_network: Literal["mainnet", "testnet"] = "mainnet"
     arc_rpc_url: str | None = None

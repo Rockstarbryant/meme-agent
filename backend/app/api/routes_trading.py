@@ -33,19 +33,36 @@ async def _queue_command(db: AsyncSession, user_id: str, type_: str, payload: di
 
 
 def _ratio(m: dict):
+    """Buy/sell pressure ratio for the opportunity list. Prefers real USD flow; falls back to trade counts (the
+    same fallback MarketState.buy_sell_volume_ratio() applies) so the card isn't blank just because a provider
+    only gave counts. ``m.get("buy_sell_basis")`` tells the frontend which kind of number this is."""
     b, s = m.get("buy_volume_5m"), m.get("sell_volume_5m")
-    return None if b is None or s in (None, 0) else round(b / s, 3)
+    if b is not None and s is not None:
+        return None if s == 0 and b == 0 else (10.0 if s == 0 else round(b / s, 3))
+    bc, sc = m.get("buys_5m"), m.get("sells_5m")
+    if bc is None and sc is None:
+        return None
+    bc, sc = bc or 0, sc or 0
+    if bc == 0 and sc == 0:
+        return None
+    return 10.0 if sc == 0 else round(min(bc / sc, 10.0), 3)
 
 
 def _opp(d: M.Decision) -> dict:
     m = d.market
     created = m.get("token_created_at")
     age = (d.created_at - datetime.fromisoformat(created)).total_seconds() if created else None
+    scanned = m.get("scanned_at") or m.get("enriched_at")
     return {"decision_id": d.id, "token_key": d.token_key, "symbol": d.symbol, "chain": m.get("chain"), "launchpad": m.get("launchpad"),
-            "age_seconds": age, "price": m.get("price"), "market_cap": m.get("market_cap"), "liquidity": m.get("liquidity"),
+            "launchpad_detected": m.get("launchpad_detected"), "launchpad_evidence": m.get("launchpad_evidence"),
+            "age_seconds": age, "scanned_at": scanned, "price": m.get("price"), "market_cap": m.get("market_cap"), "liquidity": m.get("liquidity"),
             "volume_5m": m.get("volume_5m"), "unique_buyers_5m": m.get("unique_buyers_5m"), "buy_sell_ratio": _ratio(m),
-            "holder_growth_pct": m.get("holder_growth_pct"), "top10_holder_pct": m.get("top10_holder_pct"),
+            "buy_sell_basis": m.get("buy_sell_basis"),
+            "holder_growth_pct": m.get("holder_growth_pct"), "holder_growth_window_s": m.get("holder_growth_window_s"),
+            "top10_holder_pct": m.get("top10_holder_pct"), "holder_basis": m.get("holder_basis"),
             "creator_known": m.get("creator_known"), "creator_sold_pct": m.get("creator_sold_pct"),
+            "mev_risk_score": m.get("mev_risk_score"), "mev_method": m.get("mev_method"),
+            "enrichment_gaps": m.get("enrichment_gaps") or [],
             "strategy_score": d.score, "risk_score": d.risk_score, "ai_status": d.ai_status, "final_action": d.final_action,
             "final_reason": d.final_reason, "strategy_version": d.strategy_version, "mode": d.mode,
             "data_label": "DEMO DATA" if d.is_demo else "LIVE DATA", "at": d.created_at}
