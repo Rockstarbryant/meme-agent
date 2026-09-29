@@ -2,6 +2,10 @@ pydantic>=2.7,<3
 pydantic-settings>=2.3,<3
 httpx>=0.27,<1
 eth-abi>=5.1,<6
+eth-utils>=4.0,<5
+# eth-utils' keccak() needs a real Keccak backend; without one it raises ImportError at first call
+# (used by app/enrichment/probes.py to compute function selectors for the on-chain contract scan).
+pycryptodome>=3.20,<4
 # Needed for global discovery persistence + Redis locks on the cloud worker
 sqlalchemy[asyncio]>=2.0.30,<2.1
 asyncpg>=0.29
