@@ -648,6 +648,21 @@ class RunnerRuntime:
             total += len(rows)
         return total
 
+    def _has_momentum(self, m: MarketState) -> bool:
+        """True if ANY of: positive 5m/15m price change, positive recent holder growth, or a buy-heavy 5m
+        buy/sell ratio. An unknown/missing signal never counts for or against momentum on its own -- this is a
+        "does at least one positive signal exist" check, not a "no negative signal exists" check, since most of
+        these fields are legitimately absent for plenty of real, healthy tokens (see MarketState.enrichment_gaps
+        for why a given field might be missing)."""
+        if (m.price_change_5m or 0) > 0 or (m.price_change_15m or 0) > 0:
+            return True
+        if (m.holder_growth_pct or 0) > 0:
+            return True
+        ratio = m.buy_sell_volume_ratio()
+        if ratio is not None and ratio >= self.s.established_momentum_min_buy_sell_ratio:
+            return True
+        return False
+
     # ------------------------------------------------------------ trading loops
     async def discover_once(self) -> int:
         if self.engine is None or self.controls.global_pause or self.portfolio is None:
@@ -689,6 +704,10 @@ class RunnerRuntime:
                 if (m.holder_count or 0) < self.s.established_min_holders:
                     continue
                 if (m.market_cap or 0) < self.s.established_min_market_cap_usdc:
+                    continue
+                if (m.liquidity or 0) < self.s.established_min_liquidity_usdc:
+                    continue
+                if self.s.established_require_momentum and not self._has_momentum(m):
                     continue
             self._evaluated[addr.lower()] = now
             if self.mono() - self._mkt_at.get(m.key, -1e9) >= self.s.market_snapshot_every_s:

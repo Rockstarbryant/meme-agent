@@ -80,19 +80,30 @@ class DexPaprikaClient:
              search returns 400/404/410.
         Callers receive a dict with a ``data`` (or legacy ``pools``) key and
         should not care which endpoint answered.
+
+        NOTE: ``/pools/search`` itself later renamed its own query params (``sort_by`` -> ``order_by``,
+        ``sort_dir`` -> ``sort``, ``volume_24h_min`` -> ``volume_usd_24h_min``); this method's own parameter
+        *names* (``sort_by=`` etc.) are kept as-is for backwards compatibility with existing callers, and are
+        mapped to the current API's names below. Both the legacy and current names are sent together, since an
+        unrecognized extra query param is typically just ignored rather than rejected -- so this keeps working
+        whichever the deployed API version expects, instead of silently sorting/filtering on nothing.
         """
+        sort_map = {"created_at": "created_at", "volume_usd": "volume_usd_24h", "volume_24h": "volume_usd_24h",
+                    "price_change": "price_change_percentage_24h", "liquidity_usd": "liquidity_usd"}
+        canonical_sort = sort_map.get(sort_by, sort_by)
         params: dict[str, Any] = {
             "page": page,
             "limit": min(100, max(1, limit)),
-            "sort_by": sort_by,
-            "sort_dir": sort_dir,
+            "sort_by": sort_by, "sort_dir": sort_dir,          # legacy names
+            "order_by": canonical_sort, "sort": sort_dir,       # current names
         }
         if created_after is not None:
             params["created_after"] = created_after
         if created_before is not None:
             params["created_before"] = created_before
         if volume_24h_min is not None:
-            params["volume_24h_min"] = volume_24h_min
+            params["volume_24h_min"] = volume_24h_min           # legacy name
+            params["volume_usd_24h_min"] = volume_24h_min       # current name
         if txns_24h_min is not None:
             params["txns_24h_min"] = txns_24h_min
 
@@ -104,8 +115,8 @@ class DexPaprikaClient:
                 fallback_params = {
                     "page": page,
                     "limit": min(100, max(1, limit)),
-                    "order_by": "volume_usd",
-                    "sort": "desc",
+                    "order_by": canonical_sort,
+                    "sort": sort_dir,
                 }
                 return await self._get(f"/networks/{network}/pools", fallback_params)
             raise

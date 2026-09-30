@@ -282,12 +282,17 @@ class EnrichmentService:
             gaps.append("holders: enrichment failed unexpectedly")
 
         # --- holder growth (needs a prior snapshot with a holder_count) -----------------------------------
-        if m.holder_count is not None and previous is not None and previous.holder_count:
-            window_s = max(1.0, (m.timestamp - previous.timestamp).total_seconds())
-            m.holder_growth_pct = round((m.holder_count - previous.holder_count) / previous.holder_count * 100.0, 2)
-            m.holder_growth_window_s = window_s
-        elif m.holder_count is not None and previous is None:
-            gaps.append("holder_growth: no prior snapshot yet (first scan of this token)")
+        try:
+            if m.holder_count is not None and previous is not None and previous.holder_count:
+                window_s = max(1.0, (m.timestamp - previous.timestamp).total_seconds())
+                m.holder_growth_pct = round((m.holder_count - previous.holder_count) / previous.holder_count * 100.0, 2)
+                m.holder_growth_window_s = window_s
+            elif m.holder_count is not None and previous is None:
+                gaps.append("holder_growth: no prior snapshot yet (first scan of this token)")
+        except Exception as exc:  # noqa: BLE001 — was the one unguarded section; a bad cached `previous` (e.g.
+            # a naive/aware timestamp mismatch) must not take down the rest of enrichment with it.
+            log.warning("holder-growth computation failed for %s: %s", token, exc)
+            gaps.append("holder_growth: computation failed unexpectedly")
 
         # --- static facts: verification / creator / launchpad ---------------------------------------------
         try:

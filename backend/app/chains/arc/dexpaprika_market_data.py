@@ -166,7 +166,11 @@ class DexPaprikaArcMarketData(MarketDataProvider):
         cutoff = int(_t.time()) - int(self.established_min_age_hours * 3600)
         payload = await self.client.filter_pools(
             self.network, created_before=cutoff, txns_24h_min=self.min_txns_24h,
-            volume_24h_min=self.min_volume_24h_usd, sort_by="created_at", sort_dir="desc",
+            volume_24h_min=self.min_volume_24h_usd,
+            # Sort by trading volume rather than creation time: for the established bucket, "still gets
+            # traded" is a much better trending/momentum signal than "was created most recently among
+            # tokens older than the age floor," which just re-surfaces the same age-adjacent tokens forever.
+            sort_by="volume_usd", sort_dir="desc",
             limit=min(100, budget * 3),
         )
         pools = payload.get("data") or payload.get("pools") or []

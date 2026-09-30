@@ -102,24 +102,32 @@ class RunnerSettings(BaseSettings):
     #                          later; left ON by default for now.
     #   scan_established    -> pools older than established_min_age_hours, re-run
     #                          every cycle and additionally required to clear the
-    #                          holder-count and market-cap floors below once
-    #                          enriched. A token that goes quiet just stops
-    #                          reappearing near the top of results; one that keeps
-    #                          trending keeps getting re-evaluated. This is the
-    #                          default/steadier mode.
+    #                          holder-count, market-cap and liquidity floors below,
+    #                          plus a momentum check, once enriched. A token that
+    #                          goes quiet just stops reappearing near the top of
+    #                          results; one that keeps trending keeps getting
+    #                          re-evaluated. This is the default/steadier mode.
     # NOTE: "passed the bonding curve" is not independently verifiable from any
     # currently-configured data source (DexPaprika/GeckoTerminal don't expose
-    # Arc launchpad graduation state) -- age + holder count + market cap is used
-    # as a practical proxy, since by ~1 day old with 70+ holders and $50k+ mcap
-    # an Arc meme token has, in practice, essentially always left its bonding
-    # curve. Treat established_min_age_hours=24 as a placeholder pending
-    # confirmation: for meme-coin momentum trading a *shorter* window (hours,
-    # not days) is more typical, so double check this before relying on it.
+    # Arc launchpad graduation state) -- age + holder count + market cap + liquidity
+    # is used as a practical proxy, since by ~1 day old with 1000+ holders, $500k+
+    # liquidity and positive momentum an Arc meme token has, in practice,
+    # essentially always left its bonding curve. Treat established_min_age_hours=24
+    # as a placeholder pending confirmation: for meme-coin momentum trading a
+    # *shorter* window (hours, not days) is more typical, so double check this
+    # before relying on it.
     scan_new_launches: bool = Field(True, validation_alias=_alias("SCAN_NEW_LAUNCHES"))
     scan_established: bool = Field(True, validation_alias=_alias("SCAN_ESTABLISHED"))
     established_min_age_hours: float = Field(24.0, validation_alias=_alias("ESTABLISHED_MIN_AGE_HOURS"))
-    established_min_holders: int = Field(70, validation_alias=_alias("ESTABLISHED_MIN_HOLDERS"))
+    established_min_holders: int = Field(1000, validation_alias=_alias("ESTABLISHED_MIN_HOLDERS"))
     established_min_market_cap_usdc: float = Field(50_000.0, validation_alias=_alias("ESTABLISHED_MIN_MARKET_CAP_USDC"))
+    established_min_liquidity_usdc: float = Field(500_000.0, validation_alias=_alias("ESTABLISHED_MIN_LIQUIDITY_USDC"))
+    # Momentum gate: at least one of a positive 5m/15m price change, positive recent holder
+    # growth, or a buy-heavy 5m buy/sell ratio, must hold -- a token merely sitting still at
+    # 1000 holders and $500k liquidity is "established," not "gaining momentum."
+    established_require_momentum: bool = Field(True, validation_alias=_alias("ESTABLISHED_REQUIRE_MOMENTUM"))
+    established_momentum_min_buy_sell_ratio: float = Field(1.2, validation_alias=_alias("ESTABLISHED_MOMENTUM_MIN_BUY_SELL_RATIO"))
+
 
     # ------------------------------------------------------------------ goldsky
     # When set, ARC_RUNNER_ARC_RPC_URL is expected to point at Goldsky and the
