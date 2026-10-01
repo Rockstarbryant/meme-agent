@@ -44,6 +44,7 @@ export interface Opportunity {
   launchpad_detected: string | null; launchpad_evidence: string | null;
   age_seconds: number | null; scanned_at: string | null; price: number | null; market_cap: number | null; liquidity: number | null;
   volume_5m: number | null; unique_buyers_5m: number | null; buy_sell_ratio: number | null; buy_sell_basis: string | null;
+  price_change_5m: number | null; price_change_15m: number | null;
   holder_growth_pct: number | null; holder_growth_window_s: number | null; top10_holder_pct: number | null; holder_basis: string | null;
   creator_known: boolean | null; creator_sold_pct: number | null;
   mev_risk_score: number | null; mev_method: string | null; enrichment_gaps: string[];

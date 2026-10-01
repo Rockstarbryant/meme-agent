@@ -110,15 +110,14 @@ class RunnerSettings(BaseSettings):
     # NOTE: "passed the bonding curve" is not independently verifiable from any
     # currently-configured data source (DexPaprika/GeckoTerminal don't expose
     # Arc launchpad graduation state) -- age + holder count + market cap + liquidity
-    # is used as a practical proxy, since by ~1 day old with 1000+ holders, $500k+
-    # liquidity and positive momentum an Arc meme token has, in practice,
-    # essentially always left its bonding curve. Treat established_min_age_hours=24
-    # as a placeholder pending confirmation: for meme-coin momentum trading a
-    # *shorter* window (hours, not days) is more typical, so double check this
-    # before relying on it.
+    # is used as a practical proxy. The age floor was previously 24h, which in
+    # practice meant the established bucket almost never activated: Arc meme
+    # tokens churn on the order of hours, not days, so very few survive a full
+    # day while still being worth evaluating. Lowered to 2h as a more realistic
+    # floor for this market -- tune per your own observed token lifecycle.
     scan_new_launches: bool = Field(True, validation_alias=_alias("SCAN_NEW_LAUNCHES"))
     scan_established: bool = Field(True, validation_alias=_alias("SCAN_ESTABLISHED"))
-    established_min_age_hours: float = Field(24.0, validation_alias=_alias("ESTABLISHED_MIN_AGE_HOURS"))
+    established_min_age_hours: float = Field(2.0, validation_alias=_alias("ESTABLISHED_MIN_AGE_HOURS"))
     established_min_holders: int = Field(1000, validation_alias=_alias("ESTABLISHED_MIN_HOLDERS"))
     established_min_market_cap_usdc: float = Field(50_000.0, validation_alias=_alias("ESTABLISHED_MIN_MARKET_CAP_USDC"))
     established_min_liquidity_usdc: float = Field(500_000.0, validation_alias=_alias("ESTABLISHED_MIN_LIQUIDITY_USDC"))

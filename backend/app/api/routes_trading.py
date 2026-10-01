@@ -58,6 +58,7 @@ def _opp(d: M.Decision) -> dict:
             "age_seconds": age, "scanned_at": scanned, "price": m.get("price"), "market_cap": m.get("market_cap"), "liquidity": m.get("liquidity"),
             "volume_5m": m.get("volume_5m"), "unique_buyers_5m": m.get("unique_buyers_5m"), "buy_sell_ratio": _ratio(m),
             "buy_sell_basis": m.get("buy_sell_basis"),
+            "price_change_5m": m.get("price_change_5m"), "price_change_15m": m.get("price_change_15m"),
             "holder_growth_pct": m.get("holder_growth_pct"), "holder_growth_window_s": m.get("holder_growth_window_s"),
             "top10_holder_pct": m.get("top10_holder_pct"), "holder_basis": m.get("holder_basis"),
             "creator_known": m.get("creator_known"), "creator_sold_pct": m.get("creator_sold_pct"),

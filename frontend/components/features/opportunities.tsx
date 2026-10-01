@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ActionBadge, DataLabel } from "@/components/badges";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -13,6 +13,45 @@ import { ago, compact, duration, num, plainPct, price, shortAddr } from "@/lib/f
 import type { Action, Opportunity } from "@/types/api";
 
 const FILTERS: (Action | "ALL")[] = ["ALL", "BUY", "WATCH", "REJECT"];
+
+// Client-side category thresholds. These are UI browsing filters, independent of (and looser than) the
+// runner's own established-token scanning thresholds (ARC_RUNNER_ESTABLISHED_MIN_* in settings) -- the runner
+// decides what to trade, this just helps you browse what it already found. Tune freely.
+const NEW_MAX_AGE_S = 2 * 3600;        // matches the runner's lowered 2h established-age default
+const HIGH_MC_USDC = 100_000;
+const HIGH_LIQUIDITY_USDC = 50_000;
+const MOMENTUM_MIN_BUY_SELL_RATIO = 1.2;
+
+type Category = "ALL" | "NEW" | "MOMENTUM" | "HIGH_MC" | "HIGH_LIQUIDITY" | "GAINERS" | "LOSERS";
+const CATEGORIES: { key: Category; label: string; title: string }[] = [
+  { key: "ALL", label: "All", title: "No category filter" },
+  { key: "NEW", label: "New", title: `Age under ${NEW_MAX_AGE_S / 3600}h` },
+  { key: "MOMENTUM", label: "Momentum", title: "Rising price (5m/15m), rising holder count, or buy-heavy volume" },
+  { key: "HIGH_MC", label: "High MC", title: `Market cap ≥ $${HIGH_MC_USDC.toLocaleString()}` },
+  { key: "HIGH_LIQUIDITY", label: "High liquidity", title: `Liquidity ≥ $${HIGH_LIQUIDITY_USDC.toLocaleString()}` },
+  { key: "GAINERS", label: "Gainers", title: "Positive 5m price change, sorted highest first" },
+  { key: "LOSERS", label: "Losers", title: "Negative 5m price change, sorted lowest first" },
+];
+
+function hasMomentum(o: Opportunity): boolean {
+  if ((o.price_change_5m ?? 0) > 0 || (o.price_change_15m ?? 0) > 0) return true;
+  if ((o.holder_growth_pct ?? 0) > 0) return true;
+  if (o.buy_sell_ratio != null && o.buy_sell_ratio >= MOMENTUM_MIN_BUY_SELL_RATIO) return true;
+  return false;
+}
+
+function matchesCategory(o: Opportunity, cat: Category): boolean {
+  switch (cat) {
+    case "ALL": return true;
+    case "NEW": return o.age_seconds != null && o.age_seconds < NEW_MAX_AGE_S;
+    case "MOMENTUM": return hasMomentum(o);
+    case "HIGH_MC": return (o.market_cap ?? 0) >= HIGH_MC_USDC;
+    case "HIGH_LIQUIDITY": return (o.liquidity ?? 0) >= HIGH_LIQUIDITY_USDC;
+    case "GAINERS": return (o.price_change_5m ?? 0) > 0;
+    case "LOSERS": return (o.price_change_5m ?? 0) < 0;
+  }
+}
+
 const Cell = ({ label, value, title }: { label: string; value: React.ReactNode; title?: string }) => (
   <div title={title}><dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="text-sm tabular-nums">{value}</dd></div>
 );
@@ -40,6 +79,7 @@ export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnywa
         <Cell label="Age" value={duration(o.age_seconds)} /><Cell label="Scanned" value={ago(o.scanned_at)} title="When our scanner last refreshed this token's data" />
         <Cell label="Price" value={price(o.price)} /><Cell label="Market cap" value={compact(o.market_cap)} />
         <Cell label="Liquidity" value={compact(o.liquidity)} /><Cell label="Volume 5m" value={compact(o.volume_5m)} /><Cell label="Buyers 5m" value={o.unique_buyers_5m ?? "—"} />
+        <Cell label="Price Δ5m" value={o.price_change_5m != null ? `${o.price_change_5m > 0 ? "+" : ""}${num(o.price_change_5m, 2)}%` : "—"} />
         <Cell label="Buy/sell" value={o.buy_sell_ratio != null && o.buy_sell_basis && o.buy_sell_basis !== "usd" ? `~${num(o.buy_sell_ratio)}` : num(o.buy_sell_ratio)} title={ratioTitle} />
         <Cell label="Holder growth" value={plainPct(o.holder_growth_pct)} /><Cell label="Top-10 holders" value={plainPct(o.top10_holder_pct)} />
         <Cell label="Creator" value={creator} /><Cell label="Strategy score" value={num(o.strategy_score, 1)} /><Cell label="Risk score" value={num(o.risk_score, 0)} />
@@ -60,13 +100,20 @@ export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnywa
 export function Opportunities() {
   const res = useApi<Opportunity[]>("/opportunities?limit=100", { refreshOn: ["DECISION_RECORDED"] });
   const [filter, setFilter] = useState<Action | "ALL">("ALL");
+  const [category, setCategory] = useState<Category>("ALL");
   const [target, setTarget] = useState<Opportunity | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const rows = useMemo(() => {
+    if (!res.data) return [];
+    const filtered = res.data.filter((o) => (filter === "ALL" || o.final_action === filter) && matchesCategory(o, category));
+    if (category === "GAINERS") return [...filtered].sort((a, b) => (b.price_change_5m ?? 0) - (a.price_change_5m ?? 0));
+    if (category === "LOSERS") return [...filtered].sort((a, b) => (a.price_change_5m ?? 0) - (b.price_change_5m ?? 0));
+    return filtered;
+  }, [res.data, filter, category]);
   if (res.loading && !res.data) return <Loading />;
   if (!res.data) return res.error ? <ErrorState error={res.error} onRetry={() => void res.reload()} /> : null;
-  const rows = res.data.filter((o) => filter === "ALL" || o.final_action === filter);
   async function confirmBuy() {
     if (!target) return;
     setBusy(true); setError(null);
@@ -79,8 +126,14 @@ export function Opportunities() {
   }
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter">
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by action">
         {FILTERS.map((f) => <Button key={f} size="sm" variant={filter === f ? "default" : "outline"} aria-pressed={filter === f} onClick={() => setFilter(f)}>{f}</Button>)}
+      </div>
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by category">
+        {CATEGORIES.map((c) => (
+          <Button key={c.key} size="sm" variant={category === c.key ? "default" : "outline"} aria-pressed={category === c.key}
+            title={c.title} onClick={() => setCategory(c.key)}>{c.label}</Button>
+        ))}
       </div>
       {error && <ErrorState error={error} />}
       {notice && <Alert variant="success">{notice}</Alert>}
