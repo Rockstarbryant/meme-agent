@@ -86,6 +86,14 @@ class GeckoTerminalClient:
     async def new_pools(self) -> dict[str, Any]:
         return await self._get(f"/networks/{self.network}/new_pools", {"page": 1})
 
+    async def trending_pools(self, duration: str = "5m") -> dict[str, Any]:
+        """Pools trending on GeckoTerminal for this network, by their own ranking (web visits + on-chain
+        activity, see their docs). ``duration`` is one of 5m/1h/6h/24h -- matches the tabs in the GeckoTerminal
+        app's own Trending view. Same response shape as ``new_pools()``."""
+        if duration not in ("5m", "1h", "6h", "24h"):
+            duration = "5m"
+        return await self._get(f"/networks/{self.network}/trending_pools", {"page": 1, "duration": duration})
+
     async def aclose(self) -> None:
         await self.client.aclose()
 

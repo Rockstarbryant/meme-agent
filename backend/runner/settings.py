@@ -76,7 +76,7 @@ class RunnerSettings(BaseSettings):
         validation_alias=_alias("MARKET_DATA_PROVIDERS"),
     )
     market_data_essential_providers: str = Field(
-        "dexpaprika",
+        "dexpaprika,geckoterminal",
         validation_alias=_alias("MARKET_DATA_ESSENTIAL_PROVIDERS"),
     )
     market_data_max_tokens: int = Field(20, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))

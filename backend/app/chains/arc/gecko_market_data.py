@@ -89,8 +89,44 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         self.cache_s = max(5.0, cache_s)
         self._cache: dict[str, tuple[float, MarketState]] = {}
 
+    @staticmethod
+    def _extract_token_addresses(payload: dict, tokens: list[str], seen: set[str], limit: int) -> None:
+        """Appends up to ``limit`` (total) token addresses found in a new_pools/trending_pools-shaped payload
+        into ``tokens``, skipping ones already in ``seen``. Shared by every discovery source below so new_pools
+        and each trending_pools(duration) call parse addresses identically."""
+        included = payload.get("included") or []
+        zero = "0x" + ("0" * 40)
+
+        def _add(address: str | None) -> None:
+            if len(tokens) >= limit or not address:
+                return
+            addr = str(address).lower().strip()
+            if not addr.startswith("0x") or len(addr) < 42:
+                return
+            if addr == zero or addr in seen:
+                return
+            # Skip obvious non-ERC20 placeholders sometimes returned for native assets.
+            if addr.startswith("0x3600") and addr.count("0") > 30:
+                return
+            seen.add(addr)
+            tokens.append(addr)
+
+        for item in payload.get("data") or []:
+            if len(tokens) >= limit:
+                return
+            attrs = _attr(item)
+            # 1) Relationship ids (Arc / current GeckoTerminal shape)
+            for relation in ("base_token", "quote_token"):
+                _add(_related_address(item, relation, included))
+            # 2) Attribute fields (other networks / older payload shape)
+            for key in ("base_token_address", "quote_token_address"):
+                _add(attrs.get(key))
+
     async def discover_tokens(self) -> list[str]:
-        """Discover recently listed Arc tokens from GeckoTerminal new_pools.
+        """Discover Arc tokens from GeckoTerminal: new pools PLUS trending pools (5m and 1h windows) -- i.e. the
+        same two views ("New Pools" and "Trending") the GeckoTerminal app itself shows. Each source is tried
+        independently so one failing (e.g. a 429 on trending_pools) doesn't take discovery down to zero; only if
+        every source fails does this raise, matching the previous new_pools-only behavior.
 
         GeckoTerminal's Arc payload does **not** put token addresses on
         ``attributes.base_token_address`` / ``quote_token_address`` (those are
@@ -98,43 +134,28 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         ``arc_0x…``. Prefer relationship parsing; fall back to attribute fields
         for networks that still populate them.
         """
-        try:
-            payload = await self.client.new_pools()
-        except DataUnavailable:
-            # Discovery is optional for this provider; Arc RPC remains authoritative.
-            raise
         tokens: list[str] = []
         seen: set[str] = set()
-        included = payload.get("included") or []
-        zero = "0x" + ("0" * 40)
-
-        def _add(address: str | None) -> bool:
-            if not address:
-                return False
-            addr = str(address).lower().strip()
-            if not addr.startswith("0x") or len(addr) < 42:
-                return False
-            if addr == zero or addr in seen:
-                return False
-            # Skip obvious non-ERC20 placeholders sometimes returned for native assets.
-            if addr.startswith("0x3600") and addr.count("0") > 30:
-                return False
-            seen.add(addr)
-            tokens.append(addr)
-            return True
-
-        for item in payload.get("data") or []:
-            attrs = _attr(item)
-            # 1) Relationship ids (Arc / current GeckoTerminal shape)
-            for relation in ("base_token", "quote_token"):
-                _add(_related_address(item, relation, included))
-                if len(tokens) >= self.max_tokens:
-                    return tokens
-            # 2) Attribute fields (other networks / older payload shape)
-            for key in ("base_token_address", "quote_token_address"):
-                _add(attrs.get(key))
-                if len(tokens) >= self.max_tokens:
-                    return tokens
+        errors: list[str] = []
+        # (name, thunk) pairs -- calling the client method is deferred into the loop body so a source we never
+        # reach (budget already full) never has its coroutine created, let alone left unawaited.
+        sources = (
+            ("trending_pools_5m", lambda: self.client.trending_pools("5m")),
+            ("trending_pools_1h", lambda: self.client.trending_pools("1h")),
+            ("new_pools", self.client.new_pools),
+        )
+        for name, call in sources:
+            if len(tokens) >= self.max_tokens:
+                break
+            try:
+                payload = await call()
+            except DataUnavailable as exc:
+                errors.append(f"{name}: {exc}")
+                continue
+            self._extract_token_addresses(payload, tokens, seen, self.max_tokens)
+        if not tokens and errors:
+            # Discovery is optional for this provider; Arc RPC / other providers remain authoritative.
+            raise DataUnavailable("GeckoTerminal discovery: " + " | ".join(errors))
         return tokens
 
     async def get_market_state(self, token_address: str) -> MarketState:
