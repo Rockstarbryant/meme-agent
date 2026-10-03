@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -82,8 +82,11 @@ def _pos(p) -> dict:
 
 
 @router.get("/opportunities")
-async def opportunities(limit: int = Query(50, le=200), action: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    rows = (await db.execute(select(M.Decision).where(M.Decision.user_id == user.id).order_by(M.Decision.created_at.desc()).limit(1000))).scalars().all()
+async def opportunities(request: Request, limit: int = Query(50, le=200), action: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    # Only opportunities from the retention window (default 24h) are shown; older ones are also deleted hourly.
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1.0, C(request).settings.retention_hours))
+    rows = (await db.execute(select(M.Decision).where(M.Decision.user_id == user.id, M.Decision.created_at >= cutoff)
+                             .order_by(M.Decision.created_at.desc()).limit(1000))).scalars().all()
     seen, out = set(), []
     for d in rows:  # latest decision per token
         if d.token_key in seen:

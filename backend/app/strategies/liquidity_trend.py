@@ -46,6 +46,9 @@ class LiquidityTrendConfig(BaseModel):
     min_market_cap_usdc: float = 20_000.0
     max_top10_for_score: float = 70.0
     min_age_seconds: float = 60.0
+    # Deep liquidity alone must not qualify a dormant token: with zero 5m volume/trades/buyers there is nothing
+    # trending to buy. Only fails when activity is KNOWN to be zero (missing data does not block).
+    require_recent_activity: bool = True
     entry_window_seconds: int = 300
     exit: ExitConfig = Field(default_factory=ExitConfig)
 
@@ -135,11 +138,15 @@ class LiquidityTrend(Strategy):
         gaps = [k for k, v in comps.items() if v is None]
         total = sum(weights[k] * (v or 0.0) for k, v in comps.items())
         age = m.age_seconds(now)
+        activity_fields = (m.volume_5m, m.buys_5m, m.sells_5m, m.unique_buyers_5m)
+        activity_known = any(v is not None for v in activity_fields)
+        has_activity = any((v or 0) > 0 for v in activity_fields)
         gates = {
             "price_present": m.price is not None and m.price > 0,
             "liquidity_present": m.liquidity is not None and m.liquidity >= c.min_liquidity_usdc,
             "min_score": total >= c.min_score,
             "min_age": age is None or age >= c.min_age_seconds,
+            "recent_activity": (not c.require_recent_activity) or (not activity_known) or has_activity,
             # Soft: top10 is primarily a risk veto; only hard-fail extreme concentration here
             "holder_not_extreme": m.top10_holder_pct is None or m.top10_holder_pct <= 95.0,
         }

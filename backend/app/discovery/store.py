@@ -304,6 +304,37 @@ class PersistentTokenStore:
             log.exception("list_recent failed")
             return []
 
+    async def delete_stale(self, cutoff: datetime) -> dict[str, int]:
+        """Retention: delete registry rows and market snapshots not refreshed since ``cutoff``.
+
+        A token row counts as stale when its last monitoring time (or, if it was never monitored,
+        its discovery time) is older than the cutoff.
+        """
+        out = {"tokens": 0, "snapshots": 0}
+        if self.sf is None:
+            return out
+        from sqlalchemy import and_, delete, or_
+
+        cutoff_naive = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)  # columns are tz-aware
+        try:
+            async with self.sf() as db:
+                r1 = await db.execute(
+                    delete(M.LaunchpadTokenRow).where(
+                        or_(
+                            M.LaunchpadTokenRow.last_monitored_at < cutoff_naive,
+                            and_(M.LaunchpadTokenRow.last_monitored_at.is_(None),
+                                 M.LaunchpadTokenRow.discovered_at < cutoff_naive),
+                        )
+                    )
+                )
+                r2 = await db.execute(delete(M.MarketSnapshot).where(M.MarketSnapshot.at < cutoff_naive))
+                await db.commit()
+                out["tokens"] = int(r1.rowcount or 0)
+                out["snapshots"] = int(r2.rowcount or 0)
+        except Exception:
+            log.exception("delete_stale failed")
+        return out
+
     async def get(self, chain: str, address: str) -> LaunchpadToken | None:
         # Redis first
         if self.redis is not None:

@@ -144,6 +144,8 @@ class RunnerRuntime:
         self.last_decision: dict | None = None
         self.data_status = "idle"
         self.revoked = False
+        self._md_shared = False
+        self._own_market_data = None
         self._evaluated: dict[str, datetime] = {}
         self._mkt_at: dict[str, float] = {}
         self._pf_at = -1e9
@@ -336,8 +338,25 @@ class RunnerRuntime:
             log.exception("enrichment setup failed; continuing without contract/holder enrichment")
             return inner
 
+    def use_shared_market_data(self, md) -> None:
+        """Point evaluation, exits and paper fills at a market-data stack owned by someone else (the cloud worker's
+        global pipeline). ``aclose`` must then NOT close it: it is shared by every tenant and by global discovery and
+        monitoring. Closing it after one tenant's cycle left every provider with a closed HTTP client
+        ("Cannot send a request, as the client has been closed"), so nothing was ever evaluated again."""
+        if not self._md_shared:
+            self._own_market_data = self.market_data
+        self._md_shared = True
+        self.market_data = md
+        if self.engine is not None:
+            self.engine.market_data = md
+            ex = getattr(self.engine, "executor", None)
+            if ex is not None and hasattr(ex, "market_data"):
+                ex.market_data = md
+
     async def aclose(self) -> None:
-        close = getattr(self.market_data, "aclose", None)
+        # Only close market-data providers this runtime owns.
+        owned = self._own_market_data if self._md_shared else self.market_data
+        close = getattr(owned, "aclose", None)
         if close is not None:
             try:
                 await close()
@@ -771,7 +790,8 @@ class RunnerRuntime:
             n += 1
         return n
 
-    async def evaluate_global_candidates(self, addresses: list[str], *, max_n: int = 20) -> int:
+    async def evaluate_global_candidates(self, addresses: list[str], *, max_n: int = 20,
+                                         state_fn=None, min_interval_s: float | None = None) -> int:
         """Evaluate registry tokens into Decisions so Opportunities "Scanned" stays fresh.
 
         Each successful evaluation writes a new Decision with scanned_at=now.
@@ -784,8 +804,11 @@ class RunnerRuntime:
         skipped_recent = skipped_no_data = skipped_open = 0
         now = self.clock()
         # Stale opportunities: always refresh if last eval in this process was > 5 min ago.
-        force_after_s = max(float(self.s.reevaluate_after_s), 60.0)
+        # ``min_interval_s`` (cloud worker) overrides the per-process default so the throttle matches the
+        # worker's persistent evaluation cache instead of a per-cycle (empty) one.
+        force_after_s = float(min_interval_s) if min_interval_s is not None else max(float(self.s.reevaluate_after_s), 60.0)
         stale_force_s = 300.0
+        fetch_state = state_fn or self.market_data.get_market_state
         for addr in addresses:
             if n >= max_n:
                 break
@@ -803,7 +826,7 @@ class RunnerRuntime:
                     continue
                 # age >= force_after_s → re-evaluate (including > stale_force_s)
             try:
-                m = await self.market_data.get_market_state(a)
+                m = await fetch_state(a)
             except DataUnavailable:
                 skipped_no_data += 1
                 continue

@@ -32,6 +32,8 @@ from runner.settings import RunnerSettings
 from runner.store import LocalStore
 from runner.wallets import PrivyClient, PrivyWalletProvider
 from app.discovery.bootstrap import GlobalPipeline
+from app.discovery.ranking import RankingConfig, rank_candidates
+from app.core.clock import utcnow
 
 log = logging.getLogger("cloud_worker")
 
@@ -43,11 +45,21 @@ class PlatformClient:
         self.timeout = timeout
 
     async def _req(self, method: str, path: str, **kw) -> Any:
-        async with httpx.AsyncClient(timeout=self.timeout) as c:
-            try:
-                r = await c.request(method, f"{self.base}{path}", headers=self.headers, **kw)
-            except httpx.HTTPError as e:
-                raise ControlPlaneError(0, f"unreachable: {type(e).__name__}") from e
+        r = None
+        last: Exception | None = None
+        # ConnectError means no request was sent (DNS blip, refused connection), so retrying is always safe.
+        for attempt in range(3):
+            async with httpx.AsyncClient(timeout=self.timeout) as c:
+                try:
+                    r = await c.request(method, f"{self.base}{path}", headers=self.headers, **kw)
+                    break
+                except httpx.ConnectError as e:
+                    last = e
+                except httpx.HTTPError as e:
+                    raise ControlPlaneError(0, f"unreachable: {type(e).__name__}") from e
+            await asyncio.sleep(0.5 * (attempt + 1))
+        if r is None:
+            raise ControlPlaneError(0, f"unreachable: {type(last).__name__}") from last
         if r.status_code == 401:
             raise Revoked(401, "platform worker token rejected")
         if r.status_code >= 400:
@@ -129,6 +141,11 @@ class CloudWorker:
         # heartbeat-timeout window (the market-data fan-out can easily run
         # 60-90s per cycle, vs. a typical 30-60s timeout).
         self._last_heartbeats: dict[str, Heartbeat] = {}
+        # Per-tenant "when did we last evaluate token X". RunnerRuntime is rebuilt every cycle, so its own
+        # ``_evaluated`` dict is always empty; without this cache every cycle re-evaluated the same top-N tokens
+        # and never reached the rest.
+        self._eval_at: dict[str, dict[str, Any]] = {}
+        self._pipeline: GlobalPipeline | None = None
 
     def _wallet_for(self, privy_wallet_id: str, address: str) -> PrivyWalletProvider:
         if self._privy is None:
@@ -160,49 +177,30 @@ class CloudWorker:
         if rt.portfolio is not None:
             await self.client.save_state(user_id, rt.portfolio.mode.value, rt.portfolio.to_dict())
 
-    def _global_candidate_addresses(self) -> list[str]:
-        """Rank global-registry tokens for Opportunities evaluation.
+    def _ranking_config(self) -> RankingConfig:
+        return RankingConfig(
+            min_liquidity_usdc=float(self.s.candidate_min_liquidity_usdc),
+            min_market_cap_usdc=float(self.s.candidate_min_market_cap_usdc),
+            max_age_s=float(self.s.retention_hours) * 3600.0,
+            eval_min_interval_s=float(self.s.eval_min_interval_s),
+            max_per_cycle=int(self.s.eval_max_per_cycle),
+        )
 
-        Primary sort: highest liquidity, then market cap. Stale monitor age is a
-        tie-breaker only so high-MC Gecko tokens are not starved by dust pools.
+    def _global_candidate_addresses(self, user_id: str) -> list[str]:
+        """Pick which registry tokens to evaluate this cycle for one tenant.
+
+        Balanced (liquidity / market cap / holders) and trending tokens rank first, but every eligible token is
+        rotated through: tokens not evaluated within ``eval_min_interval_s`` get a staleness bonus, tokens
+        evaluated more recently are skipped, and nothing older than the retention window is considered.
         """
-        pipe = getattr(self, "_pipeline", None)
+        pipe = self._pipeline
         if pipe is None or getattr(pipe, "registry", None) is None:
             return []
-        from app.discovery.registry import TokenStatus
-        terminal = {TokenStatus.DROPPED, TokenStatus.EXPIRED}
-        scored: list[tuple] = []
-        for t in pipe.registry.all():
-            if (t.priority or "WARM") == "DEAD":
-                continue
-            snap = (t.meta or {}).get("last_snapshot") or {}
-            if not isinstance(snap, dict):
-                snap = {}
-            liq = float(snap.get("liquidity") or 0)
-            mcap = float(snap.get("market_cap") or 0)
-            if t.status in terminal and liq < 10_000 and mcap < 20_000:
-                continue
-            score = float(t.current_score or t.initial_score or 0.0)
-            mon_age = 1e9
-            if t.last_monitored_at is not None:
-                try:
-                    from datetime import datetime, timezone
-                    mon = t.last_monitored_at
-                    if mon.tzinfo is None:
-                        mon = mon.replace(tzinfo=timezone.utc)
-                    mon_age = max(0.0, (datetime.now(timezone.utc) - mon).total_seconds())
-                except Exception:
-                    mon_age = 1e9
-            # Sort key: higher liq first, higher mcap, higher score, then staler monitor.
-            scored.append((-liq, -mcap, -score, -mon_age, t.token_address))
-        scored.sort()
-        addrs = [addr for *_, addr in scored]
-        log.info(
-            "global candidates for evaluation: %d (registry=%d) top_liq_addrs=%s",
-            len(addrs),
-            len(list(pipe.registry.all())),
-            addrs[:5],
-        )
+        eval_at = self._eval_at.setdefault(user_id, {})
+        tokens = pipe.registry.all()
+        addrs = rank_candidates(tokens, eval_at, utcnow(), self._ranking_config())
+        log.info("global candidates for evaluation: %d due of %d registry tokens (top=%s)",
+                 len(addrs), len(tokens), addrs[:3])
         return addrs
 
     async def process_tenant(self, tenant: dict) -> None:
@@ -248,7 +246,7 @@ class CloudWorker:
             evaluated = 0
             try:
                 await rt.monitor_once()
-                addrs = self._global_candidate_addresses()
+                addrs = self._global_candidate_addresses(user_id)
                 if not addrs:
                     log.warning(
                         "tenant %s: no global candidates (pipeline=%s registry=%s) — Opportunities will not refresh",
@@ -257,11 +255,20 @@ class CloudWorker:
                         len(list(self._pipeline.registry.all())) if self._pipeline is not None else 0,
                     )
                 else:
-                    # Prefer the shared global market-data stack (same cache as discovery/monitoring).
-                    if self._pipeline is not None and getattr(self._pipeline, "market_data", None) is not None:
-                        rt.market_data = self._pipeline.market_data
+                    # Share the global market-data stack (same cache as discovery/monitoring) for BOTH evaluation
+                    # and open-position monitoring; the per-cycle runtime's own providers have an empty cache.
+                    pipe = self._pipeline
+                    if pipe is not None and getattr(pipe, "market_data", None) is not None:
+                        rt.use_shared_market_data(pipe.market_data)   # never closed by rt.aclose()
+                    # Persist the evaluation throttle across cycles (see _eval_at above).
+                    rt._evaluated = self._eval_at.setdefault(user_id, {})
+                    state_fn = None
+                    if pipe is not None:
+                        pipe.begin_cycle(int(self.s.eval_fetch_budget))
+                        state_fn = pipe.market_state_for
                     evaluated = await rt.evaluate_global_candidates(
-                        addrs, max_n=int(getattr(self.s, "market_data_max_tokens", 25) or 25)
+                        addrs, max_n=int(self.s.eval_max_per_cycle),
+                        state_fn=state_fn, min_interval_s=float(self.s.eval_min_interval_s),
                     )
                 await rt.monitor_once()
             finally:
@@ -288,6 +295,11 @@ class CloudWorker:
         except Exception:
             log.exception("tenant %s cycle failed", user_id)
             if rt is not None:
+                # A failed cycle must not leave an older (possibly PAUSED) heartbeat cached for replay.
+                try:
+                    self._last_heartbeats[user_id] = rt.heartbeat()
+                except Exception:
+                    pass
                 try:
                     await rt.upload_once()
                 except Exception:
@@ -336,6 +348,29 @@ class CloudWorker:
             except Exception:
                 log.debug("mid-cycle heartbeat pulse failed for %s", user_id)
 
+    @staticmethod
+    def _with_current_state(hb: Heartbeat, tenant: dict) -> Heartbeat:
+        """Make a replayed heartbeat agree with the control plane's CURRENT desired state.
+
+        The cached heartbeat was produced at the end of an earlier cycle. If the user pressed Start/Pause since
+        then, replaying it verbatim reports the OLD state ("Requested: RUNNING, Reported: PAUSED") until the next
+        full cycle, and a cycle that fails before refreshing the cache keeps reporting it indefinitely, which shows
+        up as the agent flipping between PAUSED and RUNNING. Only the plain running/paused/stopped states are
+        rewritten; LIVE_BLOCKED and similar states are left alone.
+        """
+        if hb.state not in ("RUNNING", "PAUSED", "STOPPED"):
+            return hb
+        desired = str(tenant.get("desired_state") or "")
+        if tenant.get("emergency_stop") or desired == "PAUSED":
+            want = "PAUSED"
+        elif desired == "STOPPED":
+            want = "STOPPED"
+        elif desired == "RUNNING":
+            want = "RUNNING"
+        else:
+            return hb
+        return hb if want == hb.state else hb.model_copy(update={"state": want})
+
     async def _replay_heartbeat(self, tenant: dict) -> None:
         """Replay the last real heartbeat body for liveness only.
 
@@ -350,6 +385,7 @@ class CloudWorker:
         hb = self._last_heartbeats.get(user_id)
         if hb is None:
             return
+        hb = self._with_current_state(hb, tenant)
         try:
             await self.client.heartbeat(user_id, hb)
         except Revoked:
@@ -419,6 +455,13 @@ class CloudWorker:
                         await asyncio.gather(*(one(t) for t in tenants), return_exceptions=False)
                         last_full_cycle = time.monotonic()
                         log.info("full cycle done, %d tenants (discovery is global)", len(tenants))
+                        try:
+                            await self._pipeline.prune()
+                            for cache in self._eval_at.values():
+                                for k in [k for k, _ in cache.items() if self._pipeline.registry.get("arc", k) is None]:
+                                    cache.pop(k, None)
+                        except Exception:
+                            log.exception("retention prune failed")
                     else:
                         for t in tenants:
                             await self._replay_heartbeat(t)

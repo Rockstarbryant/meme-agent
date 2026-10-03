@@ -94,6 +94,10 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         self.min_pool_liquidity_usd = max(0.0, min_pool_liquidity_usd)
         self.trending_durations = tuple(d for d in trending_durations if d in ("5m", "1h", "6h", "24h")) or ("5m", "1h")
         self._cache: dict[str, tuple[float, MarketState]] = {}
+        # Pool objects already returned by the trending / new_pools lists (they carry the same attributes as the
+        # per-token pools endpoint). Reusing them saves one rate-limited call per token.
+        self._pool_hints: dict[str, tuple[float, dict, list]] = {}
+        self.hint_ttl_s = 240.0
 
     def _extract_scored_tokens(
         self, payload: dict, scored: list[tuple[float, str]], seen: set[str], limit: int
@@ -140,6 +144,11 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
                     continue
                 seen.add(addr)
                 scored.append((liq, addr))
+                self._pool_hints[addr] = (time.monotonic(), item, included)
+        # Bound memory: drop hints that have expired.
+        cutoff = time.monotonic() - self.hint_ttl_s
+        for k in [k for k, v in self._pool_hints.items() if v[0] < cutoff]:
+            self._pool_hints.pop(k, None)
 
     async def discover_tokens(self) -> list[str]:
         """Discover Arc tokens from GeckoTerminal Trending (5m/1h/6h/24h) + New Pools.
@@ -180,9 +189,13 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         cached = self._cache.get(token)
         if cached and time.monotonic() - cached[0] < self.cache_s:
             return cached[1]
-        payload = await self.client.token_pools(token)
-        pools = payload.get("data") or []
-        included = payload.get("included") or []
+        hint = self._pool_hints.get(token)
+        if hint and time.monotonic() - hint[0] < self.hint_ttl_s:
+            pools, included = [hint[1]], hint[2]
+        else:
+            payload = await self.client.token_pools(token)
+            pools = payload.get("data") or []
+            included = payload.get("included") or []
         if not pools:
             raise DataUnavailable(f"GeckoTerminal has no pool for {token}")
         pools = sorted(pools, key=lambda x: (_num(_attr(x).get("reserve_in_usd")) or 0.0), reverse=True)
@@ -229,11 +242,15 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         # limits us (the client honors Retry-After before raising), or the pool
         # has no trades endpoint coverage, we still return a usable state with
         # those specific fields left unset instead of losing the whole cycle.
-        try:
-            trades_payload = await self.client.pool_trades(pool_address)
-            trades = trades_payload.get("data") or []
-        except DataUnavailable:
-            trades = []
+        # Skip the trades call for pools with no 5m activity: it cannot add information and it is the most
+        # expensive call per token on the free tier.
+        trades: list = []
+        if (buys_5m or 0) + (sells_5m or 0) > 0 or (volume_5m or 0) > 0:
+            try:
+                trades_payload = await self.client.pool_trades(pool_address)
+                trades = trades_payload.get("data") or []
+            except DataUnavailable:
+                trades = []
         now = datetime.now(timezone.utc)
         buy_volume_5m = sell_volume_5m = 0.0
         buyers_recent: set[str] = set()

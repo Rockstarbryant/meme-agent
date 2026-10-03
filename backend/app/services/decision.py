@@ -57,6 +57,11 @@ def tighten_limits(limits: RiskLimits, policy: WalletPolicy | None) -> RiskLimit
     return merge_wallet_policy(limits, policy)
 
 
+# Gates the AI can never override when upgrading a WATCH-band token to BUY (see DecisionPipeline.evaluate).
+_HARD_GATES = ("price_present", "liquidity_present", "required_data_present", "min_age", "holder_not_extreme",
+               "recent_activity")
+
+
 class DecisionPipeline:
     def __init__(self, strategy: Strategy, risk: RiskEngine, limits: RiskLimits, approver: TradeApprover,
                  analyzer: AIAnalyzer, ai_mode: AIMode = AIMode.ENABLED, min_ai_confidence: float = 0.6,
@@ -142,6 +147,15 @@ class DecisionPipeline:
             if d.action != Action.BUY:
                 mapped = Action.REJECT if d.action == Action.REJECT else Action.WATCH
                 return rec(mapped, f"AI said {d.action.value}; {strategy_note}", ai=ai_out)
+            if watch_band:
+                # The AI is consulted for every WATCH-band token, but it may only UPGRADE one to BUY when the
+                # strategy's soft gates (score / momentum / buyer-pressure) are what failed. Missing data, a dead
+                # pool, no recent activity, a brand-new pool or extreme holder concentration are hard stops.
+                hard_failed = [k for k in _HARD_GATES if signal.gates.get(k) is False]
+                if hard_failed:
+                    return rec(Action.WATCH,
+                               f"AI said BUY but hard gate failed ({', '.join(hard_failed)}); {strategy_note}",
+                               ai=ai_out)
             if d.confidence < self.min_ai_conf:
                 return rec(
                     Action.WATCH,

@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     paper_starting_usdc: float = 1000.0
 
     paper_trading_enabled: bool = True
+    # Opportunities / decisions / market snapshots older than this are hidden and deleted (positions keep their decision).
+    retention_hours: float = 24.0
     live_trading_enabled: bool = False  # global kill switch: LIVE can only be activated from the UI when this is true
 
     risk_max_trade_usdc: float = 25.0

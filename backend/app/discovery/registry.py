@@ -81,3 +81,6 @@ class GlobalTokenRegistry:
         return [t for t in self._by_key.values() if t.discovered_at >= since or (t.launched_at and t.launched_at >= since)]
     def all(self) -> list[LaunchpadToken]:
         return list(self._by_key.values())
+    def remove(self, key: str) -> LaunchpadToken | None:
+        """Drop a token from the in-memory registry (used by retention pruning)."""
+        return self._by_key.pop(key, None)

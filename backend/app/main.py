@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import secrets
 from contextlib import asynccontextmanager
@@ -20,6 +22,7 @@ from app.db import models as M
 from app.db.session import make_engine, make_session_factory
 from app.infra.redis import RateLimiter
 from app.services.hub import EventHub
+from app.services.retention import retention_loop
 from app.strategies.traction_momentum import TractionMomentumConfig
 from app.strategies.liquidity_trend import LiquidityTrendConfig
 
@@ -66,7 +69,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.warning("JWT_SECRET not set: using an ephemeral key (tokens die on restart). Set it in production.")
         app.state.c = Container(settings, engine, sf, redis, chain, hub, RateLimiter(redis), jwt_key)
         await seed(sf, settings)
+        retention_task = asyncio.create_task(retention_loop(sf, settings.retention_hours), name="retention")
         yield
+        retention_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await retention_task
         await redis.aclose()
         await engine.dispose()
 

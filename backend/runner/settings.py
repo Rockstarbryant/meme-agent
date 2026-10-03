@@ -205,16 +205,33 @@ class RunnerSettings(BaseSettings):
     upload_interval_s: float = 1.0
     discovery_interval_s: float = 15.0
     # Global discovery (default 3 hours). Trade cycles must NOT run discovery.
-    global_discovery_interval_s: float = 15 * 60  # new-pool sweep; monitoring is separate (30s/2m/10m)
+    global_discovery_interval_s: float = 5 * 60  # trending/new-pool sweep; monitoring is separate
     global_discovery_lookback_s: float = 15 * 60
     global_discovery_enabled: bool = True
-    monitor_hot_interval_s: float = 30.0
-    monitor_warm_interval_s: float = 120.0
-    monitor_cold_interval_s: float = 600.0
+    monitor_hot_interval_s: float = 60.0
+    monitor_warm_interval_s: float = 180.0
+    monitor_cold_interval_s: float = 900.0
+    # Provider-call budget: GeckoTerminal's free tier allows ~24 calls/min at our pacing, so refresh at most
+    # this many tokens per 15s monitoring pass (the rest wait for the next pass).
+    monitor_max_per_cycle: int = Field(4, validation_alias=_alias("MONITOR_MAX_PER_CYCLE"))
+    monitor_max_consecutive_failures: int = Field(5, validation_alias=_alias("MONITOR_MAX_CONSECUTIVE_FAILURES"))
     monitor_interval_s: float = 5.0
     snapshot_interval_s: float = 60.0
     market_snapshot_every_s: float = 15.0
     reevaluate_after_s: float = 90.0  # per-process; new Decisions refresh Opportunities scanned_at
+
+    # ------------------------------------------------ cloud-worker candidate selection / evaluation
+    # Tokens are evaluated from the shared registry snapshot (kept fresh by monitoring) so a cycle does not
+    # re-hit the market-data providers for every token. Only `eval_fetch_budget` tokens per cycle may trigger a
+    # live provider fetch (because their snapshot is older than `eval_snapshot_max_age_s`).
+    eval_min_interval_s: float = Field(300.0, validation_alias=_alias("EVAL_MIN_INTERVAL_S"))
+    eval_max_per_cycle: int = Field(40, validation_alias=_alias("EVAL_MAX_PER_CYCLE"))
+    eval_snapshot_max_age_s: float = Field(150.0, validation_alias=_alias("EVAL_SNAPSHOT_MAX_AGE_S"))
+    eval_fetch_budget: int = Field(4, validation_alias=_alias("EVAL_FETCH_BUDGET"))
+    candidate_min_liquidity_usdc: float = Field(5_000.0, validation_alias=_alias("CANDIDATE_MIN_LIQUIDITY_USDC"))
+    candidate_min_market_cap_usdc: float = Field(5_000.0, validation_alias=_alias("CANDIDATE_MIN_MARKET_CAP_USDC"))
+    # Anything not refreshed/seen for this long is dropped from the registry and database.
+    retention_hours: float = Field(24.0, validation_alias=_alias("RETENTION_HOURS"))
     paper_starting_usdc: float = 1000.0
 
     # ------------------------------------------------------------------ AI

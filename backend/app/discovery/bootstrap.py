@@ -21,6 +21,8 @@ from app.discovery.service import DiscoveryCheckpoint, DiscoveryConfig, GlobalDi
 from app.discovery.store import PersistentTokenStore, hydrate_registry
 from app.domain.market import MarketState
 from app.market_data.gateway import SharedMarketDataGateway
+from app.discovery.ranking import RankingConfig, is_expired
+from app.strategies.liquidity_trend import LiquidityTrend, LiquidityTrendConfig
 from app.strategies.traction_momentum import TractionMomentum, TractionMomentumConfig
 
 log = logging.getLogger("discovery.bootstrap")
@@ -302,7 +304,15 @@ class GlobalPipeline:
         )
         self._base_market_data = build_global_market_data(settings)
         self.market_data = self._maybe_wrap_enrichment(settings)
+        # Score with BOTH strategies and keep the better one: fresh launches fit traction_momentum, established /
+        # trending tokens fit liquidity_trend. Scoring only with traction_momentum rejected (and stopped monitoring)
+        # nearly every established token, which is why they never refreshed.
         self.strategy = TractionMomentum(TractionMomentumConfig())
+        self.lt_strategy = LiquidityTrend(LiquidityTrendConfig())
+        self.snapshot_max_age_s = float(getattr(settings, "eval_snapshot_max_age_s", 150.0))
+        self.retention_s = float(getattr(settings, "retention_hours", 24.0)) * 3600.0
+        self._fetch_budget = 0
+        self._last_prune = 0.0
 
         disc_cfg = DiscoveryConfig(
             interval_s=float(getattr(settings, "global_discovery_interval_s", 3 * 3600)),
@@ -417,6 +427,10 @@ class GlobalPipeline:
             if not isinstance(m, MarketState):
                 out.append({"chain": "arc", "token_address": str(addr).lower()})
                 continue
+            # NOTE: this used to drop every token older than 72h whose creation fell outside the discovery
+            # window. That was meant for launch-event discovery, but with Gecko trending it silently removed
+            # ALL established tokens. New vs established is now a settings choice, plus soft quality floors.
+            cfg = self.settings
             if m.token_created_at is not None:
                 created = (
                     m.token_created_at
@@ -424,8 +438,17 @@ class GlobalPipeline:
                     else m.token_created_at.replace(tzinfo=timezone.utc)
                 )
                 age_h = (utcnow() - created).total_seconds() / 3600
-                if age_h > 72 and (created < start or created > end):
+                is_new = age_h < float(getattr(cfg, "established_min_age_hours", 2.0))
+                if is_new and not bool(getattr(cfg, "scan_new_launches", True)):
                     continue
+                if not is_new and not bool(getattr(cfg, "scan_established", True)):
+                    continue
+            min_liq = float(getattr(cfg, "candidate_min_liquidity_usdc", 5_000.0))
+            min_mcap = float(getattr(cfg, "candidate_min_market_cap_usdc", 5_000.0))
+            if m.liquidity is not None and m.liquidity < min_liq:
+                continue
+            if m.market_cap is not None and m.market_cap < min_mcap:
+                continue
             out.append({
                 "chain": m.chain or "arc",
                 "token_address": m.token_address.lower(),
@@ -519,8 +542,87 @@ class GlobalPipeline:
     async def _score_from_snap(self, token: LaunchpadToken, snap: dict) -> float:
         try:
             m = market_state_from_snapshot(snap, token)
-            sig = self.strategy.score(m, utcnow())
-            return float(sig.score) if sig and sig.score is not None else 0.0
+            now = utcnow()
+            best = 0.0
+            for strat in (self.strategy, self.lt_strategy):
+                try:
+                    sig = strat.score(m, now)
+                    if sig and sig.score is not None:
+                        best = max(best, float(sig.score))
+                except Exception:
+                    log.exception("%s score failed for %s", getattr(strat, "strategy_id", "?"), token.token_key)
+            return best
         except Exception:
             log.exception("score failed for %s", token.token_key)
             return 0.0
+
+    # ------------------------------------------------------------------ evaluation support
+    def begin_cycle(self, fetch_budget: int) -> None:
+        """Reset the number of live provider fetches evaluation may trigger this cycle."""
+        self._fetch_budget = max(0, int(fetch_budget))
+
+    async def market_state_for(self, address: str, *, chain: str = "arc") -> MarketState:
+        """MarketState for evaluation, served from the registry snapshot whenever it is fresh enough.
+
+        Monitoring keeps snapshots current, so most evaluations cost zero provider calls. When a snapshot is
+        older than ``snapshot_max_age_s`` and fetch budget remains, refresh it through the shared gateway
+        (cached + de-duplicated). If the refresh fails or there is no budget left, fall back to the existing
+        snapshot as long as it is not expired; otherwise raise DataUnavailable.
+        """
+        token = self.registry.get(chain, address)
+        now = utcnow()
+        snap = ((token.meta or {}).get("last_snapshot") if token else None) or None
+        age = None
+        if token is not None and token.last_monitored_at is not None:
+            mon = token.last_monitored_at if token.last_monitored_at.tzinfo else token.last_monitored_at.replace(tzinfo=timezone.utc)
+            age = (now - mon).total_seconds()
+        if token is not None and snap and age is not None and age <= self.snapshot_max_age_s:
+            return market_state_from_snapshot(snap, token)
+
+        if token is None:
+            # Not in the registry (should not happen for ranked candidates) -> plain gateway fetch within budget.
+            if self._fetch_budget <= 0:
+                raise DataUnavailable(f"no snapshot and no fetch budget for {address}")
+            self._fetch_budget -= 1
+            m = await self.gateway.get(chain, address, lambda: self.market_data.get_market_state(address),
+                                       kind="state", ttl_s=45.0)
+            if isinstance(m, MarketState):
+                return m
+            raise DataUnavailable(f"no market state for {address}")
+
+        if self._fetch_budget > 0:
+            self._fetch_budget -= 1
+            try:
+                fresh = await self._fetch_state(token)           # also persists the snapshot
+                token.meta = dict(token.meta or {})
+                token.meta["last_snapshot"] = fresh
+                token.last_monitored_at = now
+                self.registry.upsert(token)
+                return market_state_from_snapshot(fresh, token)
+            except DataUnavailable:
+                pass
+            except Exception:
+                log.exception("evaluation refresh failed for %s", token.token_key)
+        if snap and not is_expired(token, now, self.retention_s):
+            return market_state_from_snapshot(snap, token)
+        raise DataUnavailable(f"no usable market data for {token.token_key}")
+
+    # ------------------------------------------------------------------ retention
+    async def prune(self, *, min_interval_s: float = 600.0) -> dict[str, int]:
+        """Drop tokens (memory + DB + old snapshots) not refreshed/seen within the retention window."""
+        import time as _t
+        if _t.monotonic() - self._last_prune < min_interval_s:
+            return {"tokens": 0, "snapshots": 0, "registry": 0}
+        self._last_prune = _t.monotonic()
+        now = utcnow()
+        removed = 0
+        for t in list(self.registry.all()):
+            if is_expired(t, now, self.retention_s):
+                if self.registry.remove(t.token_key) is not None:
+                    removed += 1
+        from datetime import timedelta
+        res = await self.store.delete_stale(now - timedelta(seconds=self.retention_s))
+        res["registry"] = removed
+        if removed or res.get("tokens") or res.get("snapshots"):
+            log.info("retention prune: registry=%d db_tokens=%d db_snapshots=%d", removed, res.get("tokens", 0), res.get("snapshots", 0))
+        return res
