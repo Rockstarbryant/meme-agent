@@ -103,26 +103,47 @@ class DecisionPipeline:
                                   sized_amount_usdc=kw.pop("amount", amount), **kw)
 
         if pre.decision == RiskDecision.REJECT:
+            # Hard risk veto: never spend AI budget on vetoed tokens.
             return rec(Action.REJECT, f"RISK_VETO: {pre.summary()}")
+
+        watch_band = False
         if not signal.qualified:
-            watch = signal.score >= getattr(self.strategy, "cfg").watch_score
-            return rec(Action.WATCH if watch else Action.REJECT, "; ".join(signal.reasons))
+            watch_band = signal.score >= getattr(self.strategy, "cfg").watch_score
+            if not watch_band:
+                return rec(Action.REJECT, "; ".join(signal.reasons))
+            # WATCH band: still send to AI when enabled so the model can confirm WATCH,
+            # upgrade to BUY, or REJECT. Strategy reasons stay attached to the decision.
 
         ai_out: AIOutcome | None = None
         size_cap = amount
+        strategy_note = "; ".join(signal.reasons) if signal.reasons else (
+            "qualified signal" if signal.qualified else "watch-band signal"
+        )
         if self.ai_mode == AIMode.DISABLED:
             if mode == TradingMode.LIVE:
                 return rec(Action.WATCH, "AI_REQUIRED_FOR_LIVE_ENTRIES")
+            if watch_band:
+                return rec(Action.WATCH, strategy_note)
+            # qualified + AI disabled + PAPER → fall through to deterministic BUY below
         else:
-            ai_out = await self.analyzer.analyze(m, signal, pre)               # AI stage (qualified only)
+            # AI stage: qualified signals and WATCH-band signals (not hard REJECT).
+            ai_out = await self.analyzer.analyze(m, signal, pre)
             if ai_out.status != "OK" or ai_out.decision is None:
-                return rec(Action.WATCH, f"AI_{ai_out.status}: no new AI-dependent entries", ai=ai_out)
+                return rec(
+                    Action.WATCH,
+                    f"AI_{ai_out.status}: no new AI-dependent entries; {strategy_note}",
+                    ai=ai_out,
+                )
             d = ai_out.decision
             if d.action != Action.BUY:
                 mapped = Action.REJECT if d.action == Action.REJECT else Action.WATCH
-                return rec(mapped, f"AI said {d.action.value}", ai=ai_out)
+                return rec(mapped, f"AI said {d.action.value}; {strategy_note}", ai=ai_out)
             if d.confidence < self.min_ai_conf:
-                return rec(Action.WATCH, f"AI confidence {d.confidence:.2f} below {self.min_ai_conf}", ai=ai_out)
+                return rec(
+                    Action.WATCH,
+                    f"AI confidence {d.confidence:.2f} below {self.min_ai_conf}; {strategy_note}",
+                    ai=ai_out,
+                )
             # AI may only SHRINK the position, never enlarge it beyond deterministic sizing.
             size_cap = min(amount, portfolio.total_value() * d.recommended_position_percent / 100.0)
 
@@ -137,7 +158,8 @@ class DecisionPipeline:
         decision_id = uuid.uuid4().hex
         req = self._request(m, final_amount, mode, now, decision_id, limits.max_slippage_pct)
         approved = self.approver.approve(req, final)
-        out = rec(Action.BUY, "approved: qualified signal, AI agreement, risk approved" if ai_out
+        out = rec(Action.BUY, ("approved: watch-band upgraded by AI, risk approved" if watch_band else
+                           "approved: qualified signal, AI agreement, risk approved") if ai_out
                   else "approved: qualified signal and risk approved (AI disabled, PAPER only)",
                   ai=ai_out, final_risk=final, amount=final_amount, approved_trade=approved)
         out.id = decision_id
