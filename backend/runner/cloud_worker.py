@@ -160,6 +160,43 @@ class CloudWorker:
         if rt.portfolio is not None:
             await self.client.save_state(user_id, rt.portfolio.mode.value, rt.portfolio.to_dict())
 
+    def _global_candidate_addresses(self) -> list[str]:
+        """Active global-registry tokens (Gecko trending + monitored), ranked for evaluation.
+
+        Prefer high liquidity / market cap from last_snapshot so Opportunities
+        surfaces the same major Arc tokens visible on the Discovery page.
+        """
+        pipe = getattr(self, "_pipeline", None)
+        if pipe is None or getattr(pipe, "registry", None) is None:
+            return []
+        from app.discovery.registry import TokenStatus
+        status_rank = {
+            TokenStatus.IMPROVING: 0,
+            TokenStatus.WATCHING: 1,
+            TokenStatus.QUALIFIED: 2,
+            TokenStatus.SCREENING: 3,
+            TokenStatus.DISCOVERED: 4,
+        }
+        pri_rank = {"HOT": 0, "WARM": 1, "COLD": 2}
+        scored: list[tuple] = []
+        for t in pipe.registry.all():
+            if t.status not in status_rank:
+                continue
+            if (t.priority or "WARM") == "DEAD":
+                continue
+            snap = (t.meta or {}).get("last_snapshot") or {}
+            liq = float(snap.get("liquidity") or 0) if isinstance(snap, dict) else 0.0
+            mcap = float(snap.get("market_cap") or 0) if isinstance(snap, dict) else 0.0
+            score = float(t.current_score or t.initial_score or 0.0)
+            scored.append((
+                pri_rank.get(t.priority or "WARM", 5),
+                status_rank.get(t.status, 9),
+                -(liq + mcap * 0.01 + score),
+                t.token_address,
+            ))
+        scored.sort()
+        return [addr for *_, addr in scored]
+
     async def process_tenant(self, tenant: dict) -> None:
         user_id = tenant["user_id"]
         if not await self.client.acquire_lease(user_id, self.worker_id, self.lease_ttl_s):

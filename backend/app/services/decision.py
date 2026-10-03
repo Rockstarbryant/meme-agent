@@ -89,11 +89,16 @@ class DecisionPipeline:
         pre = self._assess(m, amount, mode, portfolio, controls, now, limits)  # risk filter stage
 
         def rec(action: Action, reason: str, **kw) -> DecisionRecord:
+            market = m.model_dump(mode="json")
+            # Ensure Opportunities "Scanned" is populated even when providers omit scanned_at.
+            if not market.get("scanned_at"):
+                ts = market.get("timestamp")
+                market["scanned_at"] = ts if isinstance(ts, str) else (now.isoformat() if now else None)
             return DecisionRecord(created_at=now, mode=mode, token_key=m.key, strategy_id=self.strategy.strategy_id,
                                   strategy_version=self.strategy.version, strategy_config=self.strategy.config_snapshot(),
                                   risk_limits=limits.model_dump(mode="json"), controls=controls.snapshot(),
                                   wallet_policy=self.policy.model_dump(mode="json") if self.policy else None,
-                                  market=m.model_dump(mode="json"), signal=signal, pre_risk=pre,
+                                  market=market, signal=signal, pre_risk=pre,
                                   ai_mode=self.ai_mode.value, final_action=action, final_reason=reason,
                                   sized_amount_usdc=kw.pop("amount", amount), **kw)
 
