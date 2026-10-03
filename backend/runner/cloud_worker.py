@@ -161,41 +161,78 @@ class CloudWorker:
             await self.client.save_state(user_id, rt.portfolio.mode.value, rt.portfolio.to_dict())
 
     def _global_candidate_addresses(self) -> list[str]:
-        """Active global-registry tokens (Gecko trending + monitored), ranked for evaluation.
+        """Active global-registry tokens ranked for Opportunities evaluation.
 
-        Prefer high liquidity / market cap from last_snapshot so Opportunities
-        surfaces the same major Arc tokens visible on the Discovery page.
+        Includes any non-dead token with a recent snapshot or active status so
+        high-MC / high-liquidity rows do not sit for hours without a new Decision
+        (Opportunities "Scanned" is the decision time, not Discovery monitor time).
         """
         pipe = getattr(self, "_pipeline", None)
         if pipe is None or getattr(pipe, "registry", None) is None:
             return []
         from app.discovery.registry import TokenStatus
+        # Terminal statuses only skipped when they also lack liquidity snapshot.
+        terminal = {
+            TokenStatus.DROPPED,
+            TokenStatus.EXPIRED,
+        }
         status_rank = {
             TokenStatus.IMPROVING: 0,
             TokenStatus.WATCHING: 1,
             TokenStatus.QUALIFIED: 2,
-            TokenStatus.SCREENING: 3,
-            TokenStatus.DISCOVERED: 4,
+            TokenStatus.SIGNAL: 3,
+            TokenStatus.SCREENING: 4,
+            TokenStatus.DISCOVERED: 5,
+            TokenStatus.LOST_MOMENTUM: 6,
+            TokenStatus.REJECTED: 7,
         }
         pri_rank = {"HOT": 0, "WARM": 1, "COLD": 2}
         scored: list[tuple] = []
         for t in pipe.registry.all():
-            if t.status not in status_rank:
-                continue
             if (t.priority or "WARM") == "DEAD":
                 continue
             snap = (t.meta or {}).get("last_snapshot") or {}
-            liq = float(snap.get("liquidity") or 0) if isinstance(snap, dict) else 0.0
-            mcap = float(snap.get("market_cap") or 0) if isinstance(snap, dict) else 0.0
+            if not isinstance(snap, dict):
+                snap = {}
+            liq = float(snap.get("liquidity") or 0)
+            mcap = float(snap.get("market_cap") or 0)
+            # Keep high-liq tokens evaluable even if status is terminal/rejected.
+            if t.status in terminal and liq < 10_000 and mcap < 20_000:
+                continue
+            if t.status not in status_rank and liq < 5_000:
+                continue
             score = float(t.current_score or t.initial_score or 0.0)
+            # Prefer recently monitored so Opportunities stays in sync with Discovery.
+            mon = t.last_monitored_at
+            mon_age = 0.0
+            if mon is not None:
+                try:
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    if mon.tzinfo is None:
+                        mon = mon.replace(tzinfo=timezone.utc)
+                    mon_age = max(0.0, (now - mon).total_seconds())
+                except Exception:
+                    mon_age = 1e9
+            else:
+                mon_age = 1e9
             scored.append((
                 pri_rank.get(t.priority or "WARM", 5),
-                status_rank.get(t.status, 9),
+                status_rank.get(t.status, 8),
+                mon_age,  # older monitor → higher rank pressure later via sort key
                 -(liq + mcap * 0.01 + score),
                 t.token_address,
             ))
-        scored.sort()
-        return [addr for *_, addr in scored]
+        # Rank: priority, status, then prefer *stale* monitor times first (so 3h-old get refreshed),
+        # then liquidity/mcap.
+        scored.sort(key=lambda row: (row[0], row[1], -row[2] if row[2] > 300 else row[2], row[3]))
+        addrs = [addr for *_, addr in scored]
+        log.info(
+            "global candidates for evaluation: %d (registry=%d)",
+            len(addrs),
+            len(list(pipe.registry.all())),
+        )
+        return addrs
 
     async def process_tenant(self, tenant: dict) -> None:
         user_id = tenant["user_id"]
@@ -241,11 +278,20 @@ class CloudWorker:
             try:
                 await rt.monitor_once()
                 addrs = self._global_candidate_addresses()
-                if addrs:
+                if not addrs:
+                    log.warning(
+                        "tenant %s: no global candidates (pipeline=%s registry=%s) — Opportunities will not refresh",
+                        user_id,
+                        self._pipeline is not None,
+                        len(list(self._pipeline.registry.all())) if self._pipeline is not None else 0,
+                    )
+                else:
                     # Prefer the shared global market-data stack (same cache as discovery/monitoring).
                     if self._pipeline is not None and getattr(self._pipeline, "market_data", None) is not None:
                         rt.market_data = self._pipeline.market_data
-                    evaluated = await rt.evaluate_global_candidates(addrs, max_n=int(getattr(self.s, "market_data_max_tokens", 15) or 15))
+                    evaluated = await rt.evaluate_global_candidates(
+                        addrs, max_n=int(getattr(self.s, "market_data_max_tokens", 25) or 25)
+                    )
                 await rt.monitor_once()
             finally:
                 pulse.cancel()

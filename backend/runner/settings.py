@@ -199,7 +199,7 @@ class RunnerSettings(BaseSettings):
     privy_allow_withdraw: bool = Field(False, validation_alias=_alias("PRIVY_ALLOW_WITHDRAW"))
 
     # ------------------------------------------------------------------ timing
-    max_offline_s: float = 60.0
+    max_offline_s: float = 300.0  # 5 min — avoid PAUSED flaps on brief DNS failures
     poll_wait_s: int = 20
     heartbeat_interval_s: float = 5.0
     upload_interval_s: float = 1.0
@@ -214,7 +214,7 @@ class RunnerSettings(BaseSettings):
     monitor_interval_s: float = 5.0
     snapshot_interval_s: float = 60.0
     market_snapshot_every_s: float = 15.0
-    reevaluate_after_s: float = 60.0
+    reevaluate_after_s: float = 90.0  # per-process; new Decisions refresh Opportunities scanned_at
     paper_starting_usdc: float = 1000.0
 
     # ------------------------------------------------------------------ AI

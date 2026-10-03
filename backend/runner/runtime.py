@@ -507,14 +507,25 @@ class RunnerRuntime:
             return
         offline = not self.contact_ok()
         self.controls.emergency_stop = b.emergency_stop
+        enabled = list(b.strategies_enabled or [])
+        known = ("traction_momentum", "liquidity_trend")
+        # Any known strategy enabled is enough; empty list falls back to traction.
+        has_strategy = (not enabled) or any(s in known for s in enabled)
+        # Do NOT pause solely for brief DNS blips. Offline only suspends *entries*
+        # via entries_suspended_reason; desired_state remains the authority for PAUSED.
         self.controls.global_pause = (
             b.desired_state != "RUNNING"
-            or not any(s in (b.strategies_enabled or []) for s in ("traction_momentum", "liquidity_trend"))
-            or offline or self.revoked
+            or not has_strategy
+            or self.revoked
+            or bool(b.emergency_stop)
         )
         self.entries_suspended_reason = (
-            f"control plane unreachable for more than {self.s.max_offline_s}d: no NEW entries until it is back"
+            f"control plane unreachable for more than {self.s.max_offline_s:.0f}s: no NEW entries until contact recovers"
         ) if offline else None
+        if offline and not self.controls.global_pause:
+            # Stay RUNNING in heartbeat so UI does not flap PAUSED on transient DNS,
+            # but still block new entries while offline.
+            self.controls.global_pause = False
         self.state = "RUNNING" if not self.controls.global_pause else ("STOPPED" if b.desired_state == "STOPPED" else "PAUSED")
 
     async def poll_config_once(self, wait: int = 0) -> bool:
@@ -756,16 +767,21 @@ class RunnerRuntime:
             n += 1
         return n
 
-    async def evaluate_global_candidates(self, addresses: list[str], *, max_n: int = 15) -> int:
-        """Evaluate tokens from the global discovery registry into Decisions.
+    async def evaluate_global_candidates(self, addresses: list[str], *, max_n: int = 20) -> int:
+        """Evaluate registry tokens into Decisions so Opportunities "Scanned" stays fresh.
 
-        Cloud worker discovery is global and does not call discover_once().
-        Without this bridge, Opportunities stays empty of trending tokens.
+        Each successful evaluation writes a new Decision with scanned_at=now.
+        Tokens skipped only for a short reevaluate window (default 60s) so the
+        same high-MC names are not left on 3h-old cards for a whole session.
         """
         if self.engine is None or self.controls.global_pause or self.portfolio is None:
             return 0
         n = 0
+        skipped_recent = skipped_no_data = skipped_open = 0
         now = self.clock()
+        # Stale opportunities: always refresh if last eval in this process was > 5 min ago.
+        force_after_s = max(float(self.s.reevaluate_after_s), 60.0)
+        stale_force_s = 300.0
         for addr in addresses:
             if n >= max_n:
                 break
@@ -773,32 +789,37 @@ class RunnerRuntime:
                 break
             a = str(addr).lower()
             if self.portfolio.has_open_position(a):
+                skipped_open += 1
                 continue
             last = self._evaluated.get(a)
-            if last and (now - last).total_seconds() < self.s.reevaluate_after_s:
-                continue
+            if last is not None:
+                age = (now - last).total_seconds()
+                if age < force_after_s:
+                    skipped_recent += 1
+                    continue
+                # age >= force_after_s → re-evaluate (including > stale_force_s)
             try:
                 m = await self.market_data.get_market_state(a)
             except DataUnavailable:
+                skipped_no_data += 1
                 continue
-            # Prefer tokens that actually have a price/liquidity (real pools).
             if m.price is None and m.liquidity is None:
+                skipped_no_data += 1
                 continue
             self._evaluated[a] = now
-            # Stamp scan time so Opportunities "Scanned" is not blank.
             try:
                 m = m.model_copy(update={"timestamp": now})
             except Exception:
                 pass
-            if self.mono() - self._mkt_at.get(m.key, -1e9) >= self.s.market_snapshot_every_s:
-                self._mkt_at[m.key] = self.mono()
-                payload = m.model_dump(mode="json")
-                payload["scanned_at"] = now.isoformat()
-                await self.bus.publish(E.MARKET_SNAPSHOT, "", market=payload)
+            # Always publish a market snapshot with scanned_at so UI and bus stay aligned.
+            self._mkt_at[m.key] = self.mono()
+            payload = m.model_dump(mode="json")
+            payload["scanned_at"] = now.isoformat()
+            await self.bus.publish(E.MARKET_SNAPSHOT, "", market=payload)
             rec = await self.engine.handle_market_state(m, now)
             log.info(
-                "global-candidate token=%s symbol=%s action=%s reason=%s liq=%s",
-                a, m.symbol, rec.final_action.value, rec.final_reason, m.liquidity,
+                "global-candidate token=%s symbol=%s action=%s reason=%s liq=%s scanned_at=%s",
+                a, m.symbol, rec.final_action.value, rec.final_reason, m.liquidity, now.isoformat(),
             )
             self.last_activity_at = now
             self.last_decision = {
@@ -807,6 +828,11 @@ class RunnerRuntime:
                 "at": now.isoformat(),
             }
             n += 1
+        if n == 0:
+            log.info(
+                "evaluate_global_candidates: 0 evaluated (candidates=%d recent_skip=%d no_data=%d open=%d)",
+                len(addresses), skipped_recent, skipped_no_data, skipped_open,
+            )
         return n
 
     async def monitor_once(self) -> None:
