@@ -47,7 +47,8 @@ export function DecisionDetail({ decisionId }: { decisionId: string }) {
           <ul className="mt-1 space-y-1">{a.flags.filter((f) => f.severity !== "INFO").map((f) => <li key={f.rule} className="flex flex-wrap items-center gap-2"><Badge variant={SEV[f.severity]}>{f.severity}</Badge><span className="font-mono text-xs">{f.rule}</span><span className="text-xs text-muted-foreground">{f.message}</span></li>)}
             {a.flags.filter((f) => f.severity !== "INFO").length === 0 && <li className="text-xs text-muted-foreground">No warnings or vetoes.</li>}</ul></div>))}</CardContent></Card>
       <Card><CardHeader><CardTitle>4. AI</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
-        {d.ai.length === 0 ? <p className="text-muted-foreground">Not consulted.</p> : d.ai.map((a, i) => <div key={i}><p>{a.provider} / {a.model} · prompt {a.prompt_version} · {a.status}</p>
+        {d.ai.length === 0 ? <p className="text-muted-foreground">Not consulted.</p> : d.ai.map((a, i) => <div key={i}><p>{a.provider || "no provider"} / {a.model || "no model"} · prompt {a.prompt_version || "n/a"} · {a.status}</p>
+          {a.error && <p className="text-xs text-muted-foreground">{a.error}</p>}
           {a.response && <><p><ActionBadge action={a.response.action} /> confidence {num(a.response.confidence)}</p><p>{a.response.reasoning_summary}</p></>}</div>)}</CardContent></Card>
       <Card><CardHeader><CardTitle>5. Sizing and execution</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
         <p>Approved size: {usd(d.sized_amount_usdc)}</p>

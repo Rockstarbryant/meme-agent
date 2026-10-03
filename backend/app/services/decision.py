@@ -120,10 +120,14 @@ class DecisionPipeline:
             "qualified signal" if signal.qualified else "watch-band signal"
         )
         if self.ai_mode == AIMode.DISABLED:
+            # Record WHY the AI stage was skipped so the UI shows "DISABLED" + the fix,
+            # instead of the misleading "Not consulted".
+            off = AIOutcome(status="DISABLED", error="no LLM provider configured on this runner "
+                            "(set ARC_RUNNER_LLM_PROVIDER and the matching API key)")
             if mode == TradingMode.LIVE:
-                return rec(Action.WATCH, "AI_REQUIRED_FOR_LIVE_ENTRIES")
+                return rec(Action.WATCH, "AI_REQUIRED_FOR_LIVE_ENTRIES", ai=off)
             if watch_band:
-                return rec(Action.WATCH, strategy_note)
+                return rec(Action.WATCH, f"AI_DISABLED: {strategy_note}", ai=off)
             # qualified + AI disabled + PAPER → fall through to deterministic BUY below
         else:
             # AI stage: qualified signals and WATCH-band signals (not hard REJECT).

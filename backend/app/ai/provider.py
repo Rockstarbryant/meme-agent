@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+import logging
+
 import httpx
+
+log = logging.getLogger(__name__)
 
 
 class AIProviderError(Exception):
@@ -68,7 +72,17 @@ def build_provider(settings) -> LLMProvider | None:
     """
     p = getattr(settings, "llm_provider", None) or "none"
     if p in ("", "none"):
+        log.warning("AI DISABLED: LLM_PROVIDER is %r -- WATCH/qualified tokens will NOT be sent to AI", p)
         return None
+    provider = _build_provider(settings, p)
+    if provider is None:
+        log.error("AI DISABLED: LLM_PROVIDER=%s but its API key (or AI_MODEL for openai/anthropic) is missing", p)
+    else:
+        log.info("AI ENABLED: provider=%s model=%s", provider.name, provider.model)
+    return provider
+
+
+def _build_provider(settings, p: str) -> LLMProvider | None:
 
     if p == "openrouter" and getattr(settings, "openrouter_api_key", None):
         model = (settings.ai_model or "").strip() or "openrouter/free"
