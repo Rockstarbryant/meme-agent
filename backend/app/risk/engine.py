@@ -263,12 +263,10 @@ def portfolio_rules(x: RiskContext) -> list[RiskFlag]:
     if m.chain not in L.allowed_chains:
         out.append(_veto("CHAIN_NOT_ALLOWED", K, "chain is not allowlisted", m.chain))
     if m.launchpad:
+        # Launchpad allowlist removed: discovery is provider/trending-based.
+        # Blacklist still blocks known-bad launchpads when set.
         if m.launchpad in ctl.blacklisted_launchpads:
             out.append(_veto("LAUNCHPAD_BLACKLISTED", K, "launchpad is blacklisted", m.launchpad))
-        # Empty allowlist means "no launchpad restriction" (trending/provider discovery).
-        # Only enforce when the operator explicitly configured a non-empty allowlist.
-        elif L.allowed_launchpads and m.launchpad not in L.allowed_launchpads:
-            out.append(_veto("LAUNCHPAD_NOT_ALLOWED", K, "launchpad is not allowlisted", m.launchpad))
     amt = i.amount_usdc
     if amt <= 0:
         out.append(_veto("NON_POSITIVE_AMOUNT", K, "trade amount must be positive", amt))

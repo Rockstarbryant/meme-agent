@@ -737,6 +737,59 @@ class RunnerRuntime:
             n += 1
         return n
 
+    async def evaluate_global_candidates(self, addresses: list[str], *, max_n: int = 15) -> int:
+        """Evaluate tokens from the global discovery registry into Decisions.
+
+        Cloud worker discovery is global and does not call discover_once().
+        Without this bridge, Opportunities stays empty of trending tokens.
+        """
+        if self.engine is None or self.controls.global_pause or self.portfolio is None:
+            return 0
+        n = 0
+        now = self.clock()
+        for addr in addresses:
+            if n >= max_n:
+                break
+            if self.controls.global_pause:
+                break
+            a = str(addr).lower()
+            if self.portfolio.has_open_position(a):
+                continue
+            last = self._evaluated.get(a)
+            if last and (now - last).total_seconds() < self.s.reevaluate_after_s:
+                continue
+            try:
+                m = await self.market_data.get_market_state(a)
+            except DataUnavailable:
+                continue
+            # Prefer tokens that actually have a price/liquidity (real pools).
+            if m.price is None and m.liquidity is None:
+                continue
+            self._evaluated[a] = now
+            # Stamp scan time so Opportunities "Scanned" is not blank.
+            try:
+                m = m.model_copy(update={"timestamp": now})
+            except Exception:
+                pass
+            if self.mono() - self._mkt_at.get(m.key, -1e9) >= self.s.market_snapshot_every_s:
+                self._mkt_at[m.key] = self.mono()
+                payload = m.model_dump(mode="json")
+                payload["scanned_at"] = now.isoformat()
+                await self.bus.publish(E.MARKET_SNAPSHOT, "", market=payload)
+            rec = await self.engine.handle_market_state(m, now)
+            log.info(
+                "global-candidate token=%s symbol=%s action=%s reason=%s liq=%s",
+                a, m.symbol, rec.final_action.value, rec.final_reason, m.liquidity,
+            )
+            self.last_activity_at = now
+            self.last_decision = {
+                "id": rec.id, "token": rec.token_key, "symbol": m.symbol,
+                "action": rec.final_action.value, "reason": rec.final_reason,
+                "at": now.isoformat(),
+            }
+            n += 1
+        return n
+
     async def monitor_once(self) -> None:
         if self.engine is None or self.portfolio is None:
             return

@@ -166,10 +166,12 @@ def build_global_market_data(settings: Any):
 
 
 def market_state_to_snapshot(m: MarketState) -> dict:
+    ts = m.timestamp.isoformat() if m.timestamp else None
     return {
         "chain": m.chain,
         "token_address": m.token_address,
-        "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+        "timestamp": ts,
+        "scanned_at": ts,
         "launchpad": m.launchpad,
         "launchpad_detected": m.launchpad_detected,
         "launchpad_evidence": m.launchpad_evidence,
@@ -296,7 +298,7 @@ class GlobalPipeline:
         self.registry = GlobalTokenRegistry()
         self.gateway = SharedMarketDataGateway(
             redis=redis,
-            default_ttl_s=float(getattr(settings, "market_data_cache_ttl_s", 15.0)),
+            default_ttl_s=float(getattr(settings, "market_data_cache_ttl_s", 45.0)),
         )
         self._base_market_data = build_global_market_data(settings)
         self.market_data = self._maybe_wrap_enrichment(settings)
@@ -312,6 +314,8 @@ class GlobalPipeline:
             hot_interval_s=float(getattr(settings, "monitor_hot_interval_s", 30)),
             warm_interval_s=float(getattr(settings, "monitor_warm_interval_s", 120)),
             cold_interval_s=float(getattr(settings, "monitor_cold_interval_s", 600)),
+            max_per_cycle=int(getattr(settings, "monitor_max_per_cycle", 12)),
+            max_consecutive_failures=int(getattr(settings, "monitor_max_consecutive_failures", 5)),
         )
         self.discovery = GlobalDiscoveryService(
             self.registry,

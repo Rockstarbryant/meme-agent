@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,6 +21,31 @@ from app.db.base import uid
 from app.discovery.registry import GlobalTokenRegistry, LaunchpadToken, TokenStatus
 
 log = logging.getLogger("discovery.store")
+
+
+async def _with_db_retry(coro_factory, *, attempts: int = 2, label: str = "db"):
+    """Retry once on dropped asyncpg connections (common after idle / pool recycle)."""
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            last = e
+            name = type(e).__name__
+            msg = str(e).lower()
+            transient = (
+                "connectiondoesnotexist" in name.lower()
+                or "connection was closed" in msg
+                or "connectiondoesnotexisterror" in msg
+                or "server closed the connection" in msg
+            )
+            if not transient or i + 1 >= attempts:
+                raise
+            log.warning("%s transient DB error (%s); retrying", label, name)
+            await asyncio.sleep(0.3 * (i + 1))
+    raise last  # pragma: no cover
+
+
 
 REDIS_TOKEN_PREFIX = "gtoken:"
 REDIS_SNAPSHOT_PREFIX = "gsnap:"
@@ -116,7 +143,7 @@ class PersistentTokenStore:
         """Write-through: memory caller still owns registry; we persist."""
         snap = (token.meta or {}).get("last_snapshot")
         if self.sf is not None:
-            try:
+            async def _write():
                 async with self.sf() as db:
                     row = (
                         await db.execute(
@@ -155,6 +182,9 @@ class PersistentTokenStore:
                     row.meta = token.meta or {}
                     row.last_snapshot = snap
                     await db.commit()
+
+            try:
+                await _with_db_retry(_write, attempts=2, label=f"upsert:{token.token_key}")
             except Exception:
                 log.exception("persist launchpad_token failed for %s", token.token_key)
 

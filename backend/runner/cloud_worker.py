@@ -196,12 +196,19 @@ class CloudWorker:
                 )
                 return
 
-            # Global discovery is NOT part of the per-tenant trade cycle.
+            # Global discovery fills the shared registry; this cycle evaluates
+            # those candidates into Decisions so Opportunities mirrors Discovery.
             cycle_started = time.monotonic()
             pulse = asyncio.create_task(self._heartbeat_pulse(rt, user_id))
+            evaluated = 0
             try:
                 await rt.monitor_once()
-                # No discover_once() — discovery is global
+                addrs = self._global_candidate_addresses()
+                if addrs:
+                    # Prefer the shared global market-data stack (same cache as discovery/monitoring).
+                    if self._pipeline is not None and getattr(self._pipeline, "market_data", None) is not None:
+                        rt.market_data = self._pipeline.market_data
+                    evaluated = await rt.evaluate_global_candidates(addrs, max_n=int(getattr(self.s, "market_data_max_tokens", 15) or 15))
                 await rt.monitor_once()
             finally:
                 pulse.cancel()
@@ -215,10 +222,11 @@ class CloudWorker:
             except Exception:
                 pass
             log.info(
-                "tenant %s cycle complete mode=%s positions=%s state=%s data_status=%s cycle_s=%.1f",
+                "tenant %s cycle complete mode=%s positions=%s state=%s data_status=%s evaluated=%d cycle_s=%.1f",
                 user_id, bundle.mode.value,
                 rt.portfolio.open_count() if rt.portfolio else 0,
                 rt.state, rt.data_status,
+                evaluated,
                 time.monotonic() - cycle_started,
             )
         except Revoked:
