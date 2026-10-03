@@ -205,7 +205,7 @@ class RunnerSettings(BaseSettings):
     upload_interval_s: float = 1.0
     discovery_interval_s: float = 15.0
     # Global discovery (default 3 hours). Trade cycles must NOT run discovery.
-    global_discovery_interval_s: float = 3 * 3600
+    global_discovery_interval_s: float = 15 * 60  # new-pool sweep; monitoring is separate (30s/2m/10m)
     global_discovery_lookback_s: float = 15 * 60
     global_discovery_enabled: bool = True
     monitor_hot_interval_s: float = 30.0

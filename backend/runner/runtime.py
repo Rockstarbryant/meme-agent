@@ -492,9 +492,13 @@ class RunnerRuntime:
         """
         enabled = list(getattr(b, "strategies_enabled", None) or ["traction_momentum"])
         raw = dict(b.strategy or {})
-        sid = raw.get("strategy_id") or (enabled[0] if enabled else "traction_momentum")
-        if sid not in enabled and enabled:
-            sid = enabled[0]
+        # Prefer liquidity_trend when enabled (established / high-MC tokens).
+        if "liquidity_trend" in enabled:
+            sid = "liquidity_trend"
+        else:
+            sid = raw.get("strategy_id") or (enabled[0] if enabled else "traction_momentum")
+            if sid not in enabled and enabled:
+                sid = enabled[0]
         if sid == "liquidity_trend":
             cfg = LiquidityTrendConfig(**{**raw, "strategy_id": "liquidity_trend"})
             return LiquidityTrend(cfg), cfg
@@ -807,6 +811,7 @@ class RunnerRuntime:
                 skipped_no_data += 1
                 continue
             self._evaluated[a] = now
+            self.data_status = "ok"
             try:
                 m = m.model_copy(update={"timestamp": now})
             except Exception:

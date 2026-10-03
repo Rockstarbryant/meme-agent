@@ -161,32 +161,16 @@ class CloudWorker:
             await self.client.save_state(user_id, rt.portfolio.mode.value, rt.portfolio.to_dict())
 
     def _global_candidate_addresses(self) -> list[str]:
-        """Active global-registry tokens ranked for Opportunities evaluation.
+        """Rank global-registry tokens for Opportunities evaluation.
 
-        Includes any non-dead token with a recent snapshot or active status so
-        high-MC / high-liquidity rows do not sit for hours without a new Decision
-        (Opportunities "Scanned" is the decision time, not Discovery monitor time).
+        Primary sort: highest liquidity, then market cap. Stale monitor age is a
+        tie-breaker only so high-MC Gecko tokens are not starved by dust pools.
         """
         pipe = getattr(self, "_pipeline", None)
         if pipe is None or getattr(pipe, "registry", None) is None:
             return []
         from app.discovery.registry import TokenStatus
-        # Terminal statuses only skipped when they also lack liquidity snapshot.
-        terminal = {
-            TokenStatus.DROPPED,
-            TokenStatus.EXPIRED,
-        }
-        status_rank = {
-            TokenStatus.IMPROVING: 0,
-            TokenStatus.WATCHING: 1,
-            TokenStatus.QUALIFIED: 2,
-            TokenStatus.SIGNAL: 3,
-            TokenStatus.SCREENING: 4,
-            TokenStatus.DISCOVERED: 5,
-            TokenStatus.LOST_MOMENTUM: 6,
-            TokenStatus.REJECTED: 7,
-        }
-        pri_rank = {"HOT": 0, "WARM": 1, "COLD": 2}
+        terminal = {TokenStatus.DROPPED, TokenStatus.EXPIRED}
         scored: list[tuple] = []
         for t in pipe.registry.all():
             if (t.priority or "WARM") == "DEAD":
@@ -196,41 +180,28 @@ class CloudWorker:
                 snap = {}
             liq = float(snap.get("liquidity") or 0)
             mcap = float(snap.get("market_cap") or 0)
-            # Keep high-liq tokens evaluable even if status is terminal/rejected.
             if t.status in terminal and liq < 10_000 and mcap < 20_000:
                 continue
-            if t.status not in status_rank and liq < 5_000:
-                continue
             score = float(t.current_score or t.initial_score or 0.0)
-            # Prefer recently monitored so Opportunities stays in sync with Discovery.
-            mon = t.last_monitored_at
-            mon_age = 0.0
-            if mon is not None:
+            mon_age = 1e9
+            if t.last_monitored_at is not None:
                 try:
                     from datetime import datetime, timezone
-                    now = datetime.now(timezone.utc)
+                    mon = t.last_monitored_at
                     if mon.tzinfo is None:
                         mon = mon.replace(tzinfo=timezone.utc)
-                    mon_age = max(0.0, (now - mon).total_seconds())
+                    mon_age = max(0.0, (datetime.now(timezone.utc) - mon).total_seconds())
                 except Exception:
                     mon_age = 1e9
-            else:
-                mon_age = 1e9
-            scored.append((
-                pri_rank.get(t.priority or "WARM", 5),
-                status_rank.get(t.status, 8),
-                mon_age,  # older monitor → higher rank pressure later via sort key
-                -(liq + mcap * 0.01 + score),
-                t.token_address,
-            ))
-        # Rank: priority, status, then prefer *stale* monitor times first (so 3h-old get refreshed),
-        # then liquidity/mcap.
-        scored.sort(key=lambda row: (row[0], row[1], -row[2] if row[2] > 300 else row[2], row[3]))
+            # Sort key: higher liq first, higher mcap, higher score, then staler monitor.
+            scored.append((-liq, -mcap, -score, -mon_age, t.token_address))
+        scored.sort()
         addrs = [addr for *_, addr in scored]
         log.info(
-            "global candidates for evaluation: %d (registry=%d)",
+            "global candidates for evaluation: %d (registry=%d) top_liq_addrs=%s",
             len(addrs),
             len(list(pipe.registry.all())),
+            addrs[:5],
         )
         return addrs
 
