@@ -191,11 +191,30 @@ class RunnerRuntime:
             rpc = self._make_rpc(settings)
             self._rpc = rpc
 
-        # --- DexPaprika (primary free discovery + enrichment for Arc) ------
+        built: dict[str, MarketDataProvider] = {}
+
+        # --- GeckoTerminal: primary trending discovery + market state -------
+        if "geckoterminal" in wanted:
+            key = settings.geckoterminal_api_key.get_secret_value() if settings.geckoterminal_api_key else None
+            self._gecko = GeckoTerminalClient(
+                settings.geckoterminal_base_url, settings.geckoterminal_network,
+                timeout_s=settings.market_data_timeout_s,
+                min_interval_s=getattr(settings, "geckoterminal_min_interval_s", 2.5),
+                api_key=key,
+            )
+            min_liq = float(getattr(settings, "discovery_min_pool_liquidity_usd", 0.0) or 0.0)
+            built["geckoterminal"] = GeckoTerminalArcMarketData(
+                self._gecko,
+                max_tokens=settings.market_data_max_tokens,
+                cache_s=settings.market_data_cache_s,
+                min_pool_liquidity_usd=min_liq,
+            )
+
+        # --- DexPaprika secondary discovery + enrichment --------------------
         if "dexpaprika" in wanted:
             key = settings.dexpaprika_api_key.get_secret_value() if settings.dexpaprika_api_key else None
             self._dexpaprika = DexPaprikaClient(api_key=key)
-            providers.append(("dexpaprika", DexPaprikaArcMarketData(
+            built["dexpaprika"] = DexPaprikaArcMarketData(
                 self._dexpaprika,
                 max_tokens=settings.market_data_max_tokens,
                 cache_s=settings.market_data_cache_s,
@@ -206,52 +225,36 @@ class RunnerRuntime:
                 scan_new_launches=settings.scan_new_launches,
                 scan_established=settings.scan_established,
                 established_min_age_hours=settings.established_min_age_hours,
-            )))
+            )
 
         # --- Goldsky-backed on-chain providers -----------------------------
-        # "goldsky" in the provider list means "use the on-chain providers
-        # (arc_rpc + uniswap_v4_rpc) against the Goldsky RPC client that
-        # _make_rpc already selected". It is a logical alias, not a distinct
-        # MarketDataProvider — the discovery/enrichment logic is identical to
-        # the Alchemy case, only the transport is different.
+        # "goldsky" means use arc_rpc + uniswap_v4_rpc against the Goldsky
+        # client selected by _make_rpc — logical alias, not a separate provider.
         goldsky_onchain = "goldsky" in wanted
         if goldsky_onchain or "arc_rpc" in wanted:
-            providers.append(("arc_rpc", ArcRpcMarketData(
+            built["arc_rpc"] = ArcRpcMarketData(
                 rpc,
                 max_tokens=settings.market_data_max_tokens,
                 scan_blocks=settings.rpc_launch_scan_blocks,
                 cache_s=settings.market_data_cache_s,
-            )))
+            )
         if goldsky_onchain or "uniswap_v4_rpc" in wanted:
-            providers.append(("uniswap_v4_rpc", ArcUniswapV4RpcMarketData(
+            built["uniswap_v4_rpc"] = ArcUniswapV4RpcMarketData(
                 rpc,
                 max_tokens=settings.market_data_max_tokens,
                 scan_blocks=settings.uniswap_v4_scan_blocks,
                 swap_scan_blocks=settings.uniswap_v4_swap_scan_blocks,
                 cache_s=settings.market_data_cache_s,
-            )))
-
-        # --- GeckoTerminal enrichment --------------------------------------
-        if "geckoterminal" in wanted:
-            key = settings.geckoterminal_api_key.get_secret_value() if settings.geckoterminal_api_key else None
-            self._gecko = GeckoTerminalClient(
-                settings.geckoterminal_base_url, settings.geckoterminal_network,
-                timeout_s=settings.market_data_timeout_s, api_key=key,
             )
-            providers.append(("geckoterminal", GeckoTerminalArcMarketData(
-                self._gecko,
-                max_tokens=settings.market_data_max_tokens,
-                cache_s=settings.market_data_cache_s,
-            )))
 
         # --- DexScreener enrichment ----------------------------------------
         if "dexscreener" in wanted:
             self._dexscreener = DexScreenerClient(timeout_s=settings.market_data_timeout_s)
-            providers.append(("dexscreener", DexScreenerArcMarketData(
+            built["dexscreener"] = DexScreenerArcMarketData(
                 self._dexscreener,
                 chain_id=settings.dexscreener_chain_id,
                 cache_s=settings.dexscreener_cache_s,
-            )))
+            )
 
         # --- Optional paid providers ---------------------------------------
         if "bitquery" in wanted and settings.bitquery_api_key:
@@ -260,9 +263,18 @@ class RunnerRuntime:
                 settings.bitquery_endpoint,
                 timeout_s=settings.market_data_timeout_s,
             )
-            providers.append(("bitquery", BitqueryArcMarketData(
+            built["bitquery"] = BitqueryArcMarketData(
                 self._bitquery, max_tokens=settings.market_data_max_tokens,
-            )))
+            )
+
+        for name in wanted:
+            if name == "goldsky":
+                # expanded above into arc_rpc / uniswap_v4_rpc
+                continue
+            if name in built:
+                providers.append((name, built.pop(name)))
+        for name, prov in built.items():
+            providers.append((name, prov))
 
         if not providers:
             return UnavailableArcMarketData()

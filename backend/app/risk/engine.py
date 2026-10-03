@@ -45,7 +45,9 @@ class RiskLimits(BaseModel):
     veto_pausable: bool = True
     veto_blacklist_capability: bool = True
     allowed_chains: set[str] = Field(default_factory=lambda: {"arc"})
-    allowed_launchpads: set[str] = Field(default_factory=set)  # launchpad-sourced tokens need explicit allow
+    # Empty set = all launchpads allowed (discovery is provider/trending-based, not launchpad-gated).
+    # Non-empty = only those launchpads may enter. Blacklist still always applies.
+    allowed_launchpads: set[str] = Field(default_factory=set)
     # On Arc, native gas and ERC-20 USDC are ONE asset: never a trade target (Circle use-arc / swap-tokens skills)
     non_tradable_addresses: set[str] = Field(default_factory=lambda: {
         "0x3600000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000",
@@ -263,7 +265,9 @@ def portfolio_rules(x: RiskContext) -> list[RiskFlag]:
     if m.launchpad:
         if m.launchpad in ctl.blacklisted_launchpads:
             out.append(_veto("LAUNCHPAD_BLACKLISTED", K, "launchpad is blacklisted", m.launchpad))
-        if m.launchpad not in L.allowed_launchpads:
+        # Empty allowlist means "no launchpad restriction" (trending/provider discovery).
+        # Only enforce when the operator explicitly configured a non-empty allowlist.
+        elif L.allowed_launchpads and m.launchpad not in L.allowed_launchpads:
             out.append(_veto("LAUNCHPAD_NOT_ALLOWED", K, "launchpad is not allowlisted", m.launchpad))
     amt = i.amount_usdc
     if amt <= 0:

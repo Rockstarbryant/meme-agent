@@ -104,8 +104,8 @@ class GlobalMonitoringService:
                     token.meta["last_snapshot"] = snap
                     if self._score is not None:
                         new_score = await self._score(token, snap)
-                        old = token.current_score or token.initial_score
-                        token.score_delta = (new_score - old) if old is not None else None
+                        old_score = token.current_score or token.initial_score
+                        token.score_delta = (new_score - old_score) if old_score is not None else None
                         if token.initial_score is None:
                             token.initial_score = new_score
                         token.current_score = new_score
@@ -126,8 +126,15 @@ class GlobalMonitoringService:
                         except Exception:
                             log.exception("persist monitored token")
                     n += 1
-                except Exception:
-                    log.exception("monitor failed for %s", token.token_key)
+                except Exception as exc:
+                    # Keep last good snapshot for the UI; do not spam stack traces on pure DataUnavailable.
+                    from app.core.errors import DataUnavailable
+                    if isinstance(exc, DataUnavailable):
+                        log.warning("monitor data unavailable for %s: %s", token.token_key, exc)
+                    else:
+                        log.exception("monitor failed for %s", token.token_key)
+                    token.last_monitored_at = now  # backoff even on failure to reduce rate-limit pressure
+                    self.registry.upsert(token)
             return n
         finally:
             await self._release()

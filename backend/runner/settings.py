@@ -72,11 +72,11 @@ class RunnerSettings(BaseSettings):
     # arc_rpc and uniswap_v4_rpc still exist but now point at Goldsky instead
     # of Alchemy when you set ARC_RUNNER_ARC_RPC_URL to the Goldsky endpoint.
     market_data_providers: str = Field(
-        "dexpaprika,goldsky,geckoterminal,dexscreener",
+        "geckoterminal,dexpaprika,goldsky,dexscreener",
         validation_alias=_alias("MARKET_DATA_PROVIDERS"),
     )
     market_data_essential_providers: str = Field(
-        "dexpaprika,geckoterminal",
+        "geckoterminal,dexpaprika",
         validation_alias=_alias("MARKET_DATA_ESSENTIAL_PROVIDERS"),
     )
     market_data_max_tokens: int = Field(20, validation_alias=_alias("MARKET_DATA_MAX_TOKENS"))
@@ -149,6 +149,10 @@ class RunnerSettings(BaseSettings):
     geckoterminal_base_url: str = Field("https://api.geckoterminal.com/api/v2", validation_alias=_alias("GECKOTERMINAL_BASE_URL"))
     geckoterminal_network: str = Field("arc", validation_alias=_alias("GECKOTERMINAL_NETWORK"))
     geckoterminal_api_key: SecretStr | None = Field(None, validation_alias=_alias("GECKOTERMINAL_API_KEY"))
+    # Client pacing under the public ~30 req/min limit (shared lock in GeckoTerminalClient).
+    geckoterminal_min_interval_s: float = Field(2.5, validation_alias=_alias("GECKOTERMINAL_MIN_INTERVAL_S"))
+    # Soft filter at discovery: skip pools with reserve_in_usd below this (0 = disabled).
+    discovery_min_pool_liquidity_usd: float = Field(0.0, validation_alias=_alias("DISCOVERY_MIN_POOL_LIQUIDITY_USD"))
 
     # ------------------------------------------------------------------ dexscreener
     dexscreener_chain_id: str = Field("arc", validation_alias=_alias("DEXSCREENER_CHAIN_ID"))

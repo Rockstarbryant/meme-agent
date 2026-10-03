@@ -68,95 +68,112 @@ def _tx_stat(attrs: dict, window: str, side: str, field: str) -> float | None:
 
 
 class GeckoTerminalArcMarketData(MarketDataProvider):
-    """GeckoTerminal enrichment provider for Arc.
+    """Primary trending + market-data provider for Arc via GeckoTerminal.
 
-    Discovery is intentionally not authoritative here: Arc RPC discovers the
-    launchpad-created contracts, while GeckoTerminal supplies DEX market data
-    for those addresses. This keeps launchpad provenance on-chain.
+    Discovery uses GeckoTerminal Trending (5m / 1h / 6h / 24h) and New Pools —
+    the same views the GeckoTerminal app exposes — not launchpad factory events.
+    Launchpad verification is no longer required for entry.
 
-    Pacing is handled entirely inside ``GeckoTerminalClient._get`` (see its
-    docstring: 2.5s min interval, plus Retry-After honoring on 429), so this
-    provider does not add a second pacing layer. The only local resilience is
-    that ``pool_trades`` is treated as optional enrichment: when it fails
-    (rate-limited, no coverage, transient 5xx), the market state still returns
-    with the ``token_pools`` fields populated and buy/sell USD fields unset,
-    rather than raising and losing the whole cycle.
+    Pacing is handled entirely inside ``GeckoTerminalClient._get`` (2.5s min
+    interval + Retry-After on 429). ``pool_trades`` is optional enrichment: on
+    failure the market state still returns with ``token_pools`` fields filled.
     """
 
-    def __init__(self, client: GeckoTerminalClient, *, max_tokens: int = 10, cache_s: float = 60.0):
+    def __init__(
+        self,
+        client: GeckoTerminalClient,
+        *,
+        max_tokens: int = 40,
+        cache_s: float = 90.0,
+        min_pool_liquidity_usd: float = 0.0,
+        trending_durations: tuple[str, ...] = ("5m", "1h", "6h", "24h"),
+    ):
         self.client = client
         self.max_tokens = max(1, max_tokens)
         self.cache_s = max(5.0, cache_s)
+        self.min_pool_liquidity_usd = max(0.0, min_pool_liquidity_usd)
+        self.trending_durations = tuple(d for d in trending_durations if d in ("5m", "1h", "6h", "24h")) or ("5m", "1h")
         self._cache: dict[str, tuple[float, MarketState]] = {}
 
-    @staticmethod
-    def _extract_token_addresses(payload: dict, tokens: list[str], seen: set[str], limit: int) -> None:
-        """Appends up to ``limit`` (total) token addresses found in a new_pools/trending_pools-shaped payload
-        into ``tokens``, skipping ones already in ``seen``. Shared by every discovery source below so new_pools
-        and each trending_pools(duration) call parse addresses identically."""
+    def _extract_scored_tokens(
+        self, payload: dict, scored: list[tuple[float, str]], seen: set[str], limit: int
+    ) -> None:
+        """Parse trending/new_pools payload into (liquidity_usd, address) pairs.
+
+        Prefers higher-liquidity pools when ranking. Skips known native/placeholder
+        addresses. Shared by every discovery source so trending durations and
+        new_pools parse identically.
+        """
         included = payload.get("included") or []
         zero = "0x" + ("0" * 40)
 
-        def _add(address: str | None) -> None:
-            if len(tokens) >= limit or not address:
-                return
+        def _candidate(address: str | None) -> str | None:
+            if not address:
+                return None
             addr = str(address).lower().strip()
             if not addr.startswith("0x") or len(addr) < 42:
-                return
+                return None
             if addr == zero or addr in seen:
-                return
-            # Skip obvious non-ERC20 placeholders sometimes returned for native assets.
+                return None
             if addr.startswith("0x3600") and addr.count("0") > 30:
-                return
-            seen.add(addr)
-            tokens.append(addr)
+                return None
+            return addr
 
         for item in payload.get("data") or []:
-            if len(tokens) >= limit:
-                return
+            if len(scored) >= limit * 2:  # gather extra then rank/truncate later
+                break
             attrs = _attr(item)
-            # 1) Relationship ids (Arc / current GeckoTerminal shape)
+            liq = _num(attrs.get("reserve_in_usd")) or _num(attrs.get("liquidity_usd")) or 0.0
+            if self.min_pool_liquidity_usd and liq < self.min_pool_liquidity_usd:
+                continue
+            candidates: list[str] = []
             for relation in ("base_token", "quote_token"):
-                _add(_related_address(item, relation, included))
-            # 2) Attribute fields (other networks / older payload shape)
+                c = _candidate(_related_address(item, relation, included))
+                if c:
+                    candidates.append(c)
             for key in ("base_token_address", "quote_token_address"):
-                _add(attrs.get(key))
+                c = _candidate(attrs.get(key))
+                if c:
+                    candidates.append(c)
+            for addr in candidates:
+                if addr in seen:
+                    continue
+                seen.add(addr)
+                scored.append((liq, addr))
 
     async def discover_tokens(self) -> list[str]:
-        """Discover Arc tokens from GeckoTerminal: new pools PLUS trending pools (5m and 1h windows) -- i.e. the
-        same two views ("New Pools" and "Trending") the GeckoTerminal app itself shows. Each source is tried
-        independently so one failing (e.g. a 429 on trending_pools) doesn't take discovery down to zero; only if
-        every source fails does this raise, matching the previous new_pools-only behavior.
+        """Discover Arc tokens from GeckoTerminal Trending (5m/1h/6h/24h) + New Pools.
 
-        GeckoTerminal's Arc payload does **not** put token addresses on
-        ``attributes.base_token_address`` / ``quote_token_address`` (those are
-        always null). Addresses live under ``relationships.*.data.id`` as
-        ``arc_0x…``. Prefer relationship parsing; fall back to attribute fields
-        for networks that still populate them.
+        Matches the GeckoTerminal app Trending tabs and New Pools. Each source is
+        tried independently so one 429 does not zero out discovery. Results are
+        ranked by pool liquidity (higher first) so thin/dead pools are deprioritized.
         """
-        tokens: list[str] = []
+        scored: list[tuple[float, str]] = []
         seen: set[str] = set()
         errors: list[str] = []
-        # (name, thunk) pairs -- calling the client method is deferred into the loop body so a source we never
-        # reach (budget already full) never has its coroutine created, let alone left unawaited.
-        sources = (
-            ("trending_pools_5m", lambda: self.client.trending_pools("5m")),
-            ("trending_pools_1h", lambda: self.client.trending_pools("1h")),
-            ("new_pools", self.client.new_pools),
-        )
+
+        sources: list[tuple[str, Any]] = [
+            (f"trending_pools_{d}", (lambda dur=d: self.client.trending_pools(dur)))
+            for d in self.trending_durations
+        ]
+        sources.append(("new_pools", self.client.new_pools))
+
         for name, call in sources:
-            if len(tokens) >= self.max_tokens:
+            if len(scored) >= self.max_tokens * 2:
                 break
             try:
                 payload = await call()
             except DataUnavailable as exc:
                 errors.append(f"{name}: {exc}")
                 continue
-            self._extract_token_addresses(payload, tokens, seen, self.max_tokens)
-        if not tokens and errors:
-            # Discovery is optional for this provider; Arc RPC / other providers remain authoritative.
+            self._extract_scored_tokens(payload, scored, seen, self.max_tokens)
+
+        if not scored and errors:
             raise DataUnavailable("GeckoTerminal discovery: " + " | ".join(errors))
-        return tokens
+
+        # Higher liquidity first, stable by address for ties.
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [addr for _, addr in scored[: self.max_tokens]]
 
     async def get_market_state(self, token_address: str) -> MarketState:
         token = token_address.lower()

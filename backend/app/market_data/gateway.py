@@ -4,7 +4,7 @@ import asyncio, logging, time
 from typing import Any, Awaitable, Callable
 log = logging.getLogger("market_data.gateway")
 class SharedMarketDataGateway:
-    def __init__(self, *, redis=None, default_ttl_s=15.0, max_inflight=64):
+    def __init__(self, *, redis=None, default_ttl_s=45.0, max_inflight=64):
         self.redis = redis
         self.default_ttl_s = default_ttl_s
         self._local_cache = {}

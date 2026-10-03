@@ -32,15 +32,22 @@ def build_global_market_data(settings: Any):
     from app.market_data.registry import MarketDataRegistry
 
     providers: list[tuple[str, Any]] = []
+    # Prefer GeckoTerminal (trending) + DexPaprika; Goldsky/RPC as on-chain enrichment when configured.
+    # Order in this list is priority order for MarketDataRegistry failover/merge.
     wanted = [
         x.strip().lower()
-        for x in getattr(settings, "market_data_providers", "dexpaprika").split(",")
+        for x in getattr(
+            settings,
+            "market_data_providers",
+            "geckoterminal,dexpaprika",
+        ).split(",")
         if x.strip()
     ]
     data_source = getattr(settings, "data_source", "arc")
     timeout = float(getattr(settings, "market_data_timeout_s", 20.0))
     max_tokens = int(getattr(settings, "market_data_max_tokens", 40))
-    cache_s = float(getattr(settings, "market_data_cache_s", 60.0))
+    # Longer provider-level cache reduces Gecko/DexPaprika request pressure under monitoring.
+    cache_s = float(getattr(settings, "market_data_cache_s", 90.0))
 
     if data_source == "demo":
         try:
@@ -50,33 +57,9 @@ def build_global_market_data(settings: Any):
             log.exception("demo market data failed")
             return UnavailableArcMarketData()
 
-    # DexPaprika (primary free discovery + enrichment)
-    if "dexpaprika" in wanted:
-        try:
-            from app.integrations.dexpaprika import DexPaprikaClient
-            from app.chains.arc.dexpaprika_market_data import DexPaprikaArcMarketData
+    built: dict[str, Any] = {}
 
-            key = None
-            if getattr(settings, "dexpaprika_api_key", None):
-                key = settings.dexpaprika_api_key.get_secret_value()
-            # DexPaprikaClient is keyword-only: timeout_s=, api_key=
-            client = DexPaprikaClient(api_key=key, timeout_s=timeout)
-            providers.append(("dexpaprika", DexPaprikaArcMarketData(
-                client,
-                max_tokens=max_tokens,
-                cache_s=cache_s,
-                min_txns_24h=int(getattr(settings, "dexpaprika_min_txns_24h", 1)),
-                min_volume_24h_usd=float(getattr(settings, "dexpaprika_min_volume_24h_usd", 100)),
-                lookback_hours=int(getattr(settings, "dexpaprika_lookback_hours", 24)),
-                network=getattr(settings, "dexpaprika_network", "arc"),
-                scan_new_launches=bool(getattr(settings, "scan_new_launches", True)),
-                scan_established=bool(getattr(settings, "scan_established", True)),
-                established_min_age_hours=float(getattr(settings, "established_min_age_hours", 24)),
-            )))
-        except Exception:
-            log.exception("dexpaprika provider init failed")
-
-    # GeckoTerminal enrichment
+    # GeckoTerminal — primary trending discovery (5m/1h/6h/24h) + market state
     if "geckoterminal" in wanted:
         try:
             from app.integrations.geckoterminal import GeckoTerminalClient
@@ -91,13 +74,43 @@ def build_global_market_data(settings: Any):
                 getattr(settings, "geckoterminal_base_url", "https://api.geckoterminal.com/api/v2"),
                 getattr(settings, "geckoterminal_network", "arc"),
                 timeout_s=timeout,
+                min_interval_s=float(getattr(settings, "geckoterminal_min_interval_s", 2.5)),
                 api_key=key,
             )
-            providers.append(("geckoterminal", GeckoTerminalArcMarketData(
-                gecko, max_tokens=max_tokens, cache_s=cache_s,
-            )))
+            min_liq = float(getattr(settings, "discovery_min_pool_liquidity_usd", 0.0))
+            built["geckoterminal"] = GeckoTerminalArcMarketData(
+                gecko,
+                max_tokens=max_tokens,
+                cache_s=cache_s,
+                min_pool_liquidity_usd=min_liq,
+            )
         except Exception:
             log.exception("gecko provider init failed")
+
+    # DexPaprika — secondary discovery + enrichment
+    if "dexpaprika" in wanted:
+        try:
+            from app.integrations.dexpaprika import DexPaprikaClient
+            from app.chains.arc.dexpaprika_market_data import DexPaprikaArcMarketData
+
+            key = None
+            if getattr(settings, "dexpaprika_api_key", None):
+                key = settings.dexpaprika_api_key.get_secret_value()
+            client = DexPaprikaClient(api_key=key, timeout_s=timeout)
+            built["dexpaprika"] = DexPaprikaArcMarketData(
+                client,
+                max_tokens=max_tokens,
+                cache_s=cache_s,
+                min_txns_24h=int(getattr(settings, "dexpaprika_min_txns_24h", 1)),
+                min_volume_24h_usd=float(getattr(settings, "dexpaprika_min_volume_24h_usd", 100)),
+                lookback_hours=int(getattr(settings, "dexpaprika_lookback_hours", 24)),
+                network=getattr(settings, "dexpaprika_network", "arc"),
+                scan_new_launches=bool(getattr(settings, "scan_new_launches", True)),
+                scan_established=bool(getattr(settings, "scan_established", True)),
+                established_min_age_hours=float(getattr(settings, "established_min_age_hours", 24)),
+            )
+        except Exception:
+            log.exception("dexpaprika provider init failed")
 
     # DexScreener enrichment
     if "dexscreener" in wanted:
@@ -106,11 +119,11 @@ def build_global_market_data(settings: Any):
             from app.chains.arc.dexscreener_market_data import DexScreenerArcMarketData
 
             ds = DexScreenerClient(timeout_s=timeout)
-            providers.append(("dexscreener", DexScreenerArcMarketData(
+            built["dexscreener"] = DexScreenerArcMarketData(
                 ds,
                 chain_id=getattr(settings, "dexscreener_chain_id", "arc"),
-                cache_s=float(getattr(settings, "dexscreener_cache_s", 60.0)),
-            )))
+                cache_s=float(getattr(settings, "dexscreener_cache_s", 90.0)),
+            )
         except Exception:
             log.exception("dexscreener provider init failed")
 
@@ -124,9 +137,16 @@ def build_global_market_data(settings: Any):
                 getattr(settings, "bitquery_endpoint", "https://streaming.bitquery.io/graphql"),
                 timeout_s=timeout,
             )
-            providers.append(("bitquery", BitqueryArcMarketData(client, max_tokens=max_tokens)))
+            built["bitquery"] = BitqueryArcMarketData(client, max_tokens=max_tokens)
         except Exception:
             log.exception("bitquery provider init failed")
+
+    # Preserve configured priority order from MARKET_DATA_PROVIDERS
+    for name in wanted:
+        if name in built:
+            providers.append((name, built.pop(name)))
+    for name, prov in built.items():
+        providers.append((name, prov))
 
     if not providers:
         log.warning("no market-data providers configured for global discovery")
@@ -134,7 +154,7 @@ def build_global_market_data(settings: Any):
 
     essential = [
         x.strip().lower()
-        for x in getattr(settings, "market_data_essential_providers", "dexpaprika").split(",")
+        for x in getattr(settings, "market_data_essential_providers", "geckoterminal,dexpaprika").split(",")
         if x.strip()
     ]
     return MarketDataRegistry(
@@ -473,7 +493,7 @@ class GlobalPipeline:
             return await self.market_data.get_market_state(token.token_address)
 
         m = await self.gateway.get(
-            token.chain, token.token_address, _fetch, kind="state", ttl_s=12.0,
+            token.chain, token.token_address, _fetch, kind="state", ttl_s=45.0,
         )
         if isinstance(m, MarketState):
             snap = market_state_to_snapshot(m)
