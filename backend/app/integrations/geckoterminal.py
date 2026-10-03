@@ -33,17 +33,23 @@ class GeckoTerminalClient:
     leaves headroom under the 30/min sustained limit.
     """
 
-    def __init__(self, base_url: str, network: str, *, timeout_s: float = 6.0, min_interval_s: float = 2.5, api_key: str | None = None):
+    def __init__(self, base_url: str, network: str, *, timeout_s: float = 8.0, min_interval_s: float = 3.5, api_key: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.network = network.strip()
         self.api_key = api_key.strip() if api_key else None
         self.client = httpx.AsyncClient(timeout=timeout_s, headers={"accept": "application/json"})
-        self.min_interval_s = max(0.1, min_interval_s)
+        # ~17 req/min default — under free-tier 30/min with headroom for shared process.
+        self.min_interval_s = max(0.5, min_interval_s)
         self._last_request = 0.0
+        self._cooldown_until = 0.0  # monotonic; set after 429
         self._lock = asyncio.Lock()
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         async with self._lock:
+            # Honor post-429 cooldown so we do not stampede the free tier.
+            cool = self._cooldown_until - time.monotonic()
+            if cool > 0:
+                await asyncio.sleep(cool)
             wait = self.min_interval_s - (time.monotonic() - self._last_request)
             if wait > 0:
                 await asyncio.sleep(wait)
@@ -64,6 +70,7 @@ class GeckoTerminalClient:
                 retry_after = _retry_after_s(r.headers.get("retry-after"), default=5.0)
                 await asyncio.sleep(retry_after)
                 self._last_request = time.monotonic()
+                self._cooldown_until = time.monotonic() + max(45.0, float(retry_after))
                 raise GeckoTerminalRateLimited(f"GeckoTerminal HTTP 429 (retry-after={retry_after:.0f}s)")
             if r.status_code in (401, 403, 404):
                 raise DataUnavailable(f"GeckoTerminal HTTP {r.status_code}")
