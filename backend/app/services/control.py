@@ -25,6 +25,7 @@ from app.risk.per_user_policy import (
 )
 from app.services.decision import tighten_limits
 from app.strategies.traction_momentum import TractionMomentumConfig
+from app.strategies.liquidity_trend import LiquidityTrendConfig
 from app.wallets.base import WalletPolicy
 
 LIVE_CONFIRMATION_PHRASE = "ENABLE LIVE TRADING"
@@ -126,9 +127,21 @@ async def load_controls(db: AsyncSession, user_id: str) -> ControlState:
 
 async def build_bundle(db: AsyncSession, settings: Settings, user: M.User, runner: M.Runner) -> ConfigBundle:
     cfg = await get_config(db, user.id)
-    sv = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == "traction_momentum",
+    enabled = list(cfg.strategies_enabled or ["traction_momentum"])
+    # Prefer liquidity_trend when enabled so established/trending tokens can qualify.
+    preferred = "liquidity_trend" if "liquidity_trend" in enabled else (
+        enabled[0] if enabled else "traction_momentum"
+    )
+    if preferred not in ("traction_momentum", "liquidity_trend"):
+        preferred = "traction_momentum"
+    sv = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == preferred,
                                                          (M.StrategyVersion.user_id == user.id) | M.StrategyVersion.user_id.is_(None))
                            .order_by(M.StrategyVersion.user_id.is_(None), M.StrategyVersion.version.desc()))).scalars().first()
+    if sv is None and preferred != "traction_momentum":
+        preferred = "traction_momentum"
+        sv = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == preferred,
+                                                             (M.StrategyVersion.user_id == user.id) | M.StrategyVersion.user_id.is_(None))
+                               .order_by(M.StrategyVersion.user_id.is_(None), M.StrategyVersion.version.desc()))).scalars().first()
     controls = await load_controls(db, user.id)
     controls.emergency_stop = cfg.emergency_stop
     controls.global_pause = cfg.desired_state != "RUNNING"
@@ -139,14 +152,21 @@ async def build_bundle(db: AsyncSession, settings: Settings, user: M.User, runne
     user_limits = await load_limits(db, settings, user.id)
     # Bundle carries *effective* limits (platform ∩ user ∩ wallet) so workers cannot skip a layer
     eff = effective_limits(user_limits, policy, platform)
+    if sv and sv.config:
+        strategy_cfg = dict(sv.config)
+        strategy_cfg["strategy_id"] = preferred
+    elif preferred == "liquidity_trend":
+        strategy_cfg = LiquidityTrendConfig().model_dump(mode="json")
+    else:
+        strategy_cfg = TractionMomentumConfig().model_dump(mode="json")
     return ConfigBundle(
         version=cfg.version,
         runner_id=runner.id,
         mode=user.mode,  # type: ignore[arg-type]
         desired_state=cfg.desired_state,  # type: ignore[arg-type]
         emergency_stop=cfg.emergency_stop,
-        strategy=(sv.config if sv else TractionMomentumConfig().model_dump(mode="json")),
-        strategies_enabled=list(cfg.strategies_enabled or []),
+        strategy=strategy_cfg,
+        strategies_enabled=enabled,
         risk_limits=eff.model_dump(mode="json"),
         wallet_policy=policy.model_dump(mode="json") if policy else None,
         controls=controls.model_dump(mode="json"),

@@ -41,15 +41,19 @@ class TractionMomentumConfig(BaseModel):
     strategy_id: str = "traction_momentum"
     version: int = 1
     weights: StrategyWeights = Field(default_factory=StrategyWeights)
-    min_score: float = 70.0
-    watch_score: float = 50.0
-    min_unique_buyers_5m: int = 8
-    full_score_unique_buyers_5m: int = 60
-    min_buy_sell_volume_ratio: float = 1.2
-    min_age_seconds: float = 300.0
+    # Defaults aligned with UI (qualify 20 / watch 10) so established tokens can qualify.
+    min_score: float = 25.0
+    watch_score: float = 12.0
+    min_unique_buyers_5m: int = 3
+    full_score_unique_buyers_5m: int = 40
+    min_buy_sell_volume_ratio: float = 1.0
+    min_age_seconds: float = 60.0
     momentum_full_score_5m_pct: float = 30.0
     momentum_full_score_15m_pct: float = 60.0
     min_liquidity_for_scoring_usdc: float = 10_000.0
+    # Above this age or liquidity, launch-only hard gates become soft (score only).
+    established_age_seconds: float = 3600.0
+    established_liquidity_usdc: float = 25_000.0
     unknown_creator_score: float = 40.0  # unknown creator is NOT treated as good
     entry_window_seconds: int = 300  # idempotency bucket for entries
     exit: ExitConfig = Field(default_factory=ExitConfig)
@@ -151,14 +155,20 @@ class TractionMomentum(Strategy):
         total = sum(weights[k] * (v or 0.0) for k, v in comps.items())  # missing data scores 0: conservative
         age = m.age_seconds(now)
         ratio = m.buy_sell_volume_ratio()
+        established = (
+            (age is not None and age >= c.established_age_seconds)
+            or (m.liquidity is not None and m.liquidity >= c.established_liquidity_usdc)
+        )
+        # Launch-only gates are hard for fresh tokens; soft (score-only) once established.
         gates = {
-            "required_data_present": not ({"momentum", "buyer_growth", "buy_sell_pressure", "liquidity_quality"} & set(gaps)),
+            "required_data_present": not ({"liquidity_quality"} & set(gaps)),
             "min_score": total >= c.min_score,
-            "min_unique_buyers_5m": (m.unique_buyers_5m or 0) >= c.min_unique_buyers_5m,
-            "buy_sell_ratio": ratio is not None and ratio >= c.min_buy_sell_volume_ratio,
-            "min_age": age is not None and age >= c.min_age_seconds,
-            "positive_5m_momentum": (m.price_change_5m or 0) > 0,
+            "min_age": age is None or age >= c.min_age_seconds,
         }
+        if not established:
+            gates["min_unique_buyers_5m"] = (m.unique_buyers_5m or 0) >= c.min_unique_buyers_5m
+            gates["buy_sell_ratio"] = ratio is not None and ratio >= c.min_buy_sell_volume_ratio
+            gates["positive_5m_momentum"] = (m.price_change_5m or 0) > 0
         failed = [k for k, ok in gates.items() if not ok]
         reasons = [f"gate failed: {k}" for k in failed] or ["all traction gates passed"]
         return StrategySignal(strategy_id=self.strategy_id, strategy_version=self.version,

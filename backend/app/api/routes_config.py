@@ -12,6 +12,7 @@ from app.risk.engine import RiskLimits
 from app.services import control
 from app.services.decision import tighten_limits
 from app.strategies.traction_momentum import TractionMomentumConfig
+from app.strategies.liquidity_trend import LiquidityTrendConfig
 
 router = APIRouter(tags=["config"])
 
@@ -46,7 +47,9 @@ class BlacklistIn(BaseModel):
 async def strategies(user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await control.get_config(db, user.id)
     rows = (await db.execute(select(M.Strategy))).scalars().all()
-    return [{"id": s.id, "name": s.name, "description": s.description, "enabled": s.id in (cfg.strategies_enabled or []), "active": s.id == "traction_momentum"} for s in rows]
+    enabled = set(cfg.strategies_enabled or [])
+    active = next((x for x in ("liquidity_trend", "traction_momentum") if x in enabled), "traction_momentum")
+    return [{"id": s.id, "name": s.name, "description": s.description, "enabled": s.id in enabled, "active": s.id == active} for s in rows]
 
 
 @router.put("/strategies/{sid}/enabled")
@@ -69,13 +72,14 @@ async def versions(sid: str, user: M.User = Depends(current_user), db: AsyncSess
 
 @router.post("/strategies/{sid}/versions", status_code=201)
 async def new_version(sid: str, body: StrategyVersionIn, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    if sid != "traction_momentum":
+    if sid not in ("traction_momentum", "liquidity_trend"):
         raise HTTPException(404, "unknown strategy")
     if user.mode == "LIVE" and not body.confirm:
         raise HTTPException(409, "changing strategy configuration in LIVE mode requires confirm=true")
     top = (await db.execute(select(func.max(M.StrategyVersion.version)).where(M.StrategyVersion.strategy_id == sid))).scalar() or 0
     try:
-        cfg = TractionMomentumConfig(**{**body.config, "strategy_id": sid, "version": top + 1})
+        Cls = LiquidityTrendConfig if sid == "liquidity_trend" else TractionMomentumConfig
+        cfg = Cls(**{**body.config, "strategy_id": sid, "version": top + 1})
     except (ValidationError, TypeError) as e:
         raise HTTPException(422, str(e)[:500])
     db.add(M.StrategyVersion(strategy_id=sid, user_id=user.id, version=cfg.version, config=cfg.model_dump(mode="json")))

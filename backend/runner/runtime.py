@@ -42,6 +42,7 @@ from app.risk.engine import RiskEngine, RiskLimits
 from app.services.decision import DecisionPipeline
 from app.services.engine import TradingEngine
 from app.strategies.traction_momentum import TractionMomentum, TractionMomentumConfig
+from app.strategies.liquidity_trend import LiquidityTrend, LiquidityTrendConfig
 from app.wallets.base import WalletPolicy, WalletProvider
 from runner import __version__
 from runner.client import ControlPlaneClient, ControlPlaneError, Revoked
@@ -459,12 +460,12 @@ class RunnerRuntime:
             )
         else:
             self.user_policy_ctx = None
-        cfg = TractionMomentumConfig(**b.strategy)
+        strategy_obj, cfg = self._build_strategy(b)
         self.strategy_version = cfg.version
         pipeline = DecisionPipeline(
-            TractionMomentum(cfg), RiskEngine(), limits, self.approver, AIAnalyzer(self.llm),
+            strategy_obj, RiskEngine(), limits, self.approver, AIAnalyzer(self.llm),
             AIMode.ENABLED if self.llm else AIMode.DISABLED,
-            entry_window_seconds=cfg.entry_window_seconds, wallet_policy=policy,
+            entry_window_seconds=getattr(cfg, "entry_window_seconds", 300), wallet_policy=policy,
         )
         if self.mode_eff == TradingMode.PAPER:
             executor = PaperExecutionEngine(self.portfolio, self.market_data, self.approver, clock=self.clock)
@@ -482,6 +483,24 @@ class RunnerRuntime:
             bus=self.bus, idempotency=self.idem,
         )
 
+
+    def _build_strategy(self, b):
+        """Pick strategy from enabled list + config blob.
+
+        Preference order: first id in strategies_enabled that we know how to build.
+        Config blob may be traction or liquidity shape; unknown keys are ignored by pydantic.
+        """
+        enabled = list(getattr(b, "strategies_enabled", None) or ["traction_momentum"])
+        raw = dict(b.strategy or {})
+        sid = raw.get("strategy_id") or (enabled[0] if enabled else "traction_momentum")
+        if sid not in enabled and enabled:
+            sid = enabled[0]
+        if sid == "liquidity_trend":
+            cfg = LiquidityTrendConfig(**{**raw, "strategy_id": "liquidity_trend"})
+            return LiquidityTrend(cfg), cfg
+        cfg = TractionMomentumConfig(**{**raw, "strategy_id": "traction_momentum"})
+        return TractionMomentum(cfg), cfg
+
     def recompute(self) -> None:
         b = self.bundle
         if b is None or self.engine is None:
@@ -490,7 +509,7 @@ class RunnerRuntime:
         self.controls.emergency_stop = b.emergency_stop
         self.controls.global_pause = (
             b.desired_state != "RUNNING"
-            or "traction_momentum" not in b.strategies_enabled
+            or not any(s in (b.strategies_enabled or []) for s in ("traction_momentum", "liquidity_trend"))
             or offline or self.revoked
         )
         self.entries_suspended_reason = (

@@ -240,23 +240,34 @@ class EnrichmentService:
         self._probe_cache.set(key, (p, gaps))
         return p, gaps
 
-    async def _sell_check(self, token: str, creator: str | None) -> tuple[bool | None, str | None, list[str]]:
-        """Holder-transfer probe using the known creator's balance (near-certain non-zero balance for a fresh
-        token). Labelled ``sell_check_method`` — never reported as a router/pool sell simulation."""
+    async def _sell_check(self, token: str, creator: str | None,
+                          extra_holders: list[str] | None = None) -> tuple[bool | None, str | None, list[str]]:
+        """Holder-transfer probe. Tries creator first, then any known holders with balance.
+
+        Labelled ``sell_check_method`` — never reported as a router/pool sell simulation.
+        """
         if self.probe is None:
             return None, None, ["sellability: no RPC client configured"]
-        if not creator:
+        candidates: list[str] = []
+        for addr in [creator, *(extra_holders or [])]:
+            if addr and addr.lower() not in {c.lower() for c in candidates}:
+                candidates.append(addr)
+        if not candidates:
             return None, None, ["sellability: no holder with a known non-zero balance to probe"]
-        try:
-            bal = await self.probe.balance_of(token, creator)
-        except Exception:
-            bal = None
-        if not bal:
-            return None, None, ["sellability: no holder with a known non-zero balance to probe"]
-        ok, detail = await self.probe.transfer_probe(token, creator, balance_raw=bal)
-        if ok is None:
-            return None, None, [f"sellability: {detail}"]
-        return ok, "holder_transfer_probe", []
+        last_detail = "no holder with a known non-zero balance to probe"
+        for holder in candidates[:5]:
+            try:
+                bal = await self.probe.balance_of(token, holder)
+            except Exception:
+                bal = None
+            if not bal:
+                continue
+            ok, detail = await self.probe.transfer_probe(token, holder, balance_raw=bal)
+            if ok is None:
+                last_detail = detail or last_detail
+                continue
+            return ok, "holder_transfer_probe", []
+        return None, None, [f"sellability: {last_detail}"]
 
     # ------------------------------------------------------------------ public entrypoint
     async def enrich(self, m: MarketState, *, previous: MarketState | None = None) -> MarketState:
@@ -357,7 +368,17 @@ class EnrichmentService:
 
         # --- sellability (holder transfer probe) ------------------------------------------------------------
         try:
-            ok, method, sgaps = await self._sell_check(token, m.creator_address)
+            extra = []
+            # Prefer non-zero holders from enrichment/market when creator has sold down.
+            for key in ("top_holders", "holder_addresses"):
+                raw = getattr(m, key, None) or (m.meta or {}).get(key) if hasattr(m, "meta") else None
+                if isinstance(raw, list):
+                    for item in raw[:5]:
+                        if isinstance(item, str):
+                            extra.append(item)
+                        elif isinstance(item, dict) and item.get("address"):
+                            extra.append(str(item["address"]))
+            ok, method, sgaps = await self._sell_check(token, m.creator_address, extra_holders=extra)
             gaps += sgaps
             if ok is not None:
                 m.contract.sell_simulation_ok = ok

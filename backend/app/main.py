@@ -21,6 +21,7 @@ from app.db.session import make_engine, make_session_factory
 from app.infra.redis import RateLimiter
 from app.services.hub import EventHub
 from app.strategies.traction_momentum import TractionMomentumConfig
+from app.strategies.liquidity_trend import LiquidityTrendConfig
 
 log = logging.getLogger("arc-agent")
 
@@ -39,6 +40,12 @@ async def seed(sf, settings: Settings) -> None:
         has_default = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == "traction_momentum", M.StrategyVersion.user_id.is_(None)))).first()
         if not has_default:
             db.add(M.StrategyVersion(strategy_id="traction_momentum", user_id=None, version=1, config=TractionMomentumConfig().model_dump(mode="json")))
+        if await db.get(M.Strategy, "liquidity_trend") is None:
+            db.add(M.Strategy(id="liquidity_trend", name="Liquidity Trend",
+                              description="Scores high-liquidity / established Arc tokens from Gecko trending; does not require fresh-launch buyer gates."))
+        has_lt = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == "liquidity_trend", M.StrategyVersion.user_id.is_(None)))).first()
+        if not has_lt:
+            db.add(M.StrategyVersion(strategy_id="liquidity_trend", user_id=None, version=1, config=LiquidityTrendConfig().model_dump(mode="json")))
         await db.commit()
 
 
