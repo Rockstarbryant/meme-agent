@@ -199,7 +199,21 @@ class MarketDataRegistry(MarketDataProvider):
                         merged_c[ck] = cv
                 data["contract"] = merged_c
                 continue
-            if value is None or value == []:
+            if key == "windows":
+                # Field-wise per window: a later provider may add a window (or a missing field of one) the earlier
+                # provider did not have. Earlier providers keep priority for fields they already filled.
+                merged_w = {k: dict(v) for k, v in (data.get("windows") or {}).items()}
+                for wk, wv in (value or {}).items():
+                    cur = merged_w.setdefault(wk, {})
+                    for fk, fv in (wv or {}).items():
+                        if fv is not None and cur.get(fk) is None:
+                            cur[fk] = fv
+                data["windows"] = merged_w
+                continue
+            if key == "holder_growth":
+                data["holder_growth"] = {**(value or {}), **(data.get("holder_growth") or {})}
+                continue
+            if value is None or value == [] or value == {}:
                 continue
             if key in MarketDataRegistry._VOLUME_SPLIT_FIELDS and real_split:
                 data[key] = value

@@ -167,7 +167,22 @@ def build_global_market_data(settings: Any):
     )
 
 
+# Fields added after the original snapshot format. They are carried generically so a snapshot served from the
+# registry (instead of a live fetch) still has every window / holder statistic the strategy, risk engine and AI use.
+_EXTRA_SNAPSHOT_FIELDS = (
+    "token_name", "windows", "holder_growth", "top_5pct_holders_pct", "top_20pct_holders_pct",
+    "top_30pct_holders_pct", "holders_sampled", "volume_1m", "buys_1m", "sells_1m", "unique_sellers_1m",
+    "unique_buyers_15m", "unique_sellers_15m", "price_change_1m", "recent_high", "volatility_pct", "pool_id",
+)
+
+
 def market_state_to_snapshot(m: MarketState) -> dict:
+    snap = _market_state_to_snapshot_base(m)
+    snap.update(m.model_dump(mode="json", include=set(_EXTRA_SNAPSHOT_FIELDS)))
+    return snap
+
+
+def _market_state_to_snapshot_base(m: MarketState) -> dict:
     ts = m.timestamp.isoformat() if m.timestamp else None
     return {
         "chain": m.chain,
@@ -226,6 +241,18 @@ def _parse_dt(v: Any) -> datetime | None:
 
 
 def market_state_from_snapshot(snap: dict, token: "LaunchpadToken") -> MarketState:
+    base = _market_state_from_snapshot_base(snap, token)
+    extra = {k: snap[k] for k in _EXTRA_SNAPSHOT_FIELDS if snap.get(k) is not None}
+    if not extra:
+        return base
+    try:
+        return MarketState.model_validate({**base.model_dump(), **extra})
+    except Exception:  # a malformed extra must never lose the base snapshot
+        log.warning("snapshot extras for %s could not be restored", token.token_key, exc_info=True)
+        return base
+
+
+def _market_state_from_snapshot_base(snap: dict, token: "LaunchpadToken") -> MarketState:
     """Inverse of ``market_state_to_snapshot``. Falls back to the registry token for a few identity fields
     (chain/address/launchpad/symbol/creator/created-at) so an older snapshot predating a field still reconstructs."""
     from app.domain.market import ContractInfo

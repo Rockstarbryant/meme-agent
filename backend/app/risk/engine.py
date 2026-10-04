@@ -35,6 +35,12 @@ class RiskLimits(BaseModel):
     max_price_change_5m_chase_pct: float = 150.0
     max_liquidity_drop_5m_pct: float = 25.0
     max_top10_holder_pct: float = 60.0
+    # Informational concentration warnings (share of circulating supply held by the top 5% / 20% / 30% of holders).
+    warn_top5pct_holders_pct: float = 80.0
+    warn_top20pct_holders_pct: float = 92.0
+    warn_top30pct_holders_pct: float = 96.0
+    # Honeypot signature: at least this many buys in 24h and not a single sell.
+    min_buys_for_one_sided_check: int = 5
     min_holder_count: int = 20
     max_creator_sold_pct: float = 20.0
     max_creator_balance_pct: float = 30.0
@@ -119,47 +125,63 @@ def _warn(rule: str, cat: C, msg: str, value=None, threshold=None) -> RiskFlag:
 
 # ------------------------------------------------------------------ rules
 def contract_rules(x: RiskContext) -> list[RiskFlag]:
+    """Contract findings are INFORMATION once the token has been seen trading both ways.
+
+    Buyers AND sellers observed on-chain is direct evidence the token can be bought and sold, so verification,
+    upgradeable-proxy, mint / pause / blacklist capability, transfer restrictions and unknown admin state no longer
+    block an entry: they are reported at INFO severity (no risk score, no veto) and passed to the AI as context.
+    Two things stay hard vetoes either way because they are measured facts, not unknowns: a buy/sell tax above the
+    limit and an explicit failed sell simulation. Without two-way trading the original vetoes still apply.
+    """
     c, L, out = x.market.contract, x.limits, []
     K = C.CONTRACT_RISK
-    live = x.intent.mode == TradingMode.LIVE
+    two_way = x.market.has_two_way_trading() is True
+
+    def flag(rule: str, msg: str, *, blocking: bool) -> RiskFlag:
+        if blocking and not two_way:
+            return _veto(rule, K, msg)
+        return RiskFlag(rule=rule, category=K, severity=S.INFO,
+                        message=msg + (" (informational: buyers and sellers observed)" if two_way else ""))
+
     if c.verified is False and L.require_contract_verified:
-        out.append(_veto("CONTRACT_UNVERIFIED", K, "contract source not verified"))
+        out.append(flag("CONTRACT_UNVERIFIED", "contract source not verified", blocking=True))
     elif c.verified is None:
-        out.append(_warn("CONTRACT_VERIFICATION_UNKNOWN", K, "contract verification status unknown"))
-    # Admin powers are tri-state: True (capability + live admin) / False (absent or renounced) / None (capability
-    # detected in bytecode but the admin model itself could not be read — e.g. no owner()). None is a real gap,
-    # not a pass: it warns rather than silently letting a token with, say, an unassessable mint function through.
+        out.append(flag("CONTRACT_VERIFICATION_UNKNOWN", "contract verification status unknown", blocking=False))
     if c.mint_authority_active is True and L.veto_active_mint_authority:
-        out.append(_veto("MINT_AUTHORITY_ACTIVE", K, "mint authority still active"))
+        out.append(flag("MINT_AUTHORITY_ACTIVE", "mint authority still active", blocking=True))
     elif c.mint_authority_active is None:
-        out.append(_warn("MINT_AUTHORITY_UNKNOWN", K, "mint capability present but admin state could not be verified"))
+        out.append(flag("MINT_AUTHORITY_UNKNOWN", "mint capability present but admin state could not be verified", blocking=False))
     if c.blacklist_capability is True and L.veto_blacklist_capability:
-        out.append(_veto("BLACKLIST_CAPABILITY", K, "token can blacklist holders"))
+        out.append(flag("BLACKLIST_CAPABILITY", "token can blacklist holders", blocking=True))
     elif c.blacklist_capability is None:
-        out.append(_warn("BLACKLIST_CAPABILITY_UNKNOWN", K, "blacklist capability present but admin state could not be verified"))
+        out.append(flag("BLACKLIST_CAPABILITY_UNKNOWN", "blacklist capability present but admin state could not be verified", blocking=False))
     if c.transfer_restricted:
-        out.append(_veto("TRANSFER_RESTRICTED", K, "transfers are restricted"))
+        out.append(flag("TRANSFER_RESTRICTED", "transfers are restricted", blocking=True))
     if c.pausable is True and L.veto_pausable:
-        out.append(_veto("PAUSABLE", K, "token transfers can be paused"))
+        out.append(flag("PAUSABLE", "token transfers can be paused", blocking=True))
     elif c.pausable is None:
-        out.append(_warn("PAUSABLE_UNKNOWN", K, "pause capability present but admin state could not be verified"))
+        out.append(flag("PAUSABLE_UNKNOWN", "pause capability present but admin state could not be verified", blocking=False))
     for name, tax in (("BUY_TAX", c.buy_tax_pct), ("SELL_TAX", c.sell_tax_pct)):
         if tax is not None and tax > L.max_tax_pct:
             out.append(_veto(f"{name}_TOO_HIGH", K, f"{name.lower()} above limit", tax, L.max_tax_pct))
     if c.sell_simulation_ok is False:
         method = c.sell_check_method or "unknown method"
         out.append(_veto("SELL_SIMULATION_FAILED", K, f"sell check failed via {method} (possible honeypot)"))
-    elif c.sell_simulation_ok is None:
-        f = _veto if live else _warn
-        out.append(f("SELLABILITY_UNVERIFIED", K, "could not verify the token can be sold"))
-    elif c.sell_check_method and c.sell_check_method != "router_simulation":
-        # A holder-transfer probe passing is meaningfully weaker evidence than a real router/pool sell simulation
-        # (it cannot see pool-level taxes or hook logic). Surface that distinction instead of implying certainty.
-        out.append(_warn("SELLABILITY_HEURISTIC_ONLY", K,
-                         f"sellability confirmed only via {c.sell_check_method}, not a full router simulation"))
     if c.is_proxy:
-        out.append(_warn("UPGRADEABLE_PROXY", K, "contract is an upgradeable proxy"))
+        out.append(RiskFlag(rule="UPGRADEABLE_PROXY", category=K, severity=S.INFO,
+                            message="contract is an upgradeable proxy (informational)"))
     return out
+
+
+def trading_rules(x: RiskContext) -> list[RiskFlag]:
+    """Replaces the old SELLABILITY_UNVERIFIED check with OBSERVED evidence: trading that only ever goes one way
+    (many buys, zero sells over 24h) is the classic honeypot signature and is vetoed."""
+    m, L = x.market, x.limits
+    if m.one_sided_trading(L.min_buys_for_one_sided_check):
+        w = m.windows["24h"]
+        return [_veto("ONE_SIDED_TRADING", C.MARKET_RISK, "buys but no sells observed in 24h (honeypot-like)",
+                      f"{w.buys} buys / {w.sells} sells", f">={L.min_buys_for_one_sided_check} buys and 0 sells")]
+    return []
 
 
 def liquidity_rules(x: RiskContext) -> list[RiskFlag]:
@@ -184,6 +206,13 @@ def holder_rules(x: RiskContext) -> list[RiskFlag]:
     elif m.top10_holder_pct > L.max_top10_holder_pct:
         out.append(_veto("TOP10_CONCENTRATION", K, "top-10 holders too concentrated",
                          m.top10_holder_pct, L.max_top10_holder_pct))
+    for rule, val, lim, label in (
+        ("TOP5PCT_CONCENTRATION_HIGH", m.top_5pct_holders_pct, L.warn_top5pct_holders_pct, "top 5% of holders"),
+        ("TOP20PCT_CONCENTRATION_HIGH", m.top_20pct_holders_pct, L.warn_top20pct_holders_pct, "top 20% of holders"),
+        ("TOP30PCT_CONCENTRATION_HIGH", m.top_30pct_holders_pct, L.warn_top30pct_holders_pct, "top 30% of holders"),
+    ):
+        if val is not None and val > lim:
+            out.append(_warn(rule, K, f"{label} hold an extreme share of supply", val, lim))
     if m.holder_count is not None and m.holder_count < L.min_holder_count:
         out.append(_warn("FEW_HOLDERS", K, "very few holders", m.holder_count, L.min_holder_count))
     return out
@@ -300,6 +329,7 @@ def portfolio_rules(x: RiskContext) -> list[RiskFlag]:
 DEFAULT_RULES: list[RiskRule] = [
     RiskRule("contract", C.CONTRACT_RISK, contract_rules),
     RiskRule("liquidity", C.LIQUIDITY_RISK, liquidity_rules),
+    RiskRule("trading", C.MARKET_RISK, trading_rules),
     RiskRule("holders", C.HOLDER_RISK, holder_rules),
     RiskRule("creator", C.CREATOR_RISK, creator_rules),
     RiskRule("market", C.MARKET_RISK, market_rules),

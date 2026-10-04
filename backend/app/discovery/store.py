@@ -23,6 +23,21 @@ from app.discovery.registry import GlobalTokenRegistry, LaunchpadToken, TokenSta
 log = logging.getLogger("discovery.store")
 
 
+def _is_transient_db_error(e: Exception) -> bool:
+    name, msg = type(e).__name__.lower(), str(e).lower()
+    return (
+        "connectiondoesnotexist" in name
+        or "gaierror" in name
+        or "connection was closed" in msg
+        or "connectiondoesnotexisterror" in msg
+        or "server closed the connection" in msg
+        or "name resolution" in msg        # DNS blip on the VPS
+        or "temporary failure" in msg
+        or "connection refused" in msg
+        or "timed out" in msg
+    )
+
+
 async def _with_db_retry(coro_factory, *, attempts: int = 2, label: str = "db"):
     """Retry once on dropped asyncpg connections (common after idle / pool recycle)."""
     last: Exception | None = None
@@ -32,17 +47,10 @@ async def _with_db_retry(coro_factory, *, attempts: int = 2, label: str = "db"):
         except Exception as e:
             last = e
             name = type(e).__name__
-            msg = str(e).lower()
-            transient = (
-                "connectiondoesnotexist" in name.lower()
-                or "connection was closed" in msg
-                or "connectiondoesnotexisterror" in msg
-                or "server closed the connection" in msg
-            )
-            if not transient or i + 1 >= attempts:
+            if not _is_transient_db_error(e) or i + 1 >= attempts:
                 raise
             log.warning("%s transient DB error (%s); retrying", label, name)
-            await asyncio.sleep(0.3 * (i + 1))
+            await asyncio.sleep(min(5.0, 0.5 * (2 ** i)))
     raise last  # pragma: no cover
 
 
@@ -243,31 +251,34 @@ class PersistentTokenStore:
         if self.sf is None:
             return []
         try:
-            async with self.sf() as db:
-                rows = (
-                    await db.execute(
-                        select(M.LaunchpadTokenRow)
-                        .where(M.LaunchpadTokenRow.status.notin_(["EXPIRED", "DROPPED", "REJECTED"]))
-                        .order_by(M.LaunchpadTokenRow.discovered_at.desc())
-                        .limit(limit)
-                    )
-                ).scalars().all()
-                out = []
-                for r in rows:
-                    d = {
-                        "id": r.id, "chain": r.chain, "token_address": r.token_address,
-                        "launchpad": r.launchpad, "launchpad_contract": r.launchpad_contract,
-                        "launch_event": r.launch_event, "launch_tx_hash": r.launch_tx_hash,
-                        "creator_address": r.creator_address, "launched_at": r.launched_at,
-                        "discovered_at": r.discovered_at, "status": r.status,
-                        "symbol": r.symbol, "name": r.name,
-                        "initial_score": r.initial_score, "current_score": r.current_score,
-                        "score_delta": r.score_delta, "priority": r.priority,
-                        "last_monitored_at": r.last_monitored_at, "last_score_at": r.last_score_at,
-                        "meta": r.meta or {}, "last_snapshot": r.last_snapshot,
-                    }
-                    out.append(dict_to_token(d))
-                return out
+            async def _query():
+                async with self.sf() as db:
+                    return (
+                        await db.execute(
+                            select(M.LaunchpadTokenRow)
+                            .where(M.LaunchpadTokenRow.status.notin_(["EXPIRED", "DROPPED", "REJECTED"]))
+                            .order_by(M.LaunchpadTokenRow.discovered_at.desc())
+                            .limit(limit)
+                        )
+                    ).scalars().all()
+
+            rows = await _with_db_retry(_query, attempts=4, label="load_all_active")
+            out = []
+            for r in rows:
+                d = {
+                    "id": r.id, "chain": r.chain, "token_address": r.token_address,
+                    "launchpad": r.launchpad, "launchpad_contract": r.launchpad_contract,
+                    "launch_event": r.launch_event, "launch_tx_hash": r.launch_tx_hash,
+                    "creator_address": r.creator_address, "launched_at": r.launched_at,
+                    "discovered_at": r.discovered_at, "status": r.status,
+                    "symbol": r.symbol, "name": r.name,
+                    "initial_score": r.initial_score, "current_score": r.current_score,
+                    "score_delta": r.score_delta, "priority": r.priority,
+                    "last_monitored_at": r.last_monitored_at, "last_score_at": r.last_score_at,
+                    "meta": r.meta or {}, "last_snapshot": r.last_snapshot,
+                }
+                out.append(dict_to_token(d))
+            return out
         except Exception:
             log.exception("load_all_active failed")
             return []

@@ -111,9 +111,14 @@ def build_enrichment_service(settings: Any, *, rpc: EvmRpcClient | None) -> Enri
 
     cfg = EnrichmentConfig(
         enabled=True,
-        holders_ttl_s=float(getattr(settings, "enrichment_holders_ttl_s", 300.0)),
+        holders_ttl_s=float(getattr(settings, "enrichment_holders_ttl_s", 1800.0)),
         static_ttl_s=float(getattr(settings, "enrichment_static_ttl_s", 21_600.0)),
-        probe_ttl_s=float(getattr(settings, "enrichment_probe_ttl_s", 900.0)),
+        probe_ttl_s=float(getattr(settings, "enrichment_probe_ttl_s", 21_600.0)),
+        holder_count_ttl_s=float(getattr(settings, "enrichment_holder_count_ttl_s", 1800.0)),
+        deep_holders_ttl_s=float(getattr(settings, "enrichment_deep_holders_ttl_s", 3600.0)),
+        holders_max_rows=int(getattr(settings, "enrichment_holders_max_rows", 250)),
+        deep_holders_min_liquidity=float(getattr(settings, "enrichment_deep_holders_min_liquidity", 20_000.0)),
+        sell_probe_enabled=bool(getattr(settings, "enrichment_sell_probe_enabled", False)),
         trade_usdc_for_mev=float(getattr(settings, "risk_max_trade_usdc", 25.0) or 25.0),
     )
     return EnrichmentService(blockscout=blockscout, etherscan=etherscan, rpc=rpc, config=cfg)

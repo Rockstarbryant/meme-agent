@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ActionBadge, DataLabel } from "@/components/badges";
 import { ErrorState, Loading, Stat } from "@/components/states";
 import { PriceChart } from "@/components/price-chart";
+import { HoldersCard, MarketWindowsCard } from "@/components/market-windows";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useApi } from "@/hooks/use-api";
@@ -11,6 +12,8 @@ import type { DecisionDetail, TokenDetail as TD } from "@/types/api";
 
 const tri = (v: unknown) => (v === true ? "yes" : v === false ? "no" : "unknown");
 const n = (m: Record<string, unknown>, k: string) => (typeof m[k] === "number" ? (m[k] as number) : null);
+const winVol = (m: Record<string, unknown>, w: string) =>
+  ((m.windows as Record<string, { volume_usd?: number | null }> | undefined)?.[w]?.volume_usd ?? null);
 
 export function TokenDetail({ tokenKey }: { tokenKey: string }) {
   const res = useApi<TD>(`/tokens/${encodeURIComponent(tokenKey)}`, { refreshOn: ["DECISION_RECORDED"] });
@@ -26,7 +29,8 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
   const gaps = (m.enrichment_gaps as string[] | undefined) ?? [];
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{(m.symbol as string) ?? t.token_key}</h2><DataLabel label={t.data_label} />
+      <div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{(m.token_name as string) ?? (m.symbol as string) ?? t.token_key}</h2>
+        {m.token_name && m.symbol ? <span className="text-sm text-muted-foreground">{m.symbol as string}</span> : null}<DataLabel label={t.data_label} />
         {t.latest_decision && <ActionBadge action={t.latest_decision.final_action} />}<span className="break-all text-xs text-muted-foreground">{t.token_key}</span></div>
       <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
         <span>Launchpad: {launchpad ?? "unknown"}{launchpadDetected ? ` (detected, ${(m.launchpad_evidence as string) ?? "on-chain"})` : ""}</span>
@@ -35,17 +39,11 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
       {gaps.length > 0 && <p className="text-xs text-muted-foreground">Not enriched: {gaps.join("; ")}</p>}
       <Card><CardContent className="space-y-3 pt-4"><div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Price" value={price(n(m, "price"))} /><Stat label="Market cap" value={compact(n(m, "market_cap"))} /><Stat label="Liquidity" value={compact(n(m, "liquidity"))} />
-        <Stat label="Volume 1m / 5m / 15m" value={`${compact(n(m, "volume_1m"))} / ${compact(n(m, "volume_5m"))} / ${compact(n(m, "volume_15m"))}`} /></div>
+        <Stat label="Volume 5m / 1h / 24h" value={`${compact(n(m, "volume_5m"))} / ${compact(winVol(m, "1h"))} / ${compact(winVol(m, "24h"))}`} /></div>
         <PriceChart points={t.price_series} /></CardContent></Card>
+      <MarketWindowsCard market={m} />
+      <HoldersCard market={m} />
       <div className="grid gap-4 md:grid-cols-2">
-        <Card><CardHeader><CardTitle>Holders</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
-          <p>Holder count: {n(m, "holder_count") ?? "—"} (growth {plainPct(n(m, "holder_growth_pct"))})</p>
-          <p>Top 5 / 10 / 20 concentration: {plainPct(n(m, "top5_holder_pct"))} / {plainPct(n(m, "top10_holder_pct"))} / {plainPct(n(m, "top20_holder_pct"))}</p>
-          <p className="text-xs text-muted-foreground">A per-holder list is not shown: no holder-indexing source is configured, so only aggregate concentration is available when a data source provides it.</p></CardContent></Card>
-        <Card><CardHeader><CardTitle>Buy and sell activity</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
-          <p>Unique buyers 1m / 5m: {n(m, "unique_buyers_1m") ?? "—"} / {n(m, "unique_buyers_5m") ?? "—"}</p>
-          <p>Unique sellers 1m / 5m: {n(m, "unique_sellers_1m") ?? "—"} / {n(m, "unique_sellers_5m") ?? "—"}</p>
-          <p>Buy vs sell volume 5m: {compact(n(m, "buy_volume_5m"))} / {compact(n(m, "sell_volume_5m"))}</p></CardContent></Card>
         <Card><CardHeader><CardTitle>Creator</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
           {m.creator_known ? <><p>Balance: {plainPct(n(m, "creator_balance_pct"))}</p><p>Sold: {plainPct(n(m, "creator_sold_pct"))}</p></> : <p>Creator behaviour could not be verified. It is not assumed to be safe.</p>}</CardContent></Card>
         <Card><CardHeader><CardTitle>Contract risk</CardTitle></CardHeader><CardContent><dl className="grid grid-cols-2 gap-1 text-sm">
@@ -53,8 +51,7 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
             <div key={k} className="flex justify-between gap-2"><dt className="text-muted-foreground">{k.replaceAll("_", " ")}</dt><dd>{tri(c[k])}</dd></div>))}
           <div className="flex justify-between gap-2"><dt className="text-muted-foreground">buy / sell tax</dt><dd>{plainPct(typeof c.buy_tax_pct === "number" ? c.buy_tax_pct : null)} / {plainPct(typeof c.sell_tax_pct === "number" ? c.sell_tax_pct : null)}</dd></div></dl>
           <p className="mt-2 text-xs text-muted-foreground">
-            verification: {(c.verification_source as string) ?? "unavailable"} · sellability check: {(c.sell_check_method as string) ?? "unavailable"}
-            {c.sell_check_method && c.sell_check_method !== "router_simulation" ? " (holder-transfer probe, not a full router simulation)" : ""}
+            verification: {(c.verification_source as string) ?? "unavailable"}. Contract findings are informational once both buyers and sellers have been seen trading; sellability is judged from observed sellers (see the trading table above).
           </p></CardContent></Card>
         <Card><CardHeader><CardTitle>Execution risk</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
           <p>Expected price impact: {plainPct(n(m, "expected_price_impact_pct"), 2)}</p>

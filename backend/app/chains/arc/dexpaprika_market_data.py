@@ -7,6 +7,7 @@ from typing import Any
 from app.chains.base import MarketDataProvider
 from app.core.errors import DataUnavailable
 from app.domain.market import ContractInfo, MarketState
+from app.domain.windows import windows_from_dexpaprika
 from app.integrations.dexpaprika import DexPaprikaClient
 
 
@@ -272,6 +273,7 @@ class DexPaprikaArcMarketData(MarketDataProvider):
         state = MarketState(
             chain="arc", token_address=token, timestamp=now,
             pool_address=pool_address, pool_id=pool_address, symbol=symbol or name,
+            token_name=name if isinstance(name, str) else None, windows=windows_from_dexpaprika(summary),
             token_created_at=created, price=price, market_cap=market_cap, liquidity=liquidity,
             price_change_1m=price_change_1m, price_change_5m=price_change_5m, price_change_15m=price_change_15m,
             volume_1m=vol("1m"), volume_5m=volume_5m, volume_15m=vol("15m"),

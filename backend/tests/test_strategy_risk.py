@@ -125,16 +125,44 @@ def test_market_vetoes(over, rule):
         assert rule in vetoes(a)
 
 
-def test_contract_vetoes_and_honeypot():
+NO_SELLERS = dict(unique_sellers_1m=0, unique_sellers_5m=0, sells_1m=0, sells_5m=0)
+
+
+def test_contract_vetoes_apply_without_two_way_trading():
     bad = ContractInfo(mint_authority_active=True, blacklist_capability=True, sell_tax_pct=40, sell_simulation_ok=False)
-    v = vetoes(assess(good_market(contract=bad)))
+    v = vetoes(assess(good_market(contract=bad, **NO_SELLERS)))
     assert {"MINT_AUTHORITY_ACTIVE", "BLACKLIST_CAPABILITY", "SELL_TAX_TOO_HIGH", "SELL_SIMULATION_FAILED"} <= v
 
 
-def test_unverified_sellability_only_vetoes_in_live():
+def test_contract_flags_are_informational_once_buyers_and_sellers_are_seen():
+    bad = ContractInfo(mint_authority_active=True, blacklist_capability=True, pausable=True, is_proxy=True,
+                       verified=None, sell_tax_pct=40, sell_simulation_ok=False)
+    a = assess(good_market(contract=bad))                       # fixture has buyers AND sellers
+    v = vetoes(a)
+    assert not ({"MINT_AUTHORITY_ACTIVE", "BLACKLIST_CAPABILITY", "PAUSABLE"} & v)
+    assert {"SELL_TAX_TOO_HIGH", "SELL_SIMULATION_FAILED"} <= v   # measured facts still block
+    info = {f.rule for f in a.flags if f.severity.value == "INFO"}
+    assert {"MINT_AUTHORITY_ACTIVE", "BLACKLIST_CAPABILITY", "PAUSABLE", "UPGRADEABLE_PROXY",
+            "CONTRACT_VERIFICATION_UNKNOWN"} <= info
+
+
+def test_contract_only_issues_never_block_a_two_way_traded_token():
+    m = good_market(contract=ContractInfo(verified=None, is_proxy=True, mint_authority_active=None, pausable=None))
+    a = assess(m)
+    assert a.decision == RiskDecision.APPROVE and a.risk_score == 0
+
+
+def test_sellability_unknown_is_no_longer_flagged_and_one_sided_trading_is_vetoed():
+    from app.domain.market import WindowStats
     m = good_market(contract=ContractInfo(verified=True, sell_simulation_ok=None))
-    assert assess(m, mode=TradingMode.PAPER).decision == RiskDecision.APPROVE
-    assert "SELLABILITY_UNVERIFIED" in vetoes(assess(m, mode=TradingMode.LIVE))
+    for mode in (TradingMode.PAPER, TradingMode.LIVE):
+        a = assess(m, mode=mode)
+        assert a.decision == RiskDecision.APPROVE
+        assert "SELLABILITY_UNVERIFIED" not in {f.rule for f in a.flags}
+    honeypot = good_market(windows={"24h": WindowStats(buys=40, sells=0, buyers=12, sellers=0)}, **NO_SELLERS)
+    assert "ONE_SIDED_TRADING" in vetoes(assess(honeypot))
+    quiet = good_market(windows={"24h": WindowStats(buys=2, sells=0, buyers=2, sellers=0)}, **NO_SELLERS)
+    assert "ONE_SIDED_TRADING" not in vetoes(assess(quiet))     # too few buys to call it
 
 
 def test_position_and_exposure_limits():

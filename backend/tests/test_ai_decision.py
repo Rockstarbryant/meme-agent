@@ -51,7 +51,7 @@ async def test_openai_compatible_provider_via_mock_transport():
         return httpx.Response(200, json={"choices": [{"message": {"content": BUY_JSON}}]})
     p = OpenAICompatibleProvider("openrouter", "https://x/api/v1", "k", "m", transport=httpx.MockTransport(handler))
     assert "BUY" in await p.complete("s", "u")
-    bad = OpenAICompatibleProvider("openrouter", "https://x/api/v1", "k", "m",
+    bad = OpenAICompatibleProvider("openrouter", "https://x/api/v1", "k", "m", max_retries=0,
                                    transport=httpx.MockTransport(lambda r: httpx.Response(500)))
     with pytest.raises(AIProviderError):
         await bad.complete("s", "u")

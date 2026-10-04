@@ -56,8 +56,22 @@ class EnrichmentConfig:
     enabled: bool = True
     holders_ttl_s: float = 300.0          # top-N / holder count: refresh every 5 min
     static_ttl_s: float = 21_600.0        # verification / creator / launchpad: refresh every 6h (still not "forever")
-    probe_ttl_s: float = 900.0            # on-chain admin-power probe: 15 min
+    probe_ttl_s: float = 21_600.0         # on-chain admin-power probe: contract facts barely change -> 6h
     trade_usdc_for_mev: float = 25.0
+    holder_count_ttl_s: float = 1_800.0   # holder count (drives holder growth): 30 min
+    deep_holders_ttl_s: float = 3_600.0   # multi-page holder list (percentile concentration): 1h
+    holders_max_rows: int = 250           # most holder rows fetched per token (50 rows = 1 page = 20 Pro credits)
+    deep_holders_min_liquidity: float = 20_000.0  # only tokens this liquid AND trading get the multi-page fetch
+    # Holder-transfer sell probe. OFF: sellability is now judged from OBSERVED sellers (see MarketState.sellers_in),
+    # which is stronger evidence than a heuristic transfer probe and costs no RPC calls.
+    sell_probe_enabled: bool = False
+    # Addresses that hold supply for protocol reasons (pool manager, burn addresses) and are excluded from
+    # concentration. The token contract itself and the token's own pool are always excluded too.
+    exclude_holder_addresses: tuple[str, ...] = (
+        "0x0000000000000000000000000000000000000000",
+        "0x000000000000000000000000000000000000dead",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",  # Uniswap v4 PoolManager on Arc
+    )
 
 
 class EnrichmentService:
@@ -76,6 +90,8 @@ class EnrichmentService:
         self._holders = _TTLCache(self.cfg.holders_ttl_s)
         self._static = _TTLCache(self.cfg.static_ttl_s)
         self._probe_cache = _TTLCache(self.cfg.probe_ttl_s)
+        self._count_cache = _TTLCache(self.cfg.holder_count_ttl_s)
+        self._holder_hist: dict[str, list[tuple[float, int]]] = {}  # token -> [(unix_ts, holder_count)]
 
     def sources(self) -> list[str]:
         out = []
@@ -88,85 +104,149 @@ class EnrichmentService:
         return out
 
     # ------------------------------------------------------------------ holders
-    async def _holders_pct(self, token: str) -> tuple[dict[str, Any], list[str]]:
-        """top5/top10/top20 holder %, holder_count, source. Cached ``holders_ttl_s``."""
+    def _excluded(self, token: str, m: MarketState) -> set[str]:
+        ex = {a.lower() for a in self.cfg.exclude_holder_addresses}
+        ex.add(token.lower())
+        if m.pool_address:
+            ex.add(str(m.pool_address).lower())
+        return ex
+
+    async def _holders_pct(self, token: str, m: MarketState) -> tuple[dict[str, Any], list[str]]:
+        """Concentration + holder count. Supply shares are computed against CIRCULATING supply (total supply minus
+        balances held by the token itself, its pool, the pool manager and burn addresses), and only when the total
+        supply is actually known: dividing by the sum of the fetched rows (what this used to do when the supply
+        was not cached yet) reported top-10 as 60-100% for almost every token."""
         key = token.lower()
+        windows_active = any((w.buys or 0) + (w.sells or 0) > 0 for w in m.windows.values()) if m.windows else False
+        deep = bool(m.liquidity and m.liquidity >= self.cfg.deep_holders_min_liquidity and windows_active)
         cached = self._holders.get(key)
-        if cached is not None:
+        if cached is not None and (not deep or cached[0].get("deep")):
             return cached
         gaps: list[str] = []
-        rows: list[dict] | None = None
-        source = None
-        total_supply_hint: int | None = None
-        if self.blockscout is not None:
-            try:
-                data = await self.blockscout.token_holders(token)
-                items = data.get("items") if isinstance(data, dict) else None
-                if items:
-                    rows = items
-                    source = "blockscout"
-                info = self._static.get(f"tokeninfo:{key}")
-                if isinstance(info, dict) and info.get("total_supply"):
-                    total_supply_hint = info["total_supply"]
-            except DataUnavailable as exc:
-                gaps.append(f"holders: blockscout unavailable ({exc})")
-        if rows is None and self.etherscan is not None:
-            try:
-                es_rows = await self.etherscan.token_holder_list(token, limit=20)
-                if es_rows:
-                    rows = [{"address": {"hash": r.get("TokenHolderAddress")},
-                             "value": r.get("TokenHolderQuantity")} for r in es_rows]
-                    source = "etherscan"
-            except DataUnavailable as exc:
-                gaps.append(f"holders: etherscan unavailable ({exc})")
-        result: dict[str, Any] = {"top5": None, "top10": None, "top20": None, "holder_count": None,
-                                   "source": source, "basis": None}
-        if rows:
-            try:
-                balances = sorted((int(r.get("value") or 0) for r in rows), reverse=True)
-                supply = total_supply_hint or sum(balances)
-                if supply > 0:
-                    def pct(n: int) -> float:
-                        return round(sum(balances[:n]) / supply * 100.0, 2)
-                    result["top5"], result["top10"], result["top20"] = pct(5), pct(10), pct(min(20, len(balances)))
-                    result["basis"] = "top_20_rows" if len(balances) <= 20 else "top_page"
-            except (TypeError, ValueError):
-                gaps.append("holders: malformed holder response")
+        result: dict[str, Any] = {
+            "top5": None, "top10": None, "top20": None, "top5pct": None, "top20pct": None, "top30pct": None,
+            "holder_count": None, "sampled": None, "source": None, "basis": None, "deep": deep, "name": None,
+        }
+        info: dict[str, Any] = {}
         if self.blockscout is not None:
             try:
                 info = await self._token_info_cached(token)
-                if info.get("holder_count") is not None:
-                    result["holder_count"] = info["holder_count"]
+                result["holder_count"] = info.get("holder_count")
+                result["name"] = info.get("name")
             except DataUnavailable as exc:
-                gaps.append(f"holder_count: blockscout unavailable ({exc})")
-        elif self.etherscan is not None:
+                gaps.append(f"token info: blockscout unavailable ({exc})")
+        rows: list[dict] | None = None
+        complete = False
+        if self.blockscout is not None:
+            want = self.cfg.holders_max_rows if deep else 50
             try:
-                result["holder_count"] = await self.etherscan.token_holder_count(token)
+                rows, complete = await self.blockscout.token_holders_rows(token, max_rows=want)
+                if rows:
+                    result["source"] = "blockscout"
             except DataUnavailable as exc:
-                gaps.append(f"holder_count: etherscan unavailable ({exc})")
+                gaps.append(f"holders: blockscout unavailable ({exc})")
+        if not rows and self.etherscan is not None:
+            try:
+                es_rows = await self.etherscan.token_holder_list(token, limit=20)
+                if es_rows:
+                    rows = [{"address": {"hash": r.get("TokenHolderAddress")}, "value": r.get("TokenHolderQuantity")}
+                            for r in es_rows]
+                    result["source"] = "etherscan"
+            except DataUnavailable as exc:
+                gaps.append(f"holders: etherscan unavailable ({exc})")
+            if result["holder_count"] is None:
+                try:
+                    result["holder_count"] = await self.etherscan.token_holder_count(token)
+                except DataUnavailable as exc:
+                    gaps.append(f"holder_count: etherscan unavailable ({exc})")
+        supply = info.get("total_supply")
+        if rows and supply and supply > 0:
+            try:
+                ex = self._excluded(token, m)
+                excluded_bal = 0
+                kept: list[int] = []
+                n_excluded = 0
+                for r in rows:
+                    addr = str(((r.get("address") or {}).get("hash") if isinstance(r.get("address"), dict)
+                                else r.get("address")) or "").lower()
+                    bal = int(r.get("value") or 0)
+                    if addr in ex:
+                        excluded_bal += bal
+                        n_excluded += 1
+                    else:
+                        kept.append(bal)
+                kept.sort(reverse=True)
+                circ = supply - excluded_bal
+                if circ > 0 and kept:
+                    def pct(n: int) -> float:
+                        return round(sum(kept[:n]) / circ * 100.0, 2)
+                    result["top5"], result["top10"] = pct(5), pct(10)
+                    result["top20"] = pct(20) if len(kept) >= 20 else None
+                    h = result["holder_count"]
+                    h_eff = max(1, (h - n_excluded)) if h else (len(kept) if complete else None)
+                    if h_eff:
+                        for name, share in (("top5pct", 5.0), ("top20pct", 20.0), ("top30pct", 30.0)):
+                            n_need = max(1, int(-(-h_eff * share // 100)))
+                            if len(kept) >= n_need:
+                                result[name] = pct(n_need)
+                            else:
+                                gaps.append(f"holders: {name.replace('pct', '%')} needs {n_need} holder rows, "
+                                            f"fetched {len(kept)}")
+                    result["sampled"] = len(kept)
+                    result["basis"] = (f"circulating supply, {len(kept)} holder rows"
+                                       + (f", {n_excluded} protocol/burn holders excluded" if n_excluded else ""))
+            except (TypeError, ValueError):
+                gaps.append("holders: malformed holder response")
+        elif rows and not supply:
+            gaps.append("holders: total supply unknown, concentration not computed")
         if result["top10"] is None and not gaps:
             gaps.append("holders: no provider returned a holder list")
-        self._holders.set(key, (result, gaps))
+        self._holders._d[key] = _CacheEntry((result, gaps), time.monotonic())
+        # A deep result lives longer; shallow results expire on the normal holders TTL.
+        if deep:
+            self._holders._d[key].at = time.monotonic() - self._holders.ttl_s + self.cfg.deep_holders_ttl_s
         return result, gaps
 
     async def _token_info_cached(self, token: str) -> dict[str, Any]:
+        """name / symbol / total supply are static (6h); the holder COUNT has its own short TTL because holder
+        growth is measured from it."""
         key = f"tokeninfo:{token.lower()}"
-        cached = self._static.get(key)
-        if cached is not None:
-            return cached
+        static = self._static.get(key)
+        count = self._count_cache.get(key)
+        if static is not None and count is not None:
+            return {**static, "holder_count": count.get("holder_count")}
         info = await self.blockscout.token_info(token)
-        holder_count = info.get("holders_count") or info.get("holders")
-        try:
-            holder_count = int(holder_count) if holder_count is not None else None
-        except (TypeError, ValueError):
-            holder_count = None
-        supply = info.get("total_supply")
-        try:
-            supply = int(supply) if supply is not None else None
-        except (TypeError, ValueError):
-            supply = None
-        out = {"holder_count": holder_count, "total_supply": supply}
-        self._static.set(key, out)
+
+        def _int(v: Any) -> int | None:
+            try:
+                return int(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        static = {"total_supply": _int(info.get("total_supply")),
+                  "name": info.get("name") if isinstance(info.get("name"), str) else None,
+                  "symbol": info.get("symbol") if isinstance(info.get("symbol"), str) else None}
+        self._static.set(key, static)
+        hc = {"holder_count": _int(info.get("holders_count") if info.get("holders_count") is not None else info.get("holders"))}
+        self._count_cache.set(key, hc)
+        return {**static, **hc}
+
+    def _holder_growth(self, token: str, now_ts: float, count: int) -> dict[str, float]:
+        """Percent change in holder count over 1h / 6h / 24h, from OUR OWN history (a window is reported only
+        once the history reaches back about that far)."""
+        hist = self._holder_hist.setdefault(token.lower(), [])
+        if not hist or count != hist[-1][1] or now_ts - hist[-1][0] >= 300:
+            hist.append((now_ts, int(count)))
+        cutoff = now_ts - 26 * 3600
+        while hist and hist[0][0] < cutoff:
+            hist.pop(0)
+        out: dict[str, float] = {}
+        for w, secs in (("1h", 3600), ("6h", 21600), ("24h", 86400)):
+            target = now_ts - secs
+            cands = [(abs(t - target), c) for t, c in hist if secs * 0.85 <= now_ts - t <= secs * 1.5 and c > 0]
+            if cands:
+                ref = min(cands)[1]
+                out[w] = round((count - ref) / ref * 100.0, 2)
         return out
 
     # ------------------------------------------------------------------ creator / verification
@@ -278,30 +358,36 @@ class EnrichmentService:
         checks_run: list[str] = list(m.contract.checks_run)
         token = m.token_address
 
-        # --- holders / concentration ---------------------------------------------------------------------
+        # --- holders / concentration / holder growth ---------------------------------------------------------
         try:
-            h, hgaps = await self._holders_pct(token)
+            h, hgaps = await self._holders_pct(token, m)
             gaps += hgaps
-            if h.get("top5") is not None:
+            if h.get("top10") is not None:
                 m.top5_holder_pct, m.top10_holder_pct, m.top20_holder_pct = h["top5"], h["top10"], h["top20"]
+                m.top_5pct_holders_pct, m.top_20pct_holders_pct = h["top5pct"], h["top20pct"]
+                m.top_30pct_holders_pct = h["top30pct"]
+                m.holders_sampled = h.get("sampled")
                 m.holder_basis = h.get("basis")
                 checks_run.append(f"holders:{h.get('source')}")
             if h.get("holder_count") is not None:
                 m.holder_count = m.holder_count if m.holder_count is not None else h["holder_count"]
+            if h.get("name") and not m.token_name:
+                m.token_name = h["name"]
         except Exception as exc:  # noqa: BLE001
             log.warning("holder enrichment failed for %s: %s", token, exc)
             gaps.append("holders: enrichment failed unexpectedly")
 
-        # --- holder growth (needs a prior snapshot with a holder_count) -----------------------------------
         try:
-            if m.holder_count is not None and previous is not None and previous.holder_count:
-                window_s = max(1.0, (m.timestamp - previous.timestamp).total_seconds())
-                m.holder_growth_pct = round((m.holder_count - previous.holder_count) / previous.holder_count * 100.0, 2)
-                m.holder_growth_window_s = window_s
-            elif m.holder_count is not None and previous is None:
-                gaps.append("holder_growth: no prior snapshot yet (first scan of this token)")
-        except Exception as exc:  # noqa: BLE001 — was the one unguarded section; a bad cached `previous` (e.g.
-            # a naive/aware timestamp mismatch) must not take down the rest of enrichment with it.
+            if m.holder_count:
+                growth = self._holder_growth(token, m.timestamp.timestamp(), m.holder_count)
+                m.holder_growth = growth
+                best = next(((w, growth[w]) for w in ("24h", "6h", "1h") if w in growth), None)
+                if best is not None:
+                    m.holder_growth_pct = best[1]
+                    m.holder_growth_window_s = {"1h": 3600.0, "6h": 21600.0, "24h": 86400.0}[best[0]]
+                else:
+                    gaps.append("holder_growth: history has not reached 1h yet (builds up while the worker runs)")
+        except Exception as exc:  # noqa: BLE001 - a bad value must not take down the rest of enrichment
             log.warning("holder-growth computation failed for %s: %s", token, exc)
             gaps.append("holder_growth: computation failed unexpectedly")
 
@@ -366,27 +452,19 @@ class EnrichmentService:
             except Exception as exc:  # noqa: BLE001
                 log.warning("launchpad detection failed for %s: %s", token, exc)
 
-        # --- sellability (holder transfer probe) ------------------------------------------------------------
-        try:
-            extra = []
-            # Prefer non-zero holders from enrichment/market when creator has sold down.
-            for key in ("top_holders", "holder_addresses"):
-                raw = getattr(m, key, None) or (m.meta or {}).get(key) if hasattr(m, "meta") else None
-                if isinstance(raw, list):
-                    for item in raw[:5]:
-                        if isinstance(item, str):
-                            extra.append(item)
-                        elif isinstance(item, dict) and item.get("address"):
-                            extra.append(str(item["address"]))
-            ok, method, sgaps = await self._sell_check(token, m.creator_address, extra_holders=extra)
-            gaps += sgaps
-            if ok is not None:
-                m.contract.sell_simulation_ok = ok
-                m.contract.sell_check_method = method
-                checks_run.append("sellability:holder_transfer_probe")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("sell check failed for %s: %s", token, exc)
-            gaps.append("sellability: check failed unexpectedly")
+        # --- sellability: judged from OBSERVED sellers (MarketState.sellers_in / has_two_way_trading). The old
+        # holder-transfer probe is off by default (see EnrichmentConfig.sell_probe_enabled).
+        if self.cfg.sell_probe_enabled:
+            try:
+                ok, method, sgaps = await self._sell_check(token, m.creator_address)
+                gaps += sgaps
+                if ok is not None:
+                    m.contract.sell_simulation_ok = ok
+                    m.contract.sell_check_method = method
+                    checks_run.append("sellability:holder_transfer_probe")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("sell check failed for %s: %s", token, exc)
+                gaps.append("sellability: check failed unexpectedly")
 
         # --- MEV heuristic (always labelled, never a substitute for a real simulation) ----------------------
         try:

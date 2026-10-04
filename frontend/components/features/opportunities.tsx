@@ -68,7 +68,8 @@ export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnywa
   return (
     <Card><CardContent className="space-y-2 pt-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Link className="font-semibold underline" href={`/tokens/${encodeURIComponent(o.token_key)}`}>{o.symbol ?? shortAddr(o.token_key)}</Link>
+        <Link className="font-semibold underline" href={`/tokens/${encodeURIComponent(o.token_key)}`}>{o.token_name ?? o.symbol ?? shortAddr(o.token_key)}</Link>
+        {o.token_name && o.symbol ? <span className="text-xs text-muted-foreground">{o.symbol}</span> : null}
         <span className="text-xs text-muted-foreground" title={launchpadTitle}>
           {o.chain}{launchpad ? ` · ${launchpad}${launchpadTitle ? " (detected)" : ""}` : ""}
         </span>

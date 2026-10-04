@@ -53,7 +53,7 @@ def _opp(d: M.Decision) -> dict:
     created = m.get("token_created_at")
     age = (d.created_at - datetime.fromisoformat(created)).total_seconds() if created else None
     scanned = m.get("scanned_at") or m.get("enriched_at") or m.get("timestamp")
-    return {"decision_id": d.id, "token_key": d.token_key, "symbol": d.symbol, "chain": m.get("chain"), "launchpad": m.get("launchpad"),
+    return {"decision_id": d.id, "token_key": d.token_key, "symbol": d.symbol, "token_name": m.get("token_name"), "chain": m.get("chain"), "launchpad": m.get("launchpad"),
             "launchpad_detected": m.get("launchpad_detected"), "launchpad_evidence": m.get("launchpad_evidence"),
             "age_seconds": age, "scanned_at": scanned, "price": m.get("price"), "market_cap": m.get("market_cap"), "liquidity": m.get("liquidity"),
             "volume_5m": m.get("volume_5m"), "unique_buyers_5m": m.get("unique_buyers_5m"), "buy_sell_ratio": _ratio(m),

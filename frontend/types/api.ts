@@ -40,7 +40,7 @@ export interface Portfolio {
 }
 
 export interface Opportunity {
-  decision_id: string; token_key: string; symbol: string | null; chain: string | null; launchpad: string | null;
+  decision_id: string; token_key: string; symbol: string | null; token_name?: string | null; chain: string | null; launchpad: string | null;
   launchpad_detected: string | null; launchpad_evidence: string | null;
   age_seconds: number | null; scanned_at: string | null; price: number | null; market_cap: number | null; liquidity: number | null;
   volume_5m: number | null; unique_buyers_5m: number | null; buy_sell_ratio: number | null; buy_sell_basis: string | null;

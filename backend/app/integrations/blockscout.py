@@ -188,9 +188,29 @@ class BlockscoutClient:
         """name/symbol/decimals/total_supply/holders_count for an ERC-20."""
         return await self._get(f"/tokens/{address}")
 
-    async def token_holders(self, address: str) -> dict[str, Any]:
-        """First page (top holders by balance, ~50 rows)."""
-        return await self._get(f"/tokens/{address}/holders")
+    async def token_holders(self, address: str, page_params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """One page (top holders by balance, ~50 rows). ``page_params`` is the previous page's next_page_params."""
+        return await self._get(f"/tokens/{address}/holders", page_params or None)
+
+    async def token_holders_rows(self, address: str, max_rows: int = 50) -> tuple[list[dict[str, Any]], bool]:
+        """Top holders by balance, following pagination until ``max_rows`` rows (50 per page, 20 credits each on
+        the Pro route). Returns (rows, complete) where ``complete`` is True when the last page was reached, i.e. the
+        rows are ALL holders."""
+        rows: list[dict[str, Any]] = []
+        params: dict[str, Any] | None = None
+        complete = False
+        for _ in range(max(1, (max(1, max_rows) + 49) // 50)):
+            data = await self.token_holders(address, params)
+            items = data.get("items") if isinstance(data, dict) else None
+            rows.extend(i for i in (items or []) if isinstance(i, dict))
+            nxt = data.get("next_page_params") if isinstance(data, dict) else None
+            if not nxt:
+                complete = True
+                break
+            params = nxt if isinstance(nxt, dict) else None
+            if params is None or len(rows) >= max_rows:
+                break
+        return rows[:max_rows] if len(rows) > max_rows else rows, complete
 
     async def aclose(self) -> None:
         await self._client.aclose()

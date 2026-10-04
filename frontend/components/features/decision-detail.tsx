@@ -3,8 +3,9 @@ import { ActionBadge, DataLabel, SimulatedLabel } from "@/components/badges";
 import { ErrorState, Loading } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { HoldersCard, MarketWindowsCard } from "@/components/market-windows";
 import { useApi } from "@/hooks/use-api";
-import { num, price, usd } from "@/lib/format";
+import { compact, num, price, usd } from "@/lib/format";
 import type { DecisionDetail as DD } from "@/types/api";
 
 const SEV = { VETO: "destructive", WARN: "warning", INFO: "default" } as const;
@@ -24,20 +25,28 @@ export function DecisionDetail({ decisionId }: { decisionId: string }) {
   const basis = saw["buy_sell_basis"] as string | undefined;
   const basisNote = basis === "estimated_from_counts" ? "estimated from counts" : basis === "counts" ? "counts only" : null;
   const scannedAt = (saw["scanned_at"] as string | undefined) ?? (saw["enriched_at"] as string | undefined) ?? null;
+  const tokenName = typeof saw["token_name"] === "string" ? (saw["token_name"] as string) : null;
+  const symbol = typeof saw["symbol"] === "string" ? (saw["symbol"] as string) : null;
   const launchpadLabel = (saw["launchpad"] as string | null) ?? (saw["launchpad_detected"] as string | null | undefined) ?? null;
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2"><ActionBadge action={d.decision.final_action} /><h2 className="text-lg font-semibold">{d.decision.token_key}</h2><DataLabel label={d.decision.data_label} /><Badge>{d.decision.mode}</Badge></div>
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-center gap-2"><ActionBadge action={d.decision.final_action} />
+          <h2 className="text-lg font-semibold">{tokenName ?? symbol ?? d.decision.token_key}</h2>
+          {tokenName && symbol ? <span className="text-sm text-muted-foreground">{symbol}</span> : null}
+          <DataLabel label={d.decision.data_label} /><Badge>{d.decision.mode}</Badge></div>
+        <p className="break-all text-xs text-muted-foreground">{d.decision.token_key}</p></div>
       <p className="text-sm">{d.decision.final_reason}</p>
       <Card><CardHeader><CardTitle>1. What the agent saw</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
-        {([["price", "price"], ["liquidity", "num"], ["volume_5m", "num"], ["unique_buyers_5m", "num"],
-           ["top10_holder_pct", "pct"], ["price_change_5m", "pct"], ["holder_growth_pct", "pct"], ["mev_risk_score", "num"]] as const)
+        {([["price", "price"], ["market_cap", "num"], ["liquidity", "num"], ["mev_risk_score", "num"]] as const)
           .map(([k, kind]) => <div key={k}><p className="text-xs text-muted-foreground">{k.replaceAll("_", " ")}</p>
-            <p>{typeof saw[k] === "number" ? (kind === "price" ? price(saw[k] as number) : kind === "pct" ? `${(saw[k] as number).toFixed(1)}%` : num(saw[k] as number)) : "—"}</p></div>)}
+            <p>{typeof saw[k] === "number" ? (kind === "price" ? price(saw[k] as number) : compact(saw[k] as number)) : "—"}</p></div>)}
         <div><p className="text-xs text-muted-foreground">buy/sell ratio</p>
           <p>{buySellRatio == null ? "—" : num(buySellRatio)}{basisNote ? <span className="ml-1 text-xs text-muted-foreground">({basisNote})</span> : null}</p></div>
         <div><p className="text-xs text-muted-foreground">scanned</p><p>{scannedAt ? new Date(scannedAt).toLocaleTimeString() : "—"}</p></div>
         <div><p className="text-xs text-muted-foreground">launchpad</p><p>{launchpadLabel ?? "unknown"}</p></div></CardContent></Card>
+      <MarketWindowsCard market={saw} />
+      <HoldersCard market={saw} />
       <Card><CardHeader><CardTitle>2. Strategy: {d.strategy.id} v{d.strategy.version}</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
         {sig ? (<><p>Score <strong>{num(sig.score, 1)}</strong> (needs {String((d.strategy.config_snapshot as { min_score?: number }).min_score ?? "?")}) · {sig.qualified ? "qualified" : "not qualified"}</p>
           <div className="flex flex-wrap gap-1">{Object.entries(sig.gates).map(([k, ok]) => <Badge key={k} variant={ok ? "success" : "destructive"}>{ok ? "pass" : "fail"}: {k.replaceAll("_", " ")}</Badge>)}</div>
@@ -49,7 +58,7 @@ export function DecisionDetail({ decisionId }: { decisionId: string }) {
       <Card><CardHeader><CardTitle>4. AI</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
         {d.ai.length === 0 ? <p className="text-muted-foreground">Not consulted.</p> : d.ai.map((a, i) => <div key={i}><p>{a.provider || "no provider"} / {a.model || "no model"} · prompt {a.prompt_version || "n/a"} · {a.status}</p>
           {a.error && <p className="text-xs text-muted-foreground">{a.error}</p>}
-          {a.response && <><p><ActionBadge action={a.response.action} /> confidence {num(a.response.confidence)}</p><p>{a.response.reasoning_summary}</p></>}</div>)}</CardContent></Card>
+          {a.response && <><p><ActionBadge action={a.response.action} /> <span title="The model's own estimate (0 to 1) that this action is the right call. It is not a measure of how bullish it is, and 1.0 would mean certainty.">confidence in {a.response.action}: {num(a.response.confidence)}</span></p><p>{a.response.reasoning_summary}</p></>}</div>)}</CardContent></Card>
       <Card><CardHeader><CardTitle>5. Sizing and execution</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
         <p>Approved size: {usd(d.sized_amount_usdc)}</p>
         {d.execution.length === 0 && <p className="text-muted-foreground">No order was placed.</p>}

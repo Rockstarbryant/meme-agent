@@ -7,6 +7,7 @@ from typing import Any
 from app.chains.base import MarketDataProvider
 from app.core.errors import DataUnavailable
 from app.domain.market import ContractInfo, MarketState
+from app.domain.windows import merge_window_sources, windows_from_gecko_pool, windows_from_trades
 from app.integrations.geckoterminal import GeckoTerminalClient
 
 
@@ -43,6 +44,17 @@ def _ts(v: Any) -> datetime | None:
 
 def _attr(item: dict) -> dict:
     return (item or {}).get("attributes") or {}
+
+
+def _included_token_attrs(included: list, token: str) -> dict:
+    """Attributes (name / symbol / address) of ``token`` from the JSON:API ``included`` array."""
+    for item in included or []:
+        a = _attr(item)
+        addr = str(a.get("address") or "").lower()
+        iid = str(item.get("id") or "").lower() if isinstance(item, dict) else ""
+        if addr == token.lower() or iid.endswith(token.lower()):
+            return a
+    return {}
 
 
 def _related_address(item: dict, relation: str, included: list[dict]) -> str:
@@ -245,7 +257,11 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
         # Skip the trades call for pools with no 5m activity: it cannot add information and it is the most
         # expensive call per token on the free tier.
         trades: list = []
-        if (buys_5m or 0) + (sells_5m or 0) > 0 or (volume_5m or 0) > 0:
+        h24 = txs.get("h24") or {}
+        active_24h = ((_count(h24.get("buys")) or 0) + (_count(h24.get("sells")) or 0) > 0
+                      or (_num((attrs.get("volume_usd") or {}).get("h24")) or 0) > 0
+                      or (buys_5m or 0) + (sells_5m or 0) > 0 or (volume_5m or 0) > 0)
+        if active_24h:
             try:
                 trades_payload = await self.client.pool_trades(pool_address)
                 trades = trades_payload.get("data") or []
@@ -265,7 +281,9 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
             if age < 0 or age > 600:
                 continue
             kind = str(a.get("kind") or "").lower()
-            usd = _num(a.get("volume_usd")) or 0.0
+            if not base_is_target:  # buy/sell are relative to the pool's BASE token; flip for a quote-side target
+                kind = {"buy": "sell", "sell": "buy"}.get(kind, kind)
+            usd = _num(a.get("volume_in_usd")) or _num(a.get("volume_usd")) or 0.0  # real field: volume_in_usd
             trader = str(a.get("tx_from_address") or a.get("from_address") or "").lower()
             if age <= 300:
                 if kind == "buy":
@@ -288,9 +306,13 @@ class GeckoTerminalArcMarketData(MarketDataProvider):
             basis = None
 
         recent_high = max(recent_prices, default=price or 0.0) or None
+        windows = merge_window_sources(
+            windows_from_gecko_pool(attrs), windows_from_trades(trades, now, target_is_base=base_is_target))
+        token_attrs = _included_token_attrs(included, token)
+        token_name = token_attrs.get("name") if isinstance(token_attrs.get("name"), str) else None
         state = MarketState(
             chain="arc", token_address=token, timestamp=now,
-            pool_address=pool_address, pool_id=pool_id or None, symbol=symbol,
+            pool_address=pool_address, pool_id=pool_id or None, symbol=symbol, token_name=token_name, windows=windows,
             token_created_at=created, price=price, market_cap=market_cap, liquidity=liquidity,
             price_change_1m=None, price_change_5m=price_change_5m, price_change_15m=price_change_15m,
             recent_high=recent_high, volume_1m=volume_1m, volume_5m=volume_5m, volume_15m=volume_15m,

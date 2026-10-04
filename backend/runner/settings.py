@@ -169,9 +169,14 @@ class RunnerSettings(BaseSettings):
     blockscout_daily_credit_budget: int = Field(90_000, validation_alias=_alias("BLOCKSCOUT_DAILY_CREDIT_BUDGET"))
     etherscan_enabled: bool = Field(True, validation_alias=_alias("ETHERSCAN_ENABLED"))
     etherscan_api_key: SecretStr | None = Field(None, validation_alias=_alias("ETHERSCAN_API_KEY"))
-    enrichment_holders_ttl_s: float = Field(300.0, validation_alias=_alias("ENRICHMENT_HOLDERS_TTL_S"))
+    enrichment_holders_ttl_s: float = Field(1800.0, validation_alias=_alias("ENRICHMENT_HOLDERS_TTL_S"))
+    enrichment_deep_holders_ttl_s: float = Field(3600.0, validation_alias=_alias("ENRICHMENT_DEEP_HOLDERS_TTL_S"))
+    enrichment_holders_max_rows: int = Field(250, validation_alias=_alias("ENRICHMENT_HOLDERS_MAX_ROWS"))
+    enrichment_deep_holders_min_liquidity: float = Field(20_000.0, validation_alias=_alias("ENRICHMENT_DEEP_HOLDERS_MIN_LIQUIDITY"))
+    enrichment_holder_count_ttl_s: float = Field(1800.0, validation_alias=_alias("ENRICHMENT_HOLDER_COUNT_TTL_S"))
+    enrichment_sell_probe_enabled: bool = Field(False, validation_alias=_alias("ENRICHMENT_SELL_PROBE_ENABLED"))
     enrichment_static_ttl_s: float = Field(21_600.0, validation_alias=_alias("ENRICHMENT_STATIC_TTL_S"))
-    enrichment_probe_ttl_s: float = Field(900.0, validation_alias=_alias("ENRICHMENT_PROBE_TTL_S"))
+    enrichment_probe_ttl_s: float = Field(21_600.0, validation_alias=_alias("ENRICHMENT_PROBE_TTL_S"))
 
     # ------------------------------------------------------------------ network
     arc_network: Literal["mainnet", "testnet"] = "mainnet"
@@ -238,6 +243,12 @@ class RunnerSettings(BaseSettings):
     llm_provider: Literal["none", "openrouter", "anthropic", "openai"] = Field("none", validation_alias=_alias("LLM_PROVIDER"))
     ai_model: str = Field("", validation_alias=_alias("AI_MODEL"))
     openrouter_api_key: SecretStr | None = Field(None, validation_alias=_alias("OPENROUTER_API_KEY"))
+    # AI reliability. The free OpenRouter tier is ~20 requests/minute, so calls are paced and retried.
+    ai_timeout_s: float = Field(60.0, validation_alias=_alias("AI_TIMEOUT_S"))
+    ai_max_retries: int = Field(2, validation_alias=_alias("AI_MAX_RETRIES"))
+    ai_min_interval_s: float = Field(3.5, validation_alias=_alias("AI_MIN_INTERVAL_S"))
+    ai_fallback_models: str = Field("", validation_alias=_alias("AI_FALLBACK_MODELS"))  # comma separated model ids
+    ai_cache_ttl_s: float = Field(900.0, validation_alias=_alias("AI_CACHE_TTL_S"))
     anthropic_api_key: SecretStr | None = Field(None, validation_alias=_alias("ANTHROPIC_API_KEY"))
     openai_api_key: SecretStr | None = Field(None, validation_alias=_alias("OPENAI_API_KEY"))
     openai_base_url: str = Field("https://api.openai.com/v1", validation_alias=_alias("OPENAI_BASE_URL"))

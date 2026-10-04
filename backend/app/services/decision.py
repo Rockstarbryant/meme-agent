@@ -59,7 +59,7 @@ def tighten_limits(limits: RiskLimits, policy: WalletPolicy | None) -> RiskLimit
 
 # Gates the AI can never override when upgrading a WATCH-band token to BUY (see DecisionPipeline.evaluate).
 _HARD_GATES = ("price_present", "liquidity_present", "required_data_present", "min_age", "holder_not_extreme",
-               "recent_activity")
+               "recent_activity", "two_way_trading")
 
 
 class DecisionPipeline:

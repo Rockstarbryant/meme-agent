@@ -30,6 +30,34 @@ class ContractInfo(BaseModel):
     checks_run: list[str] = Field(default_factory=list)
 
 
+# Trading windows exposed to strategies, the risk engine, the AI and the UI.
+WINDOWS = ("5m", "15m", "1h", "2h", "4h", "6h", "12h", "24h")
+WINDOW_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200, "24h": 86400}
+# Holder-growth windows (computed from our own holder-count history, so they fill in as the worker runs).
+HOLDER_GROWTH_WINDOWS = ("1h", "6h", "24h")
+
+
+class WindowStats(BaseModel):
+    """Trading activity for one window. None = unknown (never silently zero).
+
+    ``buyers``/``sellers`` are UNIQUE trading addresses; ``buys``/``sells`` are transaction counts.
+    ``basis`` says where the numbers came from:
+      pool_stats        provider-computed rolling window (GeckoTerminal)
+      trades            computed from the pool's trade history (only used when that history fully covers the window)
+      pool_stats+trades pool stats for counts/uniques plus a USD buy/sell split from trade history
+    """
+
+    buyers: int | None = None
+    sellers: int | None = None
+    buys: int | None = None
+    sells: int | None = None
+    volume_usd: float | None = None
+    buy_volume_usd: float | None = None
+    sell_volume_usd: float | None = None
+    price_change_pct: float | None = None
+    basis: str | None = None
+
+
 class MarketState(BaseModel):
     chain: str
     token_address: str
@@ -43,6 +71,7 @@ class MarketState(BaseModel):
     pool_address: str | None = None
     pool_id: str | None = None
     symbol: str | None = None  # display only; NEVER sent to the LLM (untrusted text)
+    token_name: str | None = None  # display only (e.g. "ArcLand"); NEVER sent to the LLM (untrusted text)
     creator_address: str | None = None
     token_created_at: datetime | None = None
 
@@ -69,7 +98,18 @@ class MarketState(BaseModel):
     unique_sellers_5m: int | None = None
     unique_sellers_15m: int | None = None
 
+    # Per-window trading stats keyed by WINDOWS ("5m" ... "24h"). Windows a provider cannot supply stay absent.
+    windows: dict[str, WindowStats] = Field(default_factory=dict)
+
     holder_count: int | None = None
+    # Holder-count growth in percent over HOLDER_GROWTH_WINDOWS; absent until our history spans that window.
+    holder_growth: dict[str, float] = Field(default_factory=dict)
+    # Share of circulating supply held by the top 5% / 20% / 30% of holders (by holder COUNT). None when too few
+    # holder rows could be fetched to compute it exactly (never a partial figure presented as complete).
+    top_5pct_holders_pct: float | None = None
+    top_20pct_holders_pct: float | None = None
+    top_30pct_holders_pct: float | None = None
+    holders_sampled: int | None = None  # how many holder rows the concentration figures were computed from
     holder_growth_pct: float | None = None
     holder_growth_window_s: float | None = None  # span the growth figure was measured over
     top5_holder_pct: float | None = None
@@ -151,6 +191,57 @@ class MarketState(BaseModel):
             return None
         tot = (b or 0) + (sl or 0)
         return None if tot <= 0 else ((b or 0) - (sl or 0)) / tot
+
+    # ------------------------------------------------------------------ windows
+    def win(self, name: str) -> WindowStats | None:
+        return self.windows.get(name)
+
+    def buyers_in(self, name: str) -> int | None:
+        w = self.windows.get(name)
+        if w is not None and w.buyers is not None:
+            return w.buyers
+        return {"5m": self.unique_buyers_5m, "15m": self.unique_buyers_15m}.get(name)
+
+    def sellers_in(self, name: str) -> int | None:
+        w = self.windows.get(name)
+        if w is not None and w.sellers is not None:
+            return w.sellers
+        return {"5m": self.unique_sellers_5m, "15m": self.unique_sellers_15m}.get(name)
+
+    def trades_in(self, name: str) -> int | None:
+        """Total buys+sells in a window (None when neither count is known)."""
+        w = self.windows.get(name)
+        b = w.buys if w is not None else None
+        s = w.sells if w is not None else None
+        if b is None and s is None and name == "5m":
+            b, s = self.buys_5m, self.sells_5m
+        if b is None and s is None:
+            return None
+        return (b or 0) + (s or 0)
+
+    def has_two_way_trading(self) -> bool | None:
+        """True when BOTH buyers and sellers were observed in some window (the evidence a token can be bought AND
+        sold). False when trading was observed but only one side ever appeared. None when no window is known."""
+        saw_any = False
+        for name in ("24h", "12h", "6h", "4h", "2h", "1h", "15m", "5m"):
+            b, sl = self.buyers_in(name), self.sellers_in(name)
+            if b is None and sl is None:
+                bt = self.windows.get(name)
+                if bt is not None and (bt.buys is not None or bt.sells is not None):
+                    b, sl = bt.buys, bt.sells
+            if b is None and sl is None:
+                continue
+            saw_any = True
+            if (b or 0) > 0 and (sl or 0) > 0:
+                return True
+        return False if saw_any else None
+
+    def one_sided_trading(self, min_buys: int = 5) -> bool:
+        """Honeypot-like signature: at least ``min_buys`` buys in 24h and NO sells at all."""
+        w = self.windows.get("24h")
+        if w is None or w.buys is None or w.sells is None:
+            return False
+        return w.buys >= min_buys and w.sells == 0
 
     def derive_buy_sell(self) -> "MarketState":
         """Fill the USD split from counts when a provider only gave totals, and record the basis. Idempotent."""

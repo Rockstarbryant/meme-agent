@@ -482,7 +482,8 @@ class RunnerRuntime:
         strategy_obj, cfg = self._build_strategy(b)
         self.strategy_version = cfg.version
         pipeline = DecisionPipeline(
-            strategy_obj, RiskEngine(), limits, self.approver, AIAnalyzer(self.llm),
+            strategy_obj, RiskEngine(), limits, self.approver,
+            AIAnalyzer(self.llm, cache_ttl_s=float(getattr(self.s, "ai_cache_ttl_s", 0.0) or 0.0)),
             AIMode.ENABLED if self.llm else AIMode.DISABLED,
             entry_window_seconds=getattr(cfg, "entry_window_seconds", 300), wallet_policy=policy,
         )

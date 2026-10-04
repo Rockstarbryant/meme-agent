@@ -101,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("circle-verify"); v.add_argument("--include-estimate", action="store_true")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # httpx logs every request URL at INFO, and Alchemy/other RPC providers embed the API key in that URL.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     if a.cmd == "cloud-worker":
         from runner.cloud_worker import run_cloud_worker
         return asyncio.run(run_cloud_worker())
