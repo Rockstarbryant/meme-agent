@@ -36,7 +36,7 @@ def _hash(s: str) -> str:
 @user_router.post("/pairing-codes", status_code=201)
 async def create_pairing_code(request: Request, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await limit(request, "paircode", 5, 60, extra=user.id)
-    if await control.active_runner(db, user.id):
+    if await control.local_runner(db, user.id):
         raise HTTPException(409, "You already have a paired runner. Revoke it first (one active runner per account).")
     raw = "".join(secrets.choice(_ALPHABET) for _ in range(12))
     await C(request).redis.set(f"pair:{_hash(raw)}", user.id, ex=CODE_TTL_S)
@@ -73,7 +73,7 @@ async def pair(body: PairRequest, request: Request, db: AsyncSession = Depends(g
     if not uid:
         raise HTTPException(400, "invalid or expired pairing code")
     uid = uid.decode() if isinstance(uid, bytes) else uid
-    if await control.active_runner(db, uid):
+    if await control.local_runner(db, uid):
         raise HTTPException(409, "this account already has an active runner")
     token = "rt_" + secrets.token_urlsafe(32)
     r = M.Runner(user_id=uid, name=body.name.strip() or "runner", token_hash=_hash(token), version=body.version)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -270,6 +270,42 @@ async def complete_signing(rid: str, body: SignedIn, user: M.User = Depends(curr
     await repo.audit(db, user.id, user.email, "SIGNING_COMPLETED", request_id=rid, tx_hash=body.tx_hash)
     await db.commit()
     return {"id": r.id, "status": r.status, "note": "Confirmation is verified on-chain by the agent before the portfolio is updated."}
+
+
+@router.get("/ledger")
+async def wallet_ledger(request: Request, limit: int = 100, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """One transaction history for the agent wallet: trades (buys and sells), withdrawals and wallet events, newest first."""
+    limit = max(1, min(int(limit), 300))
+    explorer = (C(request).settings.arc_explorer_url or "").rstrip("/")
+    link = (lambda h: f"{explorer}/tx/{h}" if (explorer and h) else None)
+    orders = (await db.execute(select(M.Order).where(M.Order.user_id == user.id).order_by(M.Order.created_at.desc()).limit(limit))).scalars().all()
+    ids = {o.decision_id for o in orders if o.decision_id}
+    names: dict[str, str | None] = {}
+    if ids:
+        for did, sym in (await db.execute(select(M.Decision.id, M.Decision.symbol).where(M.Decision.id.in_(ids)))).all():
+            names[did] = sym
+    out: list[dict] = []
+    for o in orders:
+        notional = (o.filled_quantity or 0.0) * (o.avg_price or 0.0) if o.side == "SELL" else (o.requested_amount_usdc or 0.0)
+        out.append({"at": o.created_at, "kind": o.side, "title": f"{'Bought' if o.side == 'BUY' else 'Sold'} {names.get(o.decision_id) or o.token_address[:10]}",
+                    "amount_usdc": -notional if o.side == "BUY" else notional, "status": o.status, "mode": o.mode, "simulated": o.simulated,
+                    "tx_hash": o.tx_hash, "explorer_url": link(o.tx_hash), "detail": o.error, "token_address": o.token_address, "fee_usdc": o.fee_usdc})
+    wd = (await db.execute(select(M.RunnerCommand).where(M.RunnerCommand.user_id == user.id, M.RunnerCommand.type == "WITHDRAW_USDC")
+                           .order_by(M.RunnerCommand.created_at.desc()).limit(50))).scalars().all()
+    for c in wd:
+        status = {"PENDING": "PENDING", "DONE": "SUBMITTED", "FAILED": "FAILED"}.get(c.status, c.status)
+        tx = (c.detail or "").rsplit(" ", 1)[-1] if (c.status == "DONE" and "0x" in (c.detail or "")) else None
+        out.append({"at": c.created_at, "kind": "WITHDRAWAL", "title": f"Withdrawal to {str((c.payload or {}).get('to', ''))[:10]}...",
+                    "amount_usdc": -float((c.payload or {}).get("amount_usdc") or 0.0), "status": status, "mode": "LIVE", "simulated": False,
+                    "tx_hash": tx, "explorer_url": link(tx), "detail": c.detail or None})
+    audit = (await db.execute(select(M.AuditLog).where(M.AuditLog.user_id == user.id, M.AuditLog.action.like("WALLET_%")).order_by(M.AuditLog.at.desc()).limit(50))).scalars().all()
+    for a in audit:
+        if a.action == "WALLET_WITHDRAW_REQUESTED":
+            continue   # already shown as the withdrawal itself
+        out.append({"at": a.at, "kind": "EVENT", "title": a.action.removeprefix("WALLET_").replace("_", " ").title(), "amount_usdc": None,
+                    "status": "RECORDED", "mode": None, "simulated": False, "tx_hash": None, "explorer_url": None, "detail": None})
+    out.sort(key=lambda r: r["at"].timestamp() if r["at"].tzinfo else r["at"].replace(tzinfo=timezone.utc).timestamp(), reverse=True)
+    return out[:limit]
 
 
 @router.get("/activity")

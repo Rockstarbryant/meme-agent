@@ -9,6 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RunnerPanel } from "@/components/features/runner-panel";
+import { CloudRunnerPanel, RunnerModeCard } from "@/components/features/runner-mode";
+import { useToast } from "@/components/toast";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -42,7 +44,8 @@ export function EmergencyControl({ status, onDone }: { status: AgentStatus; onDo
 
 export function AgentControl() {
   const { refresh } = useAuth();
-  const status = useApi<AgentStatus>("/agent", { refreshOn: LIVE_EVENTS, intervalMs: 10000 });
+  const { toast } = useToast();
+  const status = useApi<AgentStatus>("/agent", { refreshOn: LIVE_EVENTS, intervalMs: 5000 });
   const wallet = useApi<WalletState>("/wallet");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -52,24 +55,43 @@ export function AgentControl() {
   if (!status.data) return status.error ? <ErrorState error={status.error} onRetry={() => void status.reload()} /> : null;
   const s = status.data;
 
+  const ACTION_TOAST: Record<string, { title: string; kind: "success" | "info" }> = {
+    "/agent/start": { title: "Agent started: it is running", kind: "success" },
+    "/agent/pause": { title: "Agent paused: no new entries", kind: "info" },
+    "/agent/stop": { title: "Agent stopped: no new entries", kind: "info" },
+  };
   async function act(path: string, body?: unknown) {
     setBusy(path); setError(null);
-    try { await api(path, { method: "POST", body }); await status.reload(); await refresh(); return true; }
-    catch (e) { setError(toApiError(e)); return false; } finally { setBusy(null); }
+    try {
+      await api(path, { method: "POST", body });
+      const t = ACTION_TOAST[path];
+      // Same id as the state-change watcher in the shell, so one change never produces two toasts.
+      if (t) toast({ id: "agent-state", kind: t.kind, title: t.title, description: "Open positions stay protected." });
+      await status.reload(); await refresh(); return true;
+    } catch (e) {
+      const err = toApiError(e);
+      setError(err);
+      if (ACTION_TOAST[path]) toast({ kind: "error", title: "Could not change the agent state", description: err.message });
+      return false;
+    } finally { setBusy(null); }
   }
   async function switchMode(target: "LIVE" | "PAPER") {
     const ok = await act("/agent/mode", { mode: target, confirmation: target === "LIVE" ? s.live_confirmation_phrase : "" });
     if (ok) setLiveOpen(false);
   }
   const running = s.desired_state === "RUNNING";
+  const cloud = s.execution_mode === "cloud_managed";
+  const aiChain = (s.ai.chain ?? []).length > 1 ? s.ai.chain!.map((c) => c.provider).join(" → ") : null;
   const pol = wallet.data?.policy;
 
   return (
     <div className="space-y-4">
+      <RunnerModeCard status={s} onChanged={async () => { await status.reload(); await refresh(); }} />
       <Card>
         <CardHeader><CardTitle>Agent</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap items-center gap-2"><ModeBadge mode={s.mode} /><Badge variant={s.state === "RUNNING" ? "success" : s.state === "OFFLINE" || s.state === "LIVE_BLOCKED" ? "warning" : "default"}>{s.state.replace("_", " ")}</Badge>
+            {s.applying && <Badge variant="default">applying…</Badge>}
             {s.emergency_stop && <Badge variant="solidDestructive">EMERGENCY STOP</Badge>}</div>
           <div className="flex flex-wrap gap-2">
             <Button disabled={running || s.emergency_stop || busy !== null} onClick={() => void act("/agent/start")}>Start</Button>
@@ -77,16 +99,19 @@ export function AgentControl() {
             <Button variant="outline" disabled={s.desired_state === "STOPPED" || busy !== null} onClick={() => void act("/agent/stop")}>Stop</Button>
             <EmergencyControl status={s} onDone={() => status.reload()} />
           </div>
-          <p className="text-xs text-muted-foreground">Requested: <strong>{s.desired_state}</strong> · Reported by your runner: <strong>{s.state.replace("_", " ")}</strong>{s.applied_config_version < s.config_version ? " · waiting for the runner to apply your latest change" : ""}. Commands are delivered to your Local Runner within seconds.</p>
-          {s.state === "OFFLINE" && <Alert variant="warning">Your Local Runner is offline, so nothing is trading or being monitored. Start it with <code>python -m runner run</code>.</Alert>}
+          <p className="text-xs text-muted-foreground">The agent keeps the state you asked for ({s.desired_state.toLowerCase()}) until you pause or stop it.{s.applying ? " Your runner is applying your latest change; this takes a few seconds." : ""}</p>
+          {s.state === "OFFLINE" && (cloud
+            ? <Alert variant="warning">The cloud runner has not reported for a minute, so nothing is being monitored right now. It normally recovers by itself; your request ({s.desired_state.toLowerCase()}) is kept and applied as soon as it is back.</Alert>
+            : <Alert variant="warning">Your Local Runner is offline, so nothing is trading or being monitored. Start it with <code>python -m runner run</code>, or choose the Cloud runner above.</Alert>)}
           {s.state === "LIVE_BLOCKED" && <Alert variant="warning">LIVE was requested but your runner refused to trade LIVE (it never falls back to PAPER). See the reasons below.</Alert>}
-          <p className="text-xs text-muted-foreground">Pause and Stop halt new entries only. Open positions stay protected by stop-loss, take-profit and trailing logic on your runner.</p>
+          <p className="text-xs text-muted-foreground">Pause and Stop halt new entries only. Open positions stay protected by stop-loss, take-profit and trailing logic on your {cloud ? "cloud" : "local"} runner.</p>
           {error && !liveOpen && <ErrorState error={error} />}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm md:grid-cols-3">
-            <div><dt className="text-xs text-muted-foreground">Strategy</dt><dd>{s.strategy.id} v{s.strategy.version}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Strategy in use</dt><dd>{s.strategy.id.replaceAll("_", " ")}{s.strategy.version ? ` v${s.strategy.version}` : ""}
+              {(s.strategy.enabled ?? []).length > 1 && <span className="block text-xs text-muted-foreground">enabled: {s.strategy.enabled!.join(", ")}</span>}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Data source</dt><dd>{s.data_source}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Data status</dt><dd>{s.data_status}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">AI</dt><dd>{s.ai.mode}{s.ai.provider ? ` (${s.ai.provider} / ${s.ai.model})` : ""}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">AI</dt><dd>{s.ai.mode}{s.ai.provider ? ` (${s.ai.provider} / ${s.ai.model})` : ""}{aiChain && <span className="block text-xs text-muted-foreground">fallback order: {aiChain}</span>}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Last activity</dt><dd>{ago(s.last_activity_at)}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Open positions</dt><dd>{s.open_positions}</dd></div>
           </dl>
@@ -99,7 +124,7 @@ export function AgentControl() {
         </CardContent>
       </Card>
 
-      <RunnerPanel />
+      {cloud ? <CloudRunnerPanel status={s} /> : <RunnerPanel />}
 
       <Card>
         <CardHeader><CardTitle>Wallet and policy</CardTitle></CardHeader>

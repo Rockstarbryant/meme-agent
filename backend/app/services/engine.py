@@ -52,6 +52,7 @@ class TradingEngine:
         now = now or utcnow()
         rec = await self.pipeline.evaluate_manual_override(m, self.portfolio, self.controls, self.mode, now,
                                                             amount_override)
+        self.last_manual_reason = rec.final_reason   # lets the runner tell the user WHY a forced buy was refused
         _, res = await self._finalize(rec)
         return res
 

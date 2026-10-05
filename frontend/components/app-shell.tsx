@@ -3,6 +3,7 @@ import { useEffect, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Activity, Bot, Briefcase, LayoutDashboard, LogOut, Radar, Settings, SlidersHorizontal, Wallet, Search } from "lucide-react";
+import { NotificationWatcher } from "@/components/notification-watcher";
 import { StatusBanner } from "@/components/status-banner";
 import { Button } from "@/components/ui/button";
 import { Loading } from "@/components/states";
@@ -32,6 +33,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const active = (href: string) => (href === "/" ? path === "/" : path.startsWith(href));
   return (
     <div className="min-h-screen md:flex">
+      <NotificationWatcher />
       <aside className="hidden w-52 shrink-0 border-r p-3 md:block">
         <p className="mb-4 px-2 text-sm font-bold">Arc Agent</p>
         <nav aria-label="Main" className="space-y-1">

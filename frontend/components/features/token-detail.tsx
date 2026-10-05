@@ -4,6 +4,7 @@ import { ActionBadge, DataLabel } from "@/components/badges";
 import { ErrorState, Loading, Stat } from "@/components/states";
 import { PriceChart } from "@/components/price-chart";
 import { HoldersCard, MarketWindowsCard } from "@/components/market-windows";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useApi } from "@/hooks/use-api";
@@ -41,6 +42,7 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
         <Stat label="Price" value={price(n(m, "price"))} /><Stat label="Market cap" value={compact(n(m, "market_cap"))} /><Stat label="Liquidity" value={compact(n(m, "liquidity"))} />
         <Stat label="Volume 5m / 1h / 24h" value={`${compact(n(m, "volume_5m"))} / ${compact(winVol(m, "1h"))} / ${compact(winVol(m, "24h"))}`} /></div>
         <PriceChart points={t.price_series} /></CardContent></Card>
+      {t.evaluated === false && <Alert>{t.note ?? "This token has not been evaluated by your agent yet."}</Alert>}
       <MarketWindowsCard market={m} />
       <HoldersCard market={m} />
       <div className="grid gap-4 md:grid-cols-2">

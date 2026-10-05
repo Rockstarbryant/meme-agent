@@ -50,8 +50,13 @@ async def start(request: Request, user: M.User = Depends(current_user), db: Asyn
     cfg = await control.get_config(db, user.id)
     if cfg.emergency_stop:
         raise HTTPException(409, "emergency stop is active; disable it explicitly first")
-    if await control.active_runner(db, user.id) is None:
-        raise HTTPException(409, "Pair a Local Runner first: trading runs on your own machine, not on this server.")
+    if getattr(cfg, "execution_mode", "self_hosted") == "cloud_managed":
+        # The shared cloud worker creates the account's runner row on its first heartbeat, so there is nothing to
+        # pair; PAPER needs no wallet. LIVE readiness is enforced separately (control.live_blockers).
+        if not getattr(C(request).settings, "cloud_managed_enabled", False):
+            raise HTTPException(409, "The cloud runner is disabled on this server. Choose the Local runner instead.")
+    elif await control.active_runner(db, user.id, cfg) is None:
+        raise HTTPException(409, "Pair a Local Runner first (or choose the Cloud runner): this account has no runner to execute the agent.")
     await control.bump(db, user.id, desired_state="RUNNING")
     await repo.audit(db, user.id, user.email, "AGENT_START", mode=user.mode)
     await db.commit()
@@ -80,6 +85,46 @@ async def emergency(body: EmergencyIn, request: Request, user: M.User = Depends(
     await repo.audit(db, user.id, user.email, "EMERGENCY_STOP", enabled=body.enabled)
     await db.commit()
     return await _status(request, db, user)
+
+
+class ExecutionModeIn(BaseModel):
+    mode: str   # "cloud_managed" | "self_hosted"
+
+
+@router.post("/execution-mode")
+async def set_execution_mode(body: ExecutionModeIn, request: Request, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Explicit choice between the managed Cloud runner and the user's own Local runner."""
+    if body.mode not in ("cloud_managed", "self_hosted"):
+        raise HTTPException(422, "mode must be 'cloud_managed' or 'self_hosted'")
+    cfg = await control.get_config(db, user.id)
+    current = getattr(cfg, "execution_mode", "self_hosted")
+    if body.mode == current:
+        return await _status(request, db, user)
+    s = C(request).settings
+    if body.mode == "cloud_managed":
+        if not getattr(s, "cloud_managed_enabled", False):
+            raise HTTPException(403, "The cloud runner is not enabled on this server")
+        if user.mode == "LIVE":
+            w = await control.load_wallet_row(db, user.id)
+            if w is None or w.provider != "privy" or not w.external_id:
+                raise HTTPException(409, "LIVE on the cloud runner needs a Privy cloud wallet. Create it on the Wallet page first, or switch to PAPER.")
+    # Each runner keeps its own portfolio, so switching with open positions would strand them on the old runner.
+    open_n = (await db.execute(select(func.count()).select_from(M.Position).where(M.Position.user_id == user.id, M.Position.status == "OPEN"))).scalar_one()
+    if open_n:
+        raise HTTPException(409, f"Close your {open_n} open position(s) before switching runners: each runner manages its own positions.")
+    await control.bump(db, user.id, execution_mode=body.mode, desired_state="STOPPED")  # a runner change needs an explicit START
+    await repo.audit(db, user.id, user.email, "EXECUTION_MODE_SWITCH", before=current, after=body.mode)
+    await db.commit()
+    return await _status(request, db, user)
+
+
+@router.get("/commands/{command_id}")
+async def command_status(command_id: str, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Progress of a queued runner command (force-buy, AI retry, close, withdraw): PENDING until the runner acks."""
+    c = await db.get(M.RunnerCommand, command_id)
+    if c is None or c.user_id != user.id:
+        raise HTTPException(404, "not found")
+    return {"id": c.id, "type": c.type, "status": c.status, "detail": c.detail, "created_at": c.created_at, "updated_at": c.updated_at}
 
 
 @router.post("/mode")

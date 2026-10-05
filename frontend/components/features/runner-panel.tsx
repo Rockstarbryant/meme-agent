@@ -24,7 +24,7 @@ export function RunnerPanel() {
 
   if (res.loading && !res.data) return <Loading />;
   if (!res.data) return res.error ? <ErrorState error={res.error} onRetry={() => void res.reload()} /> : null;
-  const runner = res.data.find((r) => !r.revoked_at) ?? null;
+  const runner = res.data.find((r) => !r.revoked_at && !r.is_cloud) ?? null;   // the shared cloud worker's row is not a local runner
 
   async function createCode() {
     setBusy(true); setError(null);

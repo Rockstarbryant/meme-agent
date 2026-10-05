@@ -3,12 +3,13 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { ActionBadge, DataLabel } from "@/components/badges";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { Alert } from "@/components/ui/alert";
+import { useToast } from "@/components/toast";
 import { Empty, ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
+import { interpretForceBuy, waitForCommand } from "@/lib/commands";
 import { ago, compact, duration, num, plainPct, price, shortAddr } from "@/lib/format";
 import type { Action, Opportunity } from "@/types/api";
 
@@ -105,7 +106,7 @@ export function Opportunities() {
   const [target, setTarget] = useState<Opportunity | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const { toast, suppressAuto } = useToast();
   const rows = useMemo(() => {
     if (!res.data) return [];
     const filtered = res.data.filter((o) => (filter === "ALL" || o.final_action === filter) && matchesCategory(o, category));
@@ -117,13 +118,27 @@ export function Opportunities() {
   if (!res.data) return res.error ? <ErrorState error={res.error} onRetry={() => void res.reload()} /> : null;
   async function confirmBuy() {
     if (!target) return;
+    const name = target.token_name ?? target.symbol ?? shortAddr(target.token_key);
     setBusy(true); setError(null);
+    let queued: { command_id: string } | null = null;
     try {
-      const res2 = await api<{ note: string }>(`/decisions/${target.decision_id}/buy-anyway`, { method: "POST", body: {} });
-      setTarget(null);
-      setNotice(res2.note);
-      await res.reload();
-    } catch (e) { setError(toApiError(e)); } finally { setBusy(false); }
+      queued = await api<{ command_id: string; note: string }>(`/decisions/${target.decision_id}/buy-anyway`, { method: "POST", body: {} });
+    } catch (e) { setError(toApiError(e)); setBusy(false); return; }
+    setTarget(null); setBusy(false);
+    // Step 1: order placed, waiting for the risk check. Step 2 (replaces step 1): position opened, or why it was refused.
+    const id = `force-buy-${queued.command_id}`;
+    suppressAuto(120_000);   // this flow reports its own result; do not also toast the matching live events
+    toast({ id, kind: "loading", title: `Order placed for ${name}`, description: "Waiting for the risk check…" });
+    const outcome = interpretForceBuy(await waitForCommand(queued.command_id));
+    switch (outcome.kind) {
+      case "opened": toast({ id, kind: "success", title: `Position opened: ${name}`, description: outcome.detail, href: "/positions", linkLabel: "View positions" }); break;
+      case "pending": toast({ id, kind: "info", title: `Order submitted: ${name}`, description: outcome.detail, href: "/positions", linkLabel: "Positions" }); break;
+      case "veto": toast({ id, kind: "error", title: `Risk veto rejected the order: ${name}`, description: `${outcome.reason}. No order was placed.`, href: `/decisions/${target.decision_id}`, linkLabel: "See why" }); break;
+      case "failed": toast({ id, kind: "error", title: `Order not placed: ${name}`, description: outcome.detail }); break;
+      default: toast({ id, kind: "warning", title: "Still waiting for your runner", description: "The runner has not answered yet. Check the Agent page; the result will also appear in Activity.", href: "/agent", linkLabel: "Agent" });
+    }
+    suppressAuto(4_000);
+    void res.reload();
   }
   return (
     <div className="space-y-3">
@@ -137,11 +152,10 @@ export function Opportunities() {
         ))}
       </div>
       {error && <ErrorState error={error} />}
-      {notice && <Alert variant="success">{notice}</Alert>}
       {rows.length === 0 ? <Empty>No opportunities match. Start the agent from the Agent page; tokens appear here as they are evaluated.</Empty> : rows.map((o) => <OpportunityCard key={o.decision_id} o={o} onBuyAnyway={setTarget} />)}
       <ConfirmDialog open={target !== null} onOpenChange={(op) => { if (!op) setTarget(null); }} busy={busy} destructive
         title="Buy this token anyway?"
-        description="Your strategy/AI did not qualify this token — this skips that opinion, but your Local Runner still re-checks live risk limits (liquidity, contract safety, exposure) right before buying, using fresh market data. It can still refuse the trade."
+        description="Your strategy/AI did not qualify this token — this skips that opinion, but your Agent still re-checks live risk limits (liquidity, contract safety, exposure) right before buying, using fresh market data. It can still refuse the trade."
         confirmLabel="Buy anyway" onConfirm={confirmBuy} />
     </div>
   );

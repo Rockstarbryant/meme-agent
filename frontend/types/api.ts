@@ -17,17 +17,25 @@ export interface LiveStatus {
   chain_verified: boolean; locally_enabled: boolean;
 }
 export interface RunnerInfo {
-  id: string; name: string; online: boolean; last_seen_at: string | null; version: string; state: string | null;
+  id: string; name: string; is_cloud?: boolean; online: boolean; last_seen_at: string | null; version: string; state: string | null;
   applied_config_version: number; desired_config_version: number; wallet_provider: string | null; live: LiveStatus | null;
   local_ceilings: Record<string, unknown>; entries_suspended_reason: string | null; last_error: string | null;
   created_at?: string; revoked_at?: string | null;
 }
 
 export interface LastDecision { id: string; token: string; symbol: string | null; action: Action; reason: string; at: string }
+export type ExecutionMode = "cloud_managed" | "self_hosted";
+export interface RunnerModes {
+  cloud: { available: boolean; online: boolean; has_wallet: boolean; wallet_address: string | null; last_seen_at: string | null };
+  local: { paired: boolean; online: boolean; last_seen_at: string | null };
+}
 export interface AgentStatus {
-  state: AgentState; desired_state: "RUNNING" | "PAUSED" | "STOPPED"; mode: Mode; mode_label: string; data_source: string; data_status: string;
-  emergency_stop: boolean; global_pause: boolean; ai: { mode: string; provider: string | null; model: string | null };
-  strategy: { id: string; version: number }; open_positions: number; last_activity_at: string | null;
+  state: AgentState; reported_state?: string | null; applying?: boolean;
+  desired_state: "RUNNING" | "PAUSED" | "STOPPED"; mode: Mode; mode_label: string; data_source: string; data_status: string;
+  emergency_stop: boolean; global_pause: boolean;
+  ai: { mode: string; provider: string | null; model: string | null; chain?: { provider: string; model: string }[] };
+  strategy: { id: string; version: number; enabled?: string[] }; open_positions: number; last_activity_at: string | null;
+  execution_mode?: ExecutionMode; runners?: RunnerModes;
   last_decision: LastDecision | null; limits: RiskLimits; live_blockers: string[]; live_confirmation_phrase: string;
   config_version: number; applied_config_version: number; runner: RunnerInfo | null;
 }
@@ -59,6 +67,8 @@ export interface Position {
   peak_price: number; cost_basis_usdc: number; realized_pnl_usdc: number; unrealized_pnl_usdc: number;
   gain_pct: number | null; tiers_hit: number[]; strategy_id: string; strategy_version: number; decision_id: string;
   opened_at: string; closed_at: string | null; exit_reason: string | null;
+  exit_price?: number | null; proceeds_usdc?: number | null; exit_count?: number; invested_usdc?: number; held_seconds?: number | null;
+  return_pct?: number | null; drawdown_from_peak_pct?: number | null;
 }
 
 export interface Order {
@@ -130,7 +140,7 @@ export interface DecisionDetail {
 export interface TokenDetail {
   token_key: string; latest_market: Record<string, unknown>; data_label: string;
   price_series: { at: string; price: number | null; liquidity: number | null }[];
-  latest_decision: Opportunity | null; decision_history: Opportunity[];
+  latest_decision: Opportunity | null; decision_history: Opportunity[]; evaluated?: boolean; note?: string;
 }
 
 export interface PairingCode { code: string; expires_in: number; command: string }

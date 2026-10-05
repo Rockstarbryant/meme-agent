@@ -67,9 +67,36 @@ async def bump(db: AsyncSession, user_id: str, **fields) -> M.AgentConfig:
     return cfg
 
 
-async def active_runner(db: AsyncSession, user_id: str) -> M.Runner | None:
-    return (await db.execute(select(M.Runner).where(M.Runner.user_id == user_id, M.Runner.revoked_at.is_(None))
-                             .order_by(M.Runner.created_at.desc()))).scalars().first()
+CLOUD_RUNNER_NAME = "platform-shared-worker"
+
+
+def is_cloud_runner(r: M.Runner | None) -> bool:
+    return r is not None and r.name == CLOUD_RUNNER_NAME
+
+
+async def _runner_row(db: AsyncSession, user_id: str, *, cloud: bool) -> M.Runner | None:
+    q = select(M.Runner).where(M.Runner.user_id == user_id, M.Runner.revoked_at.is_(None))
+    q = q.where(M.Runner.name == CLOUD_RUNNER_NAME) if cloud else q.where(M.Runner.name != CLOUD_RUNNER_NAME)
+    return (await db.execute(q.order_by(M.Runner.created_at.desc()))).scalars().first()
+
+
+async def local_runner(db: AsyncSession, user_id: str) -> M.Runner | None:
+    """The user's own paired runner (never the shared cloud worker's row)."""
+    return await _runner_row(db, user_id, cloud=False)
+
+
+async def cloud_runner(db: AsyncSession, user_id: str) -> M.Runner | None:
+    return await _runner_row(db, user_id, cloud=True)
+
+
+async def active_runner(db: AsyncSession, user_id: str, cfg: M.AgentConfig | None = None) -> M.Runner | None:
+    """The runner that serves the account's CURRENT execution mode.
+
+    This used to return the newest runner row of any kind. An account that has both a paired Local Runner and the
+    shared cloud worker's row then showed whichever was created last, so a healthy cloud worker was reported as
+    "runner offline" (or the reverse)."""
+    cfg = cfg or await get_config(db, user_id)
+    return await _runner_row(db, user_id, cloud=getattr(cfg, "execution_mode", "self_hosted") == "cloud_managed")
 
 
 def is_online(r: M.Runner | None, now: datetime | None = None) -> bool:
@@ -215,32 +242,71 @@ def runner_info(r: M.Runner | None, cfg: M.AgentConfig) -> dict | None:
     if r is None:
         return None
     st = r.status or {}
-    return {"id": r.id, "name": r.name, "online": is_online(r), "last_seen_at": r.last_seen_at, "version": r.version,
+    return {"id": r.id, "name": r.name, "is_cloud": is_cloud_runner(r), "online": is_online(r), "last_seen_at": r.last_seen_at, "version": r.version,
             "applied_config_version": st.get("applied_config_version", 0), "desired_config_version": cfg.version,
             "wallet_provider": st.get("wallet_provider"), "live": st.get("live"), "local_ceilings": st.get("local_ceilings", {}),
             "entries_suspended_reason": st.get("entries_suspended_reason"), "last_error": st.get("last_error"), "state": st.get("state")}
 
 
+SETTLED_STATES = ("RUNNING", "PAUSED", "STOPPED")
+
+
+def displayed_state(reported: str | None, desired: str, online: bool, emergency: bool = False) -> tuple[str, bool]:
+    """(state shown to the user, applying).
+
+    The user's command (desired state) is what the agent is SUPPOSED to be doing, and a healthy runner applies it
+    within seconds. Showing whatever the last heartbeat happened to say made the badge flip PAUSED <-> RUNNING
+    around every command and around every slow cycle. So while the runner is online, RUNNING / PAUSED / STOPPED
+    follow the desired state, and ``applying`` tells the UI that the runner has not confirmed it yet. Anything else
+    the runner reports (LIVE_BLOCKED, STARTING) is shown as reported; an offline runner is OFFLINE."""
+    if not online:
+        return "OFFLINE", False
+    rep = reported or "STARTING"
+    if rep in SETTLED_STATES:
+        shown = "PAUSED" if emergency and desired == "RUNNING" else desired
+        return shown, rep != shown
+    return rep, False
+
+
 async def agent_status(db: AsyncSession, settings: Settings, user: M.User) -> dict:
-    cfg, r = await get_config(db, user.id), await active_runner(db, user.id)
+    cfg = await get_config(db, user.id)
+    r = await active_runner(db, user.id, cfg)
     st = (r.status or {}) if r else {}
     online = is_online(r)
     last = (await db.execute(select(M.Decision).where(M.Decision.user_id == user.id).order_by(M.Decision.created_at.desc()).limit(1))).scalars().first()
     open_n = (await db.execute(select(func.count()).select_from(M.Position).where(M.Position.user_id == user.id, M.Position.status == "OPEN", M.Position.mode == user.mode))).scalar_one()
     limits = tighten_limits(await load_limits(db, settings, user.id), await load_policy(db, user.id))
     sv = st.get("applied_config_version")
+    enabled = list(cfg.strategies_enabled or ["traction_momentum"])
+    # The strategy actually in use: what the runner last reported, else the one build_bundle() will hand it.
+    in_use = st.get("strategy_id") or ("liquidity_trend" if "liquidity_trend" in enabled else (enabled[0] if enabled else "traction_momentum"))
+    reported = st.get("state")
+    shown, applying = displayed_state(reported, cfg.desired_state, online, cfg.emergency_stop)
+    exec_mode = getattr(cfg, "execution_mode", "self_hosted")
+    cloud_row = await cloud_runner(db, user.id)
+    local_row = await local_runner(db, user.id)
+    wallet = await load_wallet_row(db, user.id)
     return {
-        "state": (st.get("state") or "STARTING") if online else "OFFLINE", "desired_state": cfg.desired_state,
+        "state": shown, "reported_state": reported if online else None, "applying": applying,
+        "desired_state": cfg.desired_state,
         "mode": user.mode, "mode_label": "LIVE MODE" if user.mode == "LIVE" else "PAPER MODE",
         "data_source": st.get("data_source") or "no runner connected", "data_status": st.get("data_status") or "",
         "emergency_stop": cfg.emergency_stop, "global_pause": cfg.desired_state != "RUNNING",
         "ai": st.get("ai") or {"mode": "UNKNOWN", "provider": None, "model": None},
-        "strategy": {"id": "traction_momentum", "version": (st.get("strategy_version") or 0)},
+        "strategy": {"id": in_use, "version": (st.get("strategy_version") or 0), "enabled": enabled},
         "open_positions": open_n, "last_activity_at": st.get("last_activity_at"),
         "last_decision": None if last is None else {"id": last.id, "token": last.token_key, "symbol": last.symbol, "action": last.final_action,
                                                    "reason": last.final_reason, "at": last.created_at.isoformat()},
         "limits": limits.model_dump(mode="json"), "live_blockers": await live_blockers(db, settings, user.id),
         "live_confirmation_phrase": LIVE_CONFIRMATION_PHRASE, "config_version": cfg.version, "applied_config_version": sv or 0,
         "runner": runner_info(r, cfg),
-        "execution_mode": getattr(cfg, "execution_mode", "self_hosted"),
+        "execution_mode": exec_mode,
+        "runners": {
+            "cloud": {"available": bool(getattr(settings, "cloud_managed_enabled", False)), "online": is_online(cloud_row),
+                      "has_wallet": bool(wallet is not None and wallet.provider == "privy" and wallet.external_id),
+                      "wallet_address": wallet.address if (wallet is not None and wallet.provider == "privy" and wallet.external_id) else None,
+                      "last_seen_at": cloud_row.last_seen_at if cloud_row else None},
+            "local": {"paired": local_row is not None, "online": is_online(local_row),
+                      "last_seen_at": local_row.last_seen_at if local_row else None},
+        },
     }

@@ -146,6 +146,18 @@ class CloudWorker:
         # and never reached the rest.
         self._eval_at: dict[str, dict[str, Any]] = {}
         self._pipeline: GlobalPipeline | None = None
+        # Live view of every tenant, refreshed by the heartbeat loop independently of trade cycles.
+        self._tenants: dict[str, dict] = {}
+        self._live: dict[str, RunnerRuntime] = {}          # runtimes that are mid-cycle
+        self._busy: set[str] = set()
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._next_cycle: dict[str, float] = {}
+        self._wake: set[str] = set()                       # a command arrived for an idle tenant: run a cycle now
+        self._applied: dict[str, tuple] = {}               # (desired_state, emergency_stop, config_version) last applied
+        self._ai_info: dict = {}
+        self._lease_at: dict[str, float] = {}
+        self._sem: asyncio.Semaphore | None = None
+        self.cycle_interval_s = 30.0
 
     def _wallet_for(self, privy_wallet_id: str, address: str) -> PrivyWalletProvider:
         if self._privy is None:
@@ -155,12 +167,14 @@ class CloudWorker:
                                    allow_execute=self.s.privy_allow_execute, allow_withdraw=self.s.privy_allow_withdraw)
 
     def _tenant_settings(self, tenant: dict) -> RunnerSettings:
-        return self.s.model_copy(update={
-            "state_dir": self.state_dir / tenant["user_id"],
-            "wallet_provider": "privy",
-            "privy_wallet_id": tenant["privy_wallet_id"],
-            "privy_wallet_address": tenant["wallet_address"],
-        })
+        has_wallet = bool(tenant.get("privy_wallet_id") and tenant.get("wallet_address"))
+        update: dict[str, Any] = {"state_dir": self.state_dir / tenant["user_id"]}
+        if has_wallet:
+            update.update({"wallet_provider": "privy", "privy_wallet_id": tenant["privy_wallet_id"],
+                           "privy_wallet_address": tenant["wallet_address"]})
+        else:
+            update.update({"wallet_provider": "none"})   # PAPER account without a wallet
+        return self.s.model_copy(update=update)
 
     async def _restore_state(self, rt: RunnerRuntime, user_id: str, mode: TradingMode) -> None:
         remote = await self.client.get_state(user_id, mode.value)
@@ -211,7 +225,8 @@ class CloudWorker:
         try:
             bundle = await self.client.config(user_id)
             s = self._tenant_settings(tenant)
-            wallet = self._wallet_for(tenant["privy_wallet_id"], tenant["wallet_address"])
+            wallet = (self._wallet_for(tenant["privy_wallet_id"], tenant["wallet_address"])
+                      if tenant.get("privy_wallet_id") and tenant.get("wallet_address") else None)
             rt = RunnerRuntime(s, CloudControlPlaneClient(self.client, user_id), LocalStore(s.state_dir / "runtime.sqlite"), wallet=wallet)
             # Fresh ephemeral runtime has no heartbeat history; seed contact so
             # recompute() does not treat this cycle as "control plane offline".
@@ -219,6 +234,18 @@ class CloudWorker:
             await self._restore_state(rt, user_id, bundle.mode)
             await rt.apply_bundle(bundle)
             rt.recompute()
+            self._applied[user_id] = (bundle.desired_state, bool(bundle.emergency_stop), bundle.version)
+            # The tenant list is newer than the bundle we just fetched when the user pressed something in between.
+            latest = self._tenants.get(user_id) or tenant
+            rt.apply_live_state(str(latest.get("desired_state") or bundle.desired_state), bool(latest.get("emergency_stop")))
+            self._live[user_id] = rt   # from now on the heartbeat loop reports THIS runtime and applies live changes
+
+            if rt.engine is not None and rt.controls.global_pause and rt.portfolio is not None and rt.portfolio.open_count():
+                # Pause / Stop halt NEW entries only: open positions must keep their stop-loss / take-profit
+                # protection. (This branch used to return before monitoring, so paused accounts were unprotected.)
+                with contextlib.suppress(Exception):
+                    await rt.drain_commands()
+                    await rt.monitor_once()
 
             if rt.engine is None or rt.controls.global_pause or rt.state == "LIVE_BLOCKED":
                 await rt.heartbeat_once()
@@ -242,9 +269,10 @@ class CloudWorker:
             # Global discovery fills the shared registry; this cycle evaluates
             # those candidates into Decisions so Opportunities mirrors Discovery.
             cycle_started = time.monotonic()
-            pulse = asyncio.create_task(self._heartbeat_pulse(rt, user_id))
+            deadline = rt.mono() + float(self.s.eval_time_budget_s)
             evaluated = 0
             try:
+                await rt.drain_commands()
                 await rt.monitor_once()
                 addrs = self._global_candidate_addresses(user_id)
                 if not addrs:
@@ -268,18 +296,18 @@ class CloudWorker:
                         state_fn = pipe.market_state_for
                     evaluated = await rt.evaluate_global_candidates(
                         addrs, max_n=int(self.s.eval_max_per_cycle),
-                        state_fn=state_fn, min_interval_s=float(self.s.eval_min_interval_s),
+                        state_fn=state_fn, min_interval_s=float(self.s.eval_min_interval_s), deadline=deadline,
                     )
+                await rt.drain_commands()
                 await rt.monitor_once()
             finally:
-                pulse.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pulse
+                pass
             await rt.heartbeat_once()
             await rt.upload_once()
             await self._persist_state(rt, user_id)
             try:
                 self._last_heartbeats[user_id] = rt.heartbeat()
+                self._ai_info = dict(self._last_heartbeats[user_id].ai or self._ai_info)
             except Exception:
                 pass
             log.info(
@@ -305,6 +333,7 @@ class CloudWorker:
                 except Exception:
                     log.exception("tenant %s outbox flush failed", user_id)
         finally:
+            self._live.pop(user_id, None)
             if rt is not None:
                 try:
                     await self._persist_state(rt, user_id)
@@ -320,33 +349,76 @@ class CloudWorker:
                     pass
             await self.client.release_lease(user_id, self.worker_id)
 
-    async def _heartbeat_pulse(self, rt: RunnerRuntime, user_id: str, interval_s: float = 12.0) -> None:
-        """Keep the control plane's 'runner online' signal fresh WHILE a full
-        trade cycle is running (not just between cycles, which is all
-        ``_replay_heartbeat`` covers).
+    @staticmethod
+    def _state_for(tenant: dict) -> str:
+        d = str(tenant.get("desired_state") or "STOPPED")
+        if tenant.get("emergency_stop") and d == "RUNNING":
+            return "PAUSED"
+        return d if d in ("RUNNING", "PAUSED", "STOPPED") else "STOPPED"
 
-        ``discover_once()`` fans out to several rate-limited market-data APIs
-        sequentially, one per candidate token, and can easily take 60-100+
-        seconds end to end -- comfortably longer than the server's online-
-        staleness window (``ONLINE_WINDOW_S`` in app/services/control.py).
-        Historically the only heartbeat a cycle sent was a single one at the
-        very end, so the UI flipped to OFFLINE partway through every cycle
-        and back to ONLINE once it finished, even though the runner never
-        actually stopped. This task runs concurrently with the cycle and
-        just resends a fresh liveness snapshot every ``interval_s`` seconds --
-        same shape and same "fire and forget" behaviour as
-        ``_replay_heartbeat``, so it's safe to run alongside the cycle's own
-        work (``rt.heartbeat()`` only reads current runtime state to build the
-        payload; it does not mutate anything or process the response).
-        """
-        while True:
-            await asyncio.sleep(interval_s)
-            try:
-                await self.client.heartbeat(user_id, rt.heartbeat())
-            except Revoked:
-                raise
-            except Exception:
-                log.debug("mid-cycle heartbeat pulse failed for %s", user_id)
+    def _idle_heartbeat(self, tenant: dict) -> Heartbeat:
+        """Heartbeat for a tenant with no cycle in progress: the last real one, restated with the CURRENT state.
+        A tenant that never ran a cycle yet (fresh worker, new account) gets a minimal one, so it never shows
+        OFFLINE just because the worker has not reached it."""
+        uid = tenant["user_id"]
+        cached = self._last_heartbeats.get(uid)
+        if cached is not None:
+            return self._with_current_state(cached, tenant)
+        return Heartbeat(version=__version__, state=self._state_for(tenant), mode=TradingMode(str(tenant.get("mode") or "PAPER")),
+                         applied_config_version=int((self._applied.get(uid) or (0, 0, 0))[2]), data_source="cloud worker",
+                         data_status="idle", ai=dict(self._ai_info))
+
+    async def _beat(self, tenant: dict) -> None:
+        """One heartbeat for one tenant, from the heartbeat loop (never from inside a cycle)."""
+        uid = tenant["user_id"]
+        rt = self._live.get(uid)
+        try:
+            if rt is not None:
+                rt.apply_live_state(str(tenant.get("desired_state") or ""), bool(tenant.get("emergency_stop")))
+                hb = rt.heartbeat()
+                # A cycle can outlast the tenant lease; keep it so a second worker replica does not take over.
+                if time.monotonic() - self._lease_at.get(uid, 0.0) > self.lease_ttl_s / 3:
+                    self._lease_at[uid] = time.monotonic()
+                    with contextlib.suppress(Exception):
+                        await self.client.acquire_lease(uid, self.worker_id, self.lease_ttl_s)
+            else:
+                hb = self._idle_heartbeat(tenant)
+            resp = await self.client.heartbeat(uid, hb)
+        except Revoked:
+            raise
+        except Exception:
+            log.debug("heartbeat failed for %s", uid)
+            return
+        if resp.commands:
+            if rt is not None:
+                rt.enqueue_commands(resp.commands)       # runs between tokens of the cycle in progress
+            elif uid not in self._busy:
+                self._wake.add(uid)                      # idle tenant: run a cycle now so the command is handled
+
+    def _needs_cycle_now(self, tenant: dict) -> bool:
+        uid = tenant["user_id"]
+        if uid in self._wake:
+            return True
+        applied = self._applied.get(uid)
+        want = (str(tenant.get("desired_state") or ""), bool(tenant.get("emergency_stop")), int(tenant.get("config_version") or 0))
+        return applied is None or applied != want
+
+    async def _run_cycle(self, tenant: dict) -> None:
+        uid = tenant["user_id"]
+        self._busy.add(uid)
+        self._wake.discard(uid)
+        try:
+            assert self._sem is not None
+            async with self._sem:
+                await self.process_tenant(tenant)
+        except Revoked:
+            log.error("platform worker authorization revoked while processing %s", uid)
+        except Exception:
+            log.exception("tenant %s cycle task failed", uid)
+        finally:
+            self._busy.discard(uid)
+            self._live.pop(uid, None)
+            self._next_cycle[uid] = time.monotonic() + self.cycle_interval_s
 
     @staticmethod
     def _with_current_state(hb: Heartbeat, tenant: dict) -> Heartbeat:
@@ -370,28 +442,6 @@ class CloudWorker:
         else:
             return hb
         return hb if want == hb.state else hb.model_copy(update={"state": want})
-
-    async def _replay_heartbeat(self, tenant: dict) -> None:
-        """Replay the last real heartbeat body for liveness only.
-
-        No market-data or RPC work happens here; we just resend the shape the
-        runtime produced at the end of the last full cycle so the control
-        plane's "runner online" timer stays fresh. The next full cycle will
-        replace the cached payload with a current one.
-        """
-        user_id = tenant.get("user_id")
-        if not user_id:
-            return
-        hb = self._last_heartbeats.get(user_id)
-        if hb is None:
-            return
-        hb = self._with_current_state(hb, tenant)
-        try:
-            await self.client.heartbeat(user_id, hb)
-        except Revoked:
-            raise
-        except Exception:
-            log.debug("replay heartbeat failed for %s", user_id)
 
     async def run_forever(self, poll_s: float | None = None) -> None:
         # ``poll_s`` is the *full trade cycle* interval, not the outer loop
@@ -442,19 +492,37 @@ class CloudWorker:
             len(self._pipeline.registry.all()),
         )
 
+        self.cycle_interval_s = poll_s
+        self._sem = sem
+        last_prune = time.monotonic()
         try:
             while True:
                 loop_started = time.monotonic()
                 try:
                     tenants = await self.client.active_tenants()
                     now = time.monotonic()
-                    if now - last_full_cycle >= poll_s:
-                        async def one(t: dict) -> None:
-                            async with sem:
-                                await self.process_tenant(t)
-                        await asyncio.gather(*(one(t) for t in tenants), return_exceptions=False)
-                        last_full_cycle = time.monotonic()
-                        log.info("full cycle done, %d tenants (discovery is global)", len(tenants))
+                    current = {t["user_id"] for t in tenants if t.get("user_id")}
+                    for uid in list(self._tenants):
+                        if uid not in current:                 # account switched runner / deactivated
+                            self._tenants.pop(uid, None)
+                            self._last_heartbeats.pop(uid, None)
+                            self._applied.pop(uid, None)
+                    for t in tenants:
+                        if t.get("user_id"):
+                            self._tenants[t["user_id"]] = t
+                    # 1) heartbeats for EVERY tenant, every tick, whatever its cycle is doing (this is what keeps the
+                    #    runner ONLINE and the reported state equal to the user's command).
+                    await asyncio.gather(*(self._beat(t) for t in tenants), return_exceptions=True)
+                    # 2) cycles run as independent tasks: a slow tenant no longer blocks the others or the heartbeats.
+                    for t in tenants:
+                        uid = t.get("user_id")
+                        if not uid or uid in self._busy:
+                            continue
+                        if now >= self._next_cycle.get(uid, 0.0) or self._needs_cycle_now(t):
+                            self._tasks[uid] = asyncio.create_task(self._run_cycle(t), name=f"tenant-{uid[:8]}")
+                    # 3) housekeeping, independent of cycles
+                    if now - last_prune > 600 and self._pipeline is not None:
+                        last_prune = now
                         try:
                             await self._pipeline.prune()
                             for cache in self._eval_at.values():
@@ -462,9 +530,6 @@ class CloudWorker:
                                     cache.pop(k, None)
                         except Exception:
                             log.exception("retention prune failed")
-                    else:
-                        for t in tenants:
-                            await self._replay_heartbeat(t)
                 except Revoked:
                     raise
                 except Exception:
@@ -473,11 +538,16 @@ class CloudWorker:
                 await asyncio.sleep(max(1.0, heartbeat_s - elapsed))
         finally:
             stop.set()
+            for task in list(self._tasks.values()):
+                task.cancel()
             disc_task.cancel()
             mon_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await disc_task
                 await mon_task
+            for task in list(self._tasks.values()):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
 
 async def run_cloud_worker(settings: RunnerSettings | None = None) -> None:

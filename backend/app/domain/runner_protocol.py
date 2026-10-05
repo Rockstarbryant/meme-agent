@@ -14,7 +14,7 @@ from app.core.types import TradingMode
 
 DesiredState = Literal["RUNNING", "PAUSED", "STOPPED"]
 ReportedState = Literal["STARTING", "RUNNING", "PAUSED", "STOPPED", "LIVE_BLOCKED"]
-CommandType = Literal["CLOSE_POSITION", "CLOSE_ALL", "WITHDRAW_USDC", "FORCE_BUY"]
+CommandType = Literal["CLOSE_POSITION", "CLOSE_ALL", "WITHDRAW_USDC", "FORCE_BUY", "RETRY_AI"]
 
 
 class PairRequest(BaseModel):
@@ -77,6 +77,7 @@ class Heartbeat(BaseModel):
     mode: TradingMode
     applied_config_version: int = 0
     strategy_version: int = 0
+    strategy_id: str | None = None
     data_source: str = ""
     data_status: str = ""
     ai: dict = Field(default_factory=dict)

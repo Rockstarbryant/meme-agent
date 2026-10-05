@@ -146,6 +146,9 @@ class RunnerRuntime:
         self.revoked = False
         self._md_shared = False
         self._own_market_data = None
+        self.strategy_id: str | None = None
+        self._cmd_queue: dict[str, Command] = {}   # commands received between cycle steps (see drain_commands)
+        self._cmd_inflight: set[str] = set()
         self._evaluated: dict[str, datetime] = {}
         self._mkt_at: dict[str, float] = {}
         self._pf_at = -1e9
@@ -481,6 +484,7 @@ class RunnerRuntime:
             self.user_policy_ctx = None
         strategy_obj, cfg = self._build_strategy(b)
         self.strategy_version = cfg.version
+        self.strategy_id = getattr(cfg, "strategy_id", None) or getattr(strategy_obj, "strategy_id", None)
         pipeline = DecisionPipeline(
             strategy_obj, RiskEngine(), limits, self.approver,
             AIAnalyzer(self.llm, cache_ttl_s=float(getattr(self.s, "ai_cache_ttl_s", 0.0) or 0.0)),
@@ -570,17 +574,58 @@ class RunnerRuntime:
         self.recompute()
         return False
 
+    def apply_live_state(self, desired: str, emergency: bool) -> bool:
+        """Apply a Start / Pause / Stop / emergency-stop that arrived WHILE a cycle is running.
+
+        The bundle is only fetched at the start of a cycle, and a cycle can take minutes, so without this a Pause
+        took effect only at the next cycle and the agent kept opening positions (and reporting its old state) in
+        the meantime. Returns True when something changed."""
+        b = self.bundle
+        if b is None or self.engine is None:
+            return False
+        if b.desired_state == desired and bool(b.emergency_stop) == bool(emergency):
+            return False
+        self.bundle = b.model_copy(update={"desired_state": desired, "emergency_stop": bool(emergency)})
+        self.recompute()   # mutates the SAME ControlState the engine and evaluation loop read
+        return True
+
+    def enqueue_commands(self, cmds) -> int:
+        """Commands delivered by a mid-cycle heartbeat. They run between tokens (see drain_commands), never
+        concurrently with an evaluation, because they touch the same portfolio. Duplicates are ignored: the server
+        keeps re-sending a command until it is acknowledged."""
+        n = 0
+        for c in cmds or []:
+            if c.id in self._cmd_queue or c.id in self._cmd_inflight or self.store.command_seen(c.id):
+                continue
+            self._cmd_queue[c.id] = c
+            n += 1
+        return n
+
+    async def drain_commands(self) -> int:
+        n = 0
+        while self._cmd_queue:
+            cid, cmd = next(iter(self._cmd_queue.items()))
+            del self._cmd_queue[cid]
+            self._cmd_inflight.add(cid)
+            try:
+                await self.handle_command(cmd)
+            finally:
+                self._cmd_inflight.discard(cid)
+            n += 1
+        return n
+
     # ------------------------------------------------------------ heartbeat / commands
     def heartbeat(self) -> Heartbeat:
         return Heartbeat(
             version=__version__, state=self.state,
             mode=self.bundle.mode if self.bundle else TradingMode.PAPER,
             applied_config_version=self.applied_version,
-            strategy_version=getattr(self, "strategy_version", 0),
+            strategy_version=getattr(self, "strategy_version", 0), strategy_id=self.strategy_id,
             data_source=self.data_kind, data_status=self.data_status,
             ai={"mode": "ENABLED" if self.llm else "DISABLED",
                 "provider": getattr(self.llm, "name", None),
-                "model": getattr(self.llm, "model", None)},
+                "model": getattr(self.llm, "model", None),
+                "chain": self.llm.chain_info() if self.llm is not None else []},
             open_positions=self.portfolio.open_count() if self.portfolio else 0,
             last_activity_at=self.last_activity_at, last_decision=self.last_decision,
             live=self.live, wallet_provider=self.wallet.name if self.wallet else None,
@@ -637,6 +682,8 @@ class RunnerRuntime:
                     status, detail = await self._handle_withdraw(cmd.payload)
                 elif cmd.type == "FORCE_BUY":
                     status, detail = await self._handle_force_buy(cmd.payload)
+                elif cmd.type == "RETRY_AI":
+                    status, detail = await self._handle_retry_ai(cmd.payload)
                 else:
                     status, detail = "FAILED", f"unknown command type: {cmd.type}"
             except Exception as e:
@@ -663,15 +710,45 @@ class RunnerRuntime:
             m = await self.market_data.get_market_state(token_address)
         except DataUnavailable as e:
             return "FAILED", f"market data unavailable: {e}"
+        # The state was fetched a moment ago. Without stamping it, a provider's own (older) timestamp tripped the
+        # STALE_DATA veto, so a forced buy could never go through.
+        m = m.model_copy(update={"timestamp": self.clock()})
         amount = payload.get("amount_usdc")
         try:
             amount = float(amount) if amount else None
         except (TypeError, ValueError):
             return "FAILED", "amount_usdc must be a number"
-        res = await self.engine.force_buy(m, amount_override=amount)
+        res = await self.engine.force_buy(m, amount_override=amount, now=self.clock())
         if res is None:
-            return "DONE", "risk engine still vetoed this trade after re-checking current market data (see Activity for the reason); no order was placed"
+            why = str(getattr(self.engine, "last_manual_reason", "") or "").replace("MANUAL_OVERRIDE_STILL_RISK_VETOED:", "").strip()
+            return "DONE", ("risk veto: " + (why or "see Activity for the reason") + ". The risk engine still vetoed this trade after re-checking "
+                            "current market data; no order was placed")[:480]
         return "DONE", f"order status={getattr(res.status, 'value', res.status)}"
+
+    async def _handle_retry_ai(self, payload: dict) -> tuple[str, str]:
+        """User pressed "Retry AI" on a scan whose AI step failed: fetch CURRENT data and evaluate the token again."""
+        if self.engine is None or self.portfolio is None:
+            return "FAILED", "no active engine (LIVE blocked or not configured)"
+        if self.controls.global_pause:
+            return "FAILED", "the agent is paused or stopped; press Start, then retry"
+        if self.llm is None:
+            return "FAILED", "no AI provider is configured on this runner"
+        token_address = str(payload.get("token_address") or "")
+        if not token_address:
+            return "FAILED", "token_address missing from command payload"
+        if self.portfolio.has_open_position(token_address.lower()):
+            return "DONE", "token already has an open position; nothing to re-evaluate"
+        try:
+            m = await self.market_data.get_market_state(token_address)
+        except DataUnavailable as e:
+            return "FAILED", f"market data unavailable: {e}"
+        now = self.clock()
+        m = m.model_copy(update={"timestamp": now})
+        self._evaluated[token_address.lower()] = now
+        rec = await self.engine.handle_market_state(m, now)
+        ai = getattr(rec, "ai", None)
+        ai_status = getattr(ai, "status", None) or "NONE"
+        return "DONE", f"re-evaluated: {rec.final_action.value} (AI {ai_status}); {rec.final_reason}"[:480]
 
     async def _handle_withdraw(self, payload: dict) -> tuple[str, str]:
         if self.wallet is None:
@@ -792,7 +869,8 @@ class RunnerRuntime:
         return n
 
     async def evaluate_global_candidates(self, addresses: list[str], *, max_n: int = 20,
-                                         state_fn=None, min_interval_s: float | None = None) -> int:
+                                         state_fn=None, min_interval_s: float | None = None,
+                                         deadline: float | None = None) -> int:
         """Evaluate registry tokens into Decisions so Opportunities "Scanned" stays fresh.
 
         Each successful evaluation writes a new Decision with scanned_at=now.
@@ -813,7 +891,15 @@ class RunnerRuntime:
         for addr in addresses:
             if n >= max_n:
                 break
+            # Commands that arrived mid-cycle (force-buy, AI retry, close) run between tokens, so they are not
+            # stuck behind a cycle that can last minutes.
+            await self.drain_commands()
             if self.controls.global_pause:
+                break
+            # A cycle has a time budget so Start / Pause / commands are never more than ~a minute away. Tokens left
+            # over are picked up by the next cycle (the worker's rotation remembers what was evaluated).
+            if deadline is not None and self.mono() >= deadline:
+                log.info("evaluation time budget reached after %d tokens; the rest continue next cycle", n)
                 break
             a = str(addr).lower()
             if self.portfolio.has_open_position(a):

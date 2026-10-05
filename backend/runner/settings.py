@@ -231,6 +231,9 @@ class RunnerSettings(BaseSettings):
     # live provider fetch (because their snapshot is older than `eval_snapshot_max_age_s`).
     eval_min_interval_s: float = Field(300.0, validation_alias=_alias("EVAL_MIN_INTERVAL_S"))
     eval_max_per_cycle: int = Field(40, validation_alias=_alias("EVAL_MAX_PER_CYCLE"))
+    # A tenant cycle stops evaluating new tokens after this many seconds (the rest continue next cycle), so a Start /
+    # Pause / force-buy is never stuck behind a cycle that used to run for ~10 minutes.
+    eval_time_budget_s: float = Field(75.0, validation_alias=_alias("EVAL_TIME_BUDGET_S"))
     eval_snapshot_max_age_s: float = Field(150.0, validation_alias=_alias("EVAL_SNAPSHOT_MAX_AGE_S"))
     eval_fetch_budget: int = Field(4, validation_alias=_alias("EVAL_FETCH_BUDGET"))
     candidate_min_liquidity_usdc: float = Field(5_000.0, validation_alias=_alias("CANDIDATE_MIN_LIQUIDITY_USDC"))
@@ -240,13 +243,24 @@ class RunnerSettings(BaseSettings):
     paper_starting_usdc: float = 1000.0
 
     # ------------------------------------------------------------------ AI
-    llm_provider: Literal["none", "openrouter", "anthropic", "openai"] = Field("none", validation_alias=_alias("LLM_PROVIDER"))
+    llm_provider: Literal["none", "openrouter", "anthropic", "openai", "cerebras", "groq", "gemini", "serv", "openserv"] = Field("none", validation_alias=_alias("LLM_PROVIDER"))
+    # Ordered provider chain, e.g. "cerebras,groq,gemini,serv,openrouter" (or "auto" = every provider that has a key).
+    # Each provider is tried (with one retry), then the next. Overrides the single LLM_PROVIDER above.
+    llm_providers: str = Field("", validation_alias=_alias("LLM_PROVIDERS"))
+    cerebras_api_key: SecretStr | None = Field(None, validation_alias=_alias("CEREBRAS_API_KEY"))
+    cerebras_model: str = Field("", validation_alias=_alias("CEREBRAS_MODEL"))
+    groq_api_key: SecretStr | None = Field(None, validation_alias=_alias("GROQ_API_KEY"))
+    groq_model: str = Field("", validation_alias=_alias("GROQ_MODEL"))
+    gemini_api_key: SecretStr | None = Field(None, validation_alias=_alias("GEMINI_API_KEY"))
+    gemini_model: str = Field("", validation_alias=_alias("GEMINI_MODEL"))
+    serv_api_key: SecretStr | None = Field(None, validation_alias=_alias("SERV_API_KEY"))
+    serv_model: str = Field("", validation_alias=_alias("SERV_MODEL"))
     ai_model: str = Field("", validation_alias=_alias("AI_MODEL"))
     openrouter_api_key: SecretStr | None = Field(None, validation_alias=_alias("OPENROUTER_API_KEY"))
     # AI reliability. The free OpenRouter tier is ~20 requests/minute, so calls are paced and retried.
     ai_timeout_s: float = Field(60.0, validation_alias=_alias("AI_TIMEOUT_S"))
-    ai_max_retries: int = Field(2, validation_alias=_alias("AI_MAX_RETRIES"))
-    ai_min_interval_s: float = Field(3.5, validation_alias=_alias("AI_MIN_INTERVAL_S"))
+    ai_max_retries: int = Field(1, validation_alias=_alias("AI_MAX_RETRIES"))  # 1 retry per provider, then the next one
+    ai_min_interval_s: float = Field(0.0, validation_alias=_alias("AI_MIN_INTERVAL_S"))  # 0 = per-provider default pacing
     ai_fallback_models: str = Field("", validation_alias=_alias("AI_FALLBACK_MODELS"))  # comma separated model ids
     ai_cache_ttl_s: float = Field(900.0, validation_alias=_alias("AI_CACHE_TTL_S"))
     anthropic_api_key: SecretStr | None = Field(None, validation_alias=_alias("ANTHROPIC_API_KEY"))

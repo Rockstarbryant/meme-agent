@@ -105,9 +105,21 @@ async def token_detail(token_key: str, user: M.User = Depends(current_user), db:
     decisions = (await db.execute(select(M.Decision).where(M.Decision.user_id == user.id, M.Decision.token_key == token_key).order_by(M.Decision.created_at.desc()).limit(50))).scalars().all()
     snaps = (await db.execute(select(M.MarketSnapshot).where(M.MarketSnapshot.token_key == token_key).order_by(M.MarketSnapshot.at.desc()).limit(120))).scalars().all()
     if not decisions and not snaps:
-        raise HTTPException(404, "unknown token")
+        # Tokens shown on the Discovery page may not have been evaluated yet: serve the registry's latest snapshot.
+        chain, _, addr = token_key.partition(":")
+        reg = None
+        if addr:
+            reg = (await db.execute(select(M.LaunchpadTokenRow).where(M.LaunchpadTokenRow.chain == chain, M.LaunchpadTokenRow.token_address == addr.lower()))).scalars().first()
+        snap = ((reg.meta or {}).get("last_snapshot") if reg else None)
+        if reg is None or not isinstance(snap, dict):
+            raise HTTPException(404, "unknown token")
+        market = {**snap, "chain": reg.chain, "token_address": reg.token_address, "symbol": snap.get("symbol") or reg.symbol,
+                  "token_name": snap.get("token_name") or reg.name}
+        return {"token_key": token_key, "latest_market": market, "data_label": "LIVE DATA", "price_series": [],
+                "latest_decision": None, "decision_history": [], "evaluated": False,
+                "note": "Discovered but not evaluated by your agent yet. Strategy, risk and AI results appear after its next scan."}
     latest = decisions[0] if decisions else None
-    return {"token_key": token_key, "latest_market": (snaps[0].data if snaps else latest.market),
+    return {"token_key": token_key, "latest_market": (snaps[0].data if snaps else latest.market), "evaluated": bool(decisions),
             "data_label": "DEMO DATA" if (snaps[0].is_demo if snaps else latest.is_demo) else "LIVE DATA",
             "price_series": [{"at": s.at, "price": s.data.get("price"), "liquidity": s.data.get("liquidity")} for s in reversed(snaps)],
             "latest_decision": _opp(latest) if latest else None,
@@ -141,6 +153,48 @@ async def buy_anyway(decision_id: str, body: BuyAnywayIn, user: M.User = Depends
                     "It can still refuse the trade if conditions changed or a safety check fails."}
 
 
+AI_RETRY_WINDOW_MIN = 15          # a scan older than this is stale; the agent re-scans on its own
+AI_RETRY_COOLDOWN_S = 60
+
+
+@router.post("/decisions/{decision_id}/retry-ai")
+async def retry_ai(decision_id: str, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Re-run the AI step for a token whose AI assessment failed at scan time (UNAVAILABLE / INVALID).
+
+    Only offered while the scan is fresh (15 minutes): after that the market data behind the decision is stale, and
+    the agent re-evaluates the token by itself anyway. The runner re-fetches current data, so this is a full
+    re-evaluation (strategy, risk, AI) that writes a new decision."""
+    d = await db.get(M.Decision, decision_id)
+    if d is None or d.user_id != user.id:
+        raise HTTPException(404, "not found")
+    age_s = (datetime.now(timezone.utc) - (d.created_at if d.created_at.tzinfo else d.created_at.replace(tzinfo=timezone.utc))).total_seconds()
+    if age_s > AI_RETRY_WINDOW_MIN * 60:
+        raise HTTPException(409, f"This scan is {int(age_s // 60)} minutes old. Retry is only offered for {AI_RETRY_WINDOW_MIN} minutes after a scan; the agent will re-scan this token on its own.")
+    if d.mode != user.mode:
+        raise HTTPException(409, f"this decision was made in {d.mode} mode; switch to {d.mode} mode to retry it")
+    ais = (await db.execute(select(M.AIAnalysisRow).where(M.AIAnalysisRow.decision_id == decision_id))).scalars().all()
+    failed = any(a.status in ("UNAVAILABLE", "INVALID") for a in ais) or (not ais and "AI_UNAVAILABLE" in (d.final_reason or ""))
+    if not failed:
+        raise HTTPException(409, "The AI did not fail on this scan, so there is nothing to retry.")
+    token_address = (d.market or {}).get("token_address")
+    if not token_address:
+        raise HTTPException(422, "this decision has no token address on record")
+    recent = (await db.execute(select(M.RunnerCommand).where(M.RunnerCommand.user_id == user.id, M.RunnerCommand.type == "RETRY_AI")
+                               .order_by(M.RunnerCommand.created_at.desc()).limit(10))).scalars().all()
+    now = datetime.now(timezone.utc)
+    for c in recent:
+        if (c.payload or {}).get("decision_id") == decision_id:
+            created = c.created_at if c.created_at.tzinfo else c.created_at.replace(tzinfo=timezone.utc)
+            if (now - created).total_seconds() < AI_RETRY_COOLDOWN_S:
+                raise HTTPException(429, f"A retry for this token was just requested; wait {AI_RETRY_COOLDOWN_S} seconds.")
+    cmd = M.RunnerCommand(user_id=user.id, type="RETRY_AI", payload={"decision_id": decision_id, "token_address": token_address})
+    db.add(cmd)
+    await db.flush()
+    await repo.audit(db, user.id, user.email, "AI_RETRY_REQUESTED", decision_id=decision_id, token=d.token_key)
+    await db.commit()
+    return {"queued": True, "command_id": cmd.id, "note": "Your runner re-fetches current data and asks the AI again (seconds). A new decision replaces this one."}
+
+
 @router.get("/decisions/{decision_id}")
 async def decision_detail(decision_id: str, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Answers: why did the agent buy (or not buy) this token?"""
@@ -172,12 +226,35 @@ async def decision_detail(decision_id: str, user: M.User = Depends(current_user)
     }
 
 
+def _utc(dt):
+    return None if dt is None else (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc))
+
+
 @router.get("/positions")
 async def positions(status: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     q = select(M.Position).where(M.Position.user_id == user.id).order_by(M.Position.opened_at.desc()).limit(200)
     if status:
         q = q.where(M.Position.status == status.upper())
-    return [_pos(p) for p in (await db.execute(q)).scalars().all()]
+    rows = (await db.execute(q)).scalars().all()
+    out = [_pos(p) for p in rows]
+    # Exit details come from the position's SELL orders: average exit price and the proceeds actually received.
+    sells = (await db.execute(select(M.Order).where(M.Order.user_id == user.id, M.Order.side == "SELL", M.Order.status == "FILLED")
+                              .order_by(M.Order.created_at.desc()).limit(1000))).scalars().all()
+    now = datetime.now(timezone.utc)
+    for p, row in zip(rows, out):
+        opened, closed = _utc(p.opened_at), _utc(p.closed_at)
+        mine = [o for o in sells if o.token_address.lower() == p.token_address.lower() and _utc(o.created_at) >= opened
+                and (closed is None or _utc(o.created_at) <= closed + timedelta(minutes=1))]
+        qty = sum(o.filled_quantity or 0.0 for o in mine)
+        proceeds = sum((o.filled_quantity or 0.0) * (o.avg_price or 0.0) - (o.fee_usdc or 0.0) for o in mine)
+        row["exit_price"] = (sum((o.filled_quantity or 0.0) * (o.avg_price or 0.0) for o in mine) / qty) if qty else None
+        row["proceeds_usdc"] = proceeds if mine else None
+        row["exit_count"] = len(mine)
+        row["invested_usdc"] = p.total_invested_usdc
+        row["held_seconds"] = int(((closed or now) - opened).total_seconds()) if opened else None
+        row["return_pct"] = (p.realized_pnl_usdc / p.total_invested_usdc * 100.0) if (p.status == "CLOSED" and p.total_invested_usdc) else None
+        row["drawdown_from_peak_pct"] = ((p.last_price / p.peak_price - 1.0) * 100.0) if p.peak_price else None
+    return out
 
 
 @router.get("/orders")

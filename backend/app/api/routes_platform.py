@@ -48,9 +48,10 @@ class TenantSummary(BaseModel):
     desired_state: str
     emergency_stop: bool
     config_version: int
-    wallet_id: str
-    wallet_address: str
-    privy_wallet_id: str
+    # None for a PAPER-only cloud account that has not set up a wallet yet (paper trading needs no wallet).
+    wallet_id: str | None = None
+    wallet_address: str | None = None
+    privy_wallet_id: str | None = None
     policy_version: int = 0
 
 
@@ -82,32 +83,34 @@ async def active_tenants(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(platform_worker),
 ):
+    # Wallets are OPTIONAL here: a PAPER cloud account trades with virtual funds and needs no wallet, so a new user
+    # who picked the cloud runner is not stuck waiting for a Privy wallet. LIVE still requires one (checked below and
+    # again in control.live_blockers).
     rows = (
         await db.execute(
-            select(M.User, M.AgentConfig, M.Wallet, M.WalletPolicyRow)
+            select(M.User, M.AgentConfig)
             .join(M.AgentConfig, M.AgentConfig.user_id == M.User.id)
-            .join(M.Wallet, M.Wallet.user_id == M.User.id)
-            .outerjoin(
-                M.WalletPolicyRow,
-                (M.WalletPolicyRow.wallet_id == M.Wallet.id) & (M.WalletPolicyRow.is_current.is_(True)),
-            )
-            .where(
-                M.User.is_active.is_(True),
-                M.AgentConfig.execution_mode == "cloud_managed",
-                M.Wallet.provider == "privy",
-                M.Wallet.external_id.is_not(None),
-            )
-            .order_by(M.Wallet.created_at.desc())
+            .where(M.User.is_active.is_(True), M.AgentConfig.execution_mode == "cloud_managed")
         )
     ).all()
+    wallets: dict[str, tuple[M.Wallet, M.WalletPolicyRow | None]] = {}
+    if rows:
+        wrows = (
+            await db.execute(
+                select(M.Wallet, M.WalletPolicyRow)
+                .outerjoin(M.WalletPolicyRow, (M.WalletPolicyRow.wallet_id == M.Wallet.id) & (M.WalletPolicyRow.is_current.is_(True)))
+                .where(M.Wallet.user_id.in_([u.id for u, _ in rows]), M.Wallet.provider == "privy", M.Wallet.external_id.is_not(None))
+                .order_by(M.Wallet.created_at.desc())
+            )
+        ).all()
+        for w, pol in wrows:
+            if w.address and w.user_id not in wallets:
+                wallets[w.user_id] = (w, pol)
     out: list[TenantSummary] = []
-    seen: set[str] = set()
-    for user, cfg, wallet, pol in rows:
-        if user.id in seen:
-            continue
-        seen.add(user.id)
-        if not wallet.external_id or not wallet.address:
-            continue
+    for user, cfg in rows:
+        w, pol = wallets.get(user.id, (None, None))
+        if w is None and user.mode != "PAPER":
+            continue  # LIVE without a provisioned wallet cannot be served
         out.append(
             TenantSummary(
                 user_id=user.id,
@@ -115,9 +118,9 @@ async def active_tenants(
                 desired_state=cfg.desired_state,
                 emergency_stop=cfg.emergency_stop,
                 config_version=cfg.version,
-                wallet_id=wallet.id,
-                wallet_address=wallet.address,
-                privy_wallet_id=wallet.external_id,
+                wallet_id=w.id if w else None,
+                wallet_address=w.address if w else None,
+                privy_wallet_id=w.external_id if w else None,
                 policy_version=int(pol.version) if pol else 0,
             )
         )
@@ -171,6 +174,7 @@ async def tenant_heartbeat(
         "mode": hb.mode.value if hasattr(hb.mode, "value") else hb.mode,
         "applied_config_version": hb.applied_config_version,
         "strategy_version": hb.strategy_version,
+        "strategy_id": hb.strategy_id,
         "data_source": hb.data_source,
         "data_status": hb.data_status,
         "ai": hb.ai,

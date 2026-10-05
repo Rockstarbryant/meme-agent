@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
+import { AgentWalletOverview } from "@/components/features/agent-wallet";
 import { useApi } from "@/hooks/use-api";
 import { ApiError, api } from "@/lib/api";
 import { shortAddr, usd } from "@/lib/format";
@@ -43,9 +44,8 @@ export function WalletPanel() {
   const [error, setError] = useState<ApiError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [revokeOpen, setRevokeOpen] = useState(false);
-  const [withdrawTo, setWithdrawTo] = useState("");
-  const [withdrawAmt, setWithdrawAmt] = useState("");
   const [copiedAddr, setCopiedAddr] = useState<string | null>(null);
+  const [tab, setTab] = useState<"wallet" | "access">("wallet");
 
   if (wallet.loading && !wallet.data) return <Loading />;
   if (!wallet.data) return wallet.error ? <ErrorState error={wallet.error} onRetry={() => void wallet.reload()} /> : null;
@@ -69,13 +69,6 @@ export function WalletPanel() {
   const savePolicy = () => run("policy", () => api("/wallet/policy", { method: "POST", body: form }), "Policy saved. Existing authorizations were revoked; authorize again.");
   const authorize = () => run("authorize", () => api("/wallet/authorize", { method: "POST", body: { capability: "PER_TRADE_SIGNING", expires_in_hours: 24 } }), "Per-trade signing authorized for 24 hours.");
   const provisionCloud = () => run("cloud", () => api("/wallet/cloud/provision", { method: "POST", body: { confirm: true } }), "Privy cloud wallet provisioned. Fund the displayed address with Arc USDC before enabling LIVE.");
-  const withdrawCloud = () => run("withdraw", async () => {
-    const amount = Number(withdrawAmt);
-    if (!withdrawTo.trim()) throw new ApiError(0, "Enter a destination address.");
-    if (!Number.isFinite(amount) || amount <= 0) throw new ApiError(0, "Enter an amount greater than zero.");
-    await api("/wallet/cloud/withdraw", { method: "POST", body: { to_address: withdrawTo.trim(), amount_usdc: amount } });
-    setWithdrawTo(""); setWithdrawAmt("");
-  }, "Withdrawal queued. It runs on the worker's next heartbeat (seconds) — check Activity for the result.");
   const copyAddress = async (addr: string) => {
     try {
       await navigator.clipboard.writeText(addr);
@@ -91,8 +84,25 @@ export function WalletPanel() {
   });
 
   const cap = w.execution_capability.capability;
+  const tabs = (
+    <div className="flex gap-2" role="tablist" aria-label="Wallet sections">
+      {([["wallet", "Wallet"], ["access", "Policy and access"]] as const).map(([k, label]) => (
+        <Button key={k} role="tab" aria-selected={tab === k} size="sm" variant={tab === k ? "default" : "outline"} onClick={() => setTab(k)}>{label}</Button>))}
+    </div>
+  );
+  if (tab === "wallet") {
+    return (
+      <div className="space-y-4">
+        {tabs}
+        {error && <ErrorState error={error} />}
+        {notice && <Alert variant="success">{notice}</Alert>}
+        <AgentWalletOverview w={w} busy={busy !== null} onProvision={() => void provisionCloud()} onChanged={async () => { await wallet.reload(); await activity.reload(); }} />
+      </div>
+    );
+  }
   return (
     <div className="space-y-4">
+      {tabs}
       {error && <ErrorState error={error} />}
       {notice && <Alert variant="success">{notice}</Alert>}
 
@@ -107,42 +117,6 @@ export function WalletPanel() {
             <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-success" aria-hidden /><span><strong>Paper trading:</strong> always available, no wallet required</span></li>
           </ul>
           {w.live_blockers.length > 0 && <p className="text-xs text-muted-foreground">LIVE blocked: {w.live_blockers.join("; ")}</p>}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader><CardTitle>Network and balance</CardTitle></CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          <p>Arc {w.network.network} (chain id {w.network.chain_id}) — RPC {w.network.health.ok ? <Badge variant="success">reachable</Badge> : <Badge variant="destructive">unavailable</Badge>}{!w.network.health.ok && w.network.health.detail ? ` (${w.network.health.detail})` : ""}</p>
-          <p>USDC balance: <strong>{w.usdc.balance == null ? "—" : usd(w.usdc.balance)}</strong> <span className="text-xs text-muted-foreground">({w.usdc.view})</span></p>
-          <p className="text-xs text-muted-foreground">{w.usdc.note}</p>
-          <p>Allocated capital: {w.allocated_capital_usdc == null ? "—" : usd(w.allocated_capital_usdc)} · Available trading capital: {w.available_trading_capital_usdc == null ? "—" : usd(w.available_trading_capital_usdc)} <Badge>{w.capital_label}</Badge></p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader><CardTitle>Cloud agent wallet</CardTitle></CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          {w.cloud_wallet ? (<>
-            <p>Provider: <strong>Privy</strong> · {w.cloud_wallet.active ? <Badge variant="success">cloud execution enabled</Badge> : <Badge variant="warning">provisioned, not active</Badge>}</p>
-            <div className="flex flex-wrap items-center gap-2">
-              <span>Address:</span>
-              <code className="break-all rounded bg-muted px-2 py-1 text-xs">{w.cloud_wallet.address}</code>
-              <Button size="sm" variant="outline" onClick={() => void copyAddress(w.cloud_wallet!.address)}>
-                {copiedAddr === w.cloud_wallet.address ? "Copied!" : "Copy"}
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">This is a platform app-scoped managed wallet. Privy holds the wallet key material; the shared worker can act only when the account, worker, application policy, and LIVE gates permit it.</p>
-            <div className="space-y-2 rounded-md border p-3">
-              <p className="font-medium">Withdraw USDC</p>
-              <p className="text-xs text-muted-foreground">Moves funds out of this wallet to an address you control. Executed by the worker on its next heartbeat; it stays fail-closed there until withdrawals are explicitly enabled on that worker (same gate LIVE trading uses).</p>
-              <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
-                <Input placeholder="Destination address (0x...)" value={withdrawTo} onChange={(e) => setWithdrawTo(e.target.value)} />
-                <Input className="sm:w-32" placeholder="Amount USDC" inputMode="decimal" value={withdrawAmt} onChange={(e) => setWithdrawAmt(e.target.value)} />
-                <Button onClick={() => void withdrawCloud()} disabled={busy !== null}>Withdraw</Button>
-              </div>
-            </div>
-          </>) : <><p className="text-muted-foreground">No Privy cloud wallet is provisioned.</p><Button onClick={() => void provisionCloud()} disabled={busy !== null}>Provision Privy cloud wallet</Button><p className="text-xs text-muted-foreground">Provisioning switches this account to the cloud-managed execution mode and creates a separate Privy wallet.</p></>}
         </CardContent>
       </Card>
 

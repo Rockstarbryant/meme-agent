@@ -180,7 +180,8 @@ export default function DiscoveryPage() {
     const showBookmark = props.showBookmark !== false;
     const key = t.chain + ":" + t.token_address;
     const isOpen = expanded === key;
-    const title = t.symbol || shortAddr(t.token_address);
+    const title = t.name || t.symbol || shortAddr(t.token_address);
+    const tokenHref = "/tokens/" + encodeURIComponent(key);
     const subtitle = (t.launchpad || "unknown") + " · " + shortAddr(t.token_address);
 
     return (
@@ -194,7 +195,7 @@ export default function DiscoveryPage() {
             }}
           >
             <div className="flex items-start justify-between gap-2">
-              <CardTitle className="text-base hover:underline">{title}</CardTitle>
+              <CardTitle className="text-base hover:underline">{title}{t.name && t.symbol ? <span className="ml-2 text-xs font-normal text-muted-foreground">{t.symbol}</span> : null}</CardTitle>
               <div className="flex gap-1">
                 <Badge variant={statusVariant(t.global_screening_passed)}>
                   {t.status || "—"}
@@ -235,11 +236,15 @@ export default function DiscoveryPage() {
                     Metrics refresh via monitoring. Thin data → low score → REJECTED/COLD is normal until holders and buy/sell enrich.
                   </p>
                   <p>
+                    <Link href={tokenHref} className="text-primary underline">
+                      Open the full token page
+                    </Link>
+                    {" · "}
                     <Link href="/opportunities" className="text-primary underline">
-                      Open Opportunities
+                      Opportunities
                     </Link>
                     {" "}
-                    for agent decisions and Buy anyway (after a WATCH decision exists).
+                    (Buy anyway appears there once the agent records a WATCH decision).
                   </p>
                 </>
               ) : null}
@@ -247,6 +252,11 @@ export default function DiscoveryPage() {
           ) : null}
 
           <div className="flex gap-2">
+            <Link href={tokenHref} className="flex-1">
+              <Button size="sm" className="w-full">
+                Token page
+              </Button>
+            </Link>
             <Button
               size="sm"
               variant="outline"
@@ -255,7 +265,7 @@ export default function DiscoveryPage() {
                 void openDetail(t);
               }}
             >
-              {isOpen ? "Hide detail" : "Details"}
+              {isOpen ? "Hide quick view" : "Quick view"}
             </Button>
             {showBookmark ? (
               <Button
