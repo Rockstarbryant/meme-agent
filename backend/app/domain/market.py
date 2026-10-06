@@ -101,6 +101,11 @@ class MarketState(BaseModel):
     # Per-window trading stats keyed by WINDOWS ("5m" ... "24h"). Windows a provider cannot supply stay absent.
     windows: dict[str, WindowStats] = Field(default_factory=dict)
 
+    # Percent change of liquidity / market cap over HOLDER_GROWTH_WINDOWS ("1h", "6h", "24h"), measured from our own
+    # per-token history (see app/domain/history.py). Absent until that history reaches back about that far.
+    liquidity_growth: dict[str, float] = Field(default_factory=dict)
+    market_cap_growth: dict[str, float] = Field(default_factory=dict)
+
     holder_count: int | None = None
     # Holder-count growth in percent over HOLDER_GROWTH_WINDOWS; absent until our history spans that window.
     holder_growth: dict[str, float] = Field(default_factory=dict)

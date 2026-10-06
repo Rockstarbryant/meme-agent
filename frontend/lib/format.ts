@@ -1,7 +1,12 @@
 const DASH = "—";
 export const usd = (n: number | null | undefined, digits = 2) =>
   n == null ? DASH : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n);
-export const signedUsd = (n: number | null | undefined) => (n == null ? DASH : `${n > 0 ? "+" : ""}${usd(n)}`);
+export const signedUsd = (n: number | null | undefined) => {
+  if (n == null) return DASH;
+  // A real but tiny amount must not render as "-$0.00" (it reads as a bug): show it with enough digits to be true.
+  if (n !== 0 && Math.abs(n) < 0.005) return `${n > 0 ? "+" : "-"}$${Math.abs(n).toFixed(4)}`;
+  return `${n > 0 ? "+" : ""}${usd(n)}`;
+};
 export const compact = (n: number | null | undefined) =>
   n == null ? DASH : new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(n);
 export const pct = (n: number | null | undefined, digits = 1) => (n == null ? DASH : `${n > 0 ? "+" : ""}${n.toFixed(digits)}%`);

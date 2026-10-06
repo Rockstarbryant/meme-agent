@@ -12,7 +12,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, model_validator
 
 from app.domain.market import MarketState
-from app.portfolio.exits import ExitConfig
+from app.portfolio.exits import ExitConfig, is_legacy_launch_exit
 from app.strategies.base import Strategy, StrategySignal
 
 
@@ -50,7 +50,18 @@ class LiquidityTrendConfig(BaseModel):
     # trending to buy. Only fails when activity is KNOWN to be zero (missing data does not block).
     require_recent_activity: bool = True
     entry_window_seconds: int = 300
-    exit: ExitConfig = Field(default_factory=ExitConfig)
+    exit: ExitConfig = Field(default_factory=ExitConfig.swing)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_exit(cls, data):
+        """Saved configs from before exit profiles carry the LAUNCH-token exit rules (30-minute stagnation exit, +30%
+        first target) because every strategy shared one default. Those closed liquid tokens after ~30 flat minutes,
+        hours before they moved. A config that still holds exactly those defaults was never customised, so it takes
+        this strategy's swing profile; a config the user changed is left alone."""
+        if isinstance(data, dict) and "exit" in data and is_legacy_launch_exit(data["exit"]):
+            data = {**data, "exit": ExitConfig.swing().model_dump(mode="json")}
+        return data
 
 
 def _lin(x: float | None, lo: float, hi: float) -> float | None:

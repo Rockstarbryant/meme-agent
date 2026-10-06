@@ -29,11 +29,17 @@ class TradingEngine:
     def __init__(self, *, mode: TradingMode, portfolio: PortfolioState, controls: ControlState,
                  pipeline: DecisionPipeline, executor: ExecutionAdapter, approver: TradeApprover,
                  exit_manager: PositionManager, market_data: MarketDataProvider, bus: EventBus,
-                 idempotency: IdempotencyStore):
+                 idempotency: IdempotencyStore, exit_managers: dict[str, PositionManager] | None = None):
         assert_executor_matches_mode(mode, executor)
         self.mode, self.portfolio, self.controls = mode, portfolio, controls
         self.pipeline, self.executor, self.approver = pipeline, executor, approver
         self.exits, self.market_data, self.bus, self.idem = exit_manager, market_data, bus, idempotency
+        # Exit rules per strategy id: a position is managed by the rules of the strategy that OPENED it, not by
+        # whichever strategy happens to be active now (a launch-token stagnation rule must not close a swing trade).
+        self.exit_managers = dict(exit_managers or {})
+
+    def exit_manager_for(self, strategy_id: str | None) -> PositionManager:
+        return self.exit_managers.get(strategy_id or "", self.exits)
 
     # ------------------------------------------------------------ entries
     async def handle_market_state(self, m: MarketState, now: datetime | None = None) -> DecisionRecord:
@@ -121,8 +127,8 @@ class TradingEngine:
                 continue
             if m.price and m.price > 0:
                 self.portfolio.mark(pos.id, m.price, now)
-            for d in self.exits.evaluate(pos, now, m, manual_close=pos.id in (manual_close or set()),
-                                         emergency=emergency_close):
+            for d in self.exit_manager_for(pos.strategy_id).evaluate(pos, now, m, manual_close=pos.id in (manual_close or set()),
+                                                                     emergency=emergency_close):
                 res = await self._exit(pos.id, d, m)
                 if res is not None:
                     out.append(res)
@@ -134,7 +140,7 @@ class TradingEngine:
         kind = "all" if d.close_all else f"tier{d.tier_index}"
         req = TradeRequest(idempotency_key=f"exit:{pos.id}:{kind}", mode=self.mode, chain=pos.chain,
                            token_address=pos.token_address, side=Side.SELL, quantity=d.quantity,
-                           max_slippage_pct=self.exits.cfg.exit_max_slippage_pct, reference_price=m.price,
+                           max_slippage_pct=self.exit_manager_for(pos.strategy_id).cfg.exit_max_slippage_pct, reference_price=m.price,
                            launchpad=pos.launchpad, pool_address=m.pool_address, position_id=pos.id,
                            strategy_id=pos.strategy_id, strategy_version=pos.strategy_version,
                            reason=f"{d.reason.value}: {d.detail}")

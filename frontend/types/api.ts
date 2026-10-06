@@ -43,7 +43,7 @@ export interface AgentStatus {
 export interface Snapshot { at: string; total_value_usdc: number; daily_pnl_usdc: number }
 export interface Portfolio {
   mode: Mode; label: string; data_source: string; cash_usdc: number; exposure_usdc: number; total_value_usdc: number;
-  starting_cash_usdc: number; reported_by_runner: boolean; realized_pnl_usdc: number; unrealized_pnl_usdc: number; daily_pnl_usdc: number;
+  starting_cash_usdc: number; starting_cash_derived?: boolean; reported_by_runner: boolean; realized_pnl_usdc: number; unrealized_pnl_usdc: number; daily_pnl_usdc: number;
   open_positions: number; limits: RiskLimits; snapshots: Snapshot[];
 }
 
@@ -144,4 +144,14 @@ export interface TokenDetail {
 }
 
 export interface PairingCode { code: string; expires_in: number; command: string }
-export interface StrategyListItem { id: string; name: string; description: string; enabled: boolean; active: boolean }
+export interface StrategyListItem {
+  id: string; name: string; description: string; enabled: boolean; active: boolean;
+  profile?: "launch" | "established"; best_for?: string; weights?: Record<string, number>;
+  exit_profile?: { hard_stop_pct: number; trailing_stop_pct: number; first_target_pct: number | null; stagnation_hours: number };
+}
+export interface PortfolioHistory { range: string; points: { t: number; v: number }[]; samples: number; first: number | null; last: number | null; high: number | null; low: number | null }
+export interface GroupStat { key: string; count: number; wins: number; pnl_usdc: number; win_rate_pct: number }
+export interface PerformanceStats {
+  closed: number; wins: number; losses: number; win_rate_pct: number | null; profit_factor: number | null; avg_win_usdc: number | null; avg_loss_usdc: number | null;
+  best_usdc: number | null; worst_usdc: number | null; avg_hold_seconds: number | null; total_realized_usdc: number; by_strategy: GroupStat[]; by_exit_reason: GroupStat[];
+}

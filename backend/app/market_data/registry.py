@@ -210,8 +210,8 @@ class MarketDataRegistry(MarketDataProvider):
                             cur[fk] = fv
                 data["windows"] = merged_w
                 continue
-            if key == "holder_growth":
-                data["holder_growth"] = {**(value or {}), **(data.get("holder_growth") or {})}
+            if key in ("holder_growth", "liquidity_growth", "market_cap_growth"):
+                data[key] = {**(value or {}), **(data.get(key) or {})}
                 continue
             if value is None or value == [] or value == {}:
                 continue

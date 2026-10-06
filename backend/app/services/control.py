@@ -25,7 +25,7 @@ from app.risk.per_user_policy import (
 )
 from app.services.decision import tighten_limits
 from app.strategies.traction_momentum import TractionMomentumConfig
-from app.strategies.liquidity_trend import LiquidityTrendConfig
+from app.strategies import registry as strategy_registry
 from app.wallets.base import WalletPolicy
 
 LIVE_CONFIRMATION_PHRASE = "ENABLE LIVE TRADING"
@@ -155,20 +155,11 @@ async def load_controls(db: AsyncSession, user_id: str) -> ControlState:
 async def build_bundle(db: AsyncSession, settings: Settings, user: M.User, runner: M.Runner) -> ConfigBundle:
     cfg = await get_config(db, user.id)
     enabled = list(cfg.strategies_enabled or ["traction_momentum"])
-    # Prefer liquidity_trend when enabled so established/trending tokens can qualify.
-    preferred = "liquidity_trend" if "liquidity_trend" in enabled else (
-        enabled[0] if enabled else "traction_momentum"
-    )
-    if preferred not in ("traction_momentum", "liquidity_trend"):
-        preferred = "traction_momentum"
+    preferred_choice = await repo.get_setting(db, f"user:{user.id}:active_strategy")
+    preferred = strategy_registry.select_active(enabled, (preferred_choice or {}).get("id") if isinstance(preferred_choice, dict) else preferred_choice)
     sv = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == preferred,
                                                          (M.StrategyVersion.user_id == user.id) | M.StrategyVersion.user_id.is_(None))
                            .order_by(M.StrategyVersion.user_id.is_(None), M.StrategyVersion.version.desc()))).scalars().first()
-    if sv is None and preferred != "traction_momentum":
-        preferred = "traction_momentum"
-        sv = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == preferred,
-                                                             (M.StrategyVersion.user_id == user.id) | M.StrategyVersion.user_id.is_(None))
-                               .order_by(M.StrategyVersion.user_id.is_(None), M.StrategyVersion.version.desc()))).scalars().first()
     controls = await load_controls(db, user.id)
     controls.emergency_stop = cfg.emergency_stop
     controls.global_pause = cfg.desired_state != "RUNNING"
@@ -182,10 +173,9 @@ async def build_bundle(db: AsyncSession, settings: Settings, user: M.User, runne
     if sv and sv.config:
         strategy_cfg = dict(sv.config)
         strategy_cfg["strategy_id"] = preferred
-    elif preferred == "liquidity_trend":
-        strategy_cfg = LiquidityTrendConfig().model_dump(mode="json")
     else:
-        strategy_cfg = TractionMomentumConfig().model_dump(mode="json")
+        strategy_cfg = strategy_registry.get(preferred).default_config().model_dump(mode="json")
+        strategy_cfg["strategy_id"] = preferred
     return ConfigBundle(
         version=cfg.version,
         runner_id=runner.id,
@@ -279,7 +269,8 @@ async def agent_status(db: AsyncSession, settings: Settings, user: M.User) -> di
     sv = st.get("applied_config_version")
     enabled = list(cfg.strategies_enabled or ["traction_momentum"])
     # The strategy actually in use: what the runner last reported, else the one build_bundle() will hand it.
-    in_use = st.get("strategy_id") or ("liquidity_trend" if "liquidity_trend" in enabled else (enabled[0] if enabled else "traction_momentum"))
+    chosen = await repo.get_setting(db, f"user:{user.id}:active_strategy")
+    in_use = st.get("strategy_id") or strategy_registry.select_active(enabled, (chosen or {}).get("id") if isinstance(chosen, dict) else chosen)
     reported = st.get("state")
     shown, applying = displayed_state(reported, cfg.desired_state, online, cfg.emergency_stop)
     exec_mode = getattr(cfg, "execution_mode", "self_hosted")

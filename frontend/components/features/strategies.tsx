@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
+import { useToast } from "@/components/toast";
 import { useAuth } from "@/lib/auth";
 import { num } from "@/lib/format";
 import type { StrategyListItem, StrategyVersion } from "@/types/api";
@@ -37,12 +38,16 @@ type Cfg = {
   exit?: { hard_stop_pct?: number; trailing_stop_pct?: number; stagnation_seconds?: number };
 } & Record<string, unknown>;
 
-function weightKeysFor(sid: string): readonly string[] {
+/** Weight names come from the strategy's own saved config (or its defaults), so a new strategy needs no UI change. */
+function weightKeysFor(sid: string, cfgWeights?: Record<string, number>, metaWeights?: Record<string, number>): readonly string[] {
+  const keys = Object.keys(cfgWeights ?? metaWeights ?? {});
+  if (keys.length) return keys;
   return sid === "liquidity_trend" ? LIQUIDITY_WEIGHTS : TRACTION_WEIGHTS;
 }
 
 export function Strategies() {
   const { user } = useAuth();
+  const { toast } = useToast();
   const list = useApi<StrategyListItem[]>("/strategies");
   const [selectedId, setSelectedId] = useState<string>("traction_momentum");
   const [draft, setDraft] = useState<{
@@ -50,6 +55,7 @@ export function Strategies() {
     watch: number;
     hard: number;
     trail: number;
+    stagn: number;
     weights: Record<string, number>;
   } | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -86,7 +92,7 @@ export function Strategies() {
 
   const active = versions.data[0];
   const cfg = (active?.config || {}) as Cfg;
-  const keys = weightKeysFor(selectedId);
+  const keys = weightKeysFor(selectedId, cfg.weights, selectedMeta?.weights);
   const d =
     draft ??
     {
@@ -94,6 +100,7 @@ export function Strategies() {
       watch: cfg.watch_score ?? 12,
       hard: cfg.exit?.hard_stop_pct ?? 20,
       trail: cfg.exit?.trailing_stop_pct ?? 20,
+      stagn: Math.round(((cfg.exit?.stagnation_seconds ?? 1800) / 3600) * 100) / 100,
       weights: Object.fromEntries(
         keys.map((w) => [w, Number((cfg.weights?.[w] ?? 0) * 100)]),
       ) as Record<string, number>,
@@ -106,13 +113,29 @@ export function Strategies() {
         ? "Weights must add up to more than zero."
         : d.hard <= 0 || d.hard > 90
           ? "Hard stop must be between 0 and 90%."
-          : null;
+          : !(d.stagn >= 0.1 && d.stagn <= 168)
+            ? "Stagnation exit must be between 0.1 and 168 hours."
+            : null;
 
   async function toggle(sid: string, enabled: boolean) {
     setBusy(true);
     setError(null);
     try {
       await api(`/strategies/${sid}/enabled`, { method: "PUT", body: { enabled } });
+      await list.reload();
+    } catch (e) {
+      setError(toApiError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function activate(sid: string, name: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/strategies/${sid}/activate`, { method: "PUT" });
+      toast({ id: "strategy-activate", kind: "success", title: `${name} is now the active strategy`, description: "Open positions keep the exit rules of the strategy that opened them." });
       await list.reload();
     } catch (e) {
       setError(toApiError(e));
@@ -131,7 +154,7 @@ export function Strategies() {
         min_score: d.min,
         watch_score: d.watch,
         weights: Object.fromEntries(keys.map((w) => [w, d.weights[w] ?? 0])),
-        exit: { ...(cfg.exit ?? {}), hard_stop_pct: d.hard, trailing_stop_pct: d.trail },
+        exit: { ...(cfg.exit ?? {}), hard_stop_pct: d.hard, trailing_stop_pct: d.trail, stagnation_seconds: Math.round(d.stagn * 3600) },
       };
       delete next.strategy_id;
       delete next.version;
@@ -159,9 +182,9 @@ export function Strategies() {
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           <p className="text-muted-foreground">
-            Enable one or both. When both are enabled, the runner prefers{" "}
-            <strong>Liquidity Trend</strong> for established / high-liquidity tokens from Gecko
-            trending. Traction Momentum stays available for fresh-launch style entries.
+            The agent runs <strong>one strategy at a time</strong>: choose it with <em>Run this strategy</em>. Each strategy comes with
+            its own exit rules (stop, targets, how long a flat trade is given), because a fresh launch needs minutes and an
+            established token needs hours. Open positions keep the rules of the strategy that opened them.
           </p>
           {(list.data || []).map((s) => (
             <div
@@ -180,20 +203,30 @@ export function Strategies() {
                 >
                   {s.name}
                 </button>
-                {s.active && <Badge variant="solidPrimary">preferred</Badge>}
+                {s.active && <Badge variant="solidPrimary">RUNNING</Badge>}
+                {s.profile && <Badge>{s.profile === "launch" ? "fresh launches" : "established tokens"}</Badge>}
                 <Badge variant={s.enabled ? "success" : "warning"}>
                   {s.enabled ? "ENABLED" : "DISABLED"}
                 </Badge>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => void toggle(s.id, !s.enabled)}
-                >
-                  {s.enabled ? "Disable" : "Enable"}
-                </Button>
+                {!s.active && (
+                  <Button size="sm" disabled={busy} onClick={() => void activate(s.id, s.name)}>
+                    Run this strategy
+                  </Button>
+                )}
+                {s.enabled && !s.active && (
+                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void toggle(s.id, false)}>
+                    Disable
+                  </Button>
+                )}
               </div>
               <p className="text-xs text-muted-foreground">{s.description}</p>
+              {s.best_for && <p className="text-xs">Best for: {s.best_for}</p>}
+              {s.exit_profile && (
+                <p className="text-xs text-muted-foreground">
+                  Default exits: stop {s.exit_profile.hard_stop_pct}% · first target +{s.exit_profile.first_target_pct ?? "—"}% ·
+                  trailing {s.exit_profile.trailing_stop_pct}% · flat-trade exit after {s.exit_profile.stagnation_hours}h
+                </p>
+              )}
             </div>
           ))}
           {!list.data?.some((s) => s.id === "liquidity_trend") && (
@@ -230,13 +263,14 @@ export function Strategies() {
             Versions are immutable. Every trade decision records the version and full configuration
             that produced it. Saving restarts the agent in STOPPED state.
           </p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             {(
               [
                 ["min", "Qualify score"],
                 ["watch", "Watch score"],
                 ["hard", "Hard stop (%)"],
                 ["trail", "Trailing stop (%)"],
+                ["stagn", "Flat-trade exit after (hours)"],
               ] as const
             ).map(([k, label]) => (
               <div key={k} className="space-y-1">

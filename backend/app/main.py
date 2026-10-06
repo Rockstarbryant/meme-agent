@@ -23,8 +23,7 @@ from app.db.session import make_engine, make_session_factory
 from app.infra.redis import RateLimiter
 from app.services.hub import EventHub
 from app.services.retention import retention_loop
-from app.strategies.traction_momentum import TractionMomentumConfig
-from app.strategies.liquidity_trend import LiquidityTrendConfig
+from app.strategies import registry as strategy_registry
 
 log = logging.getLogger("arc-agent")
 
@@ -33,22 +32,16 @@ async def seed(sf, settings: Settings) -> None:
     async with sf() as db:
         if await db.get(M.Chain, "arc") is None:
             db.add(M.Chain(id="arc", name="Arc Mainnet", chain_id=settings.arc_chain_id, live_trading_verified=False))
-        if await db.get(M.Strategy, "traction_momentum") is None:
-            db.add(M.Strategy(id="traction_momentum", name="Traction Momentum",
-                              description="Buys only tokens showing measurable, sustained traction; never blind launch sniping."))
-            await db.flush()
+        for spec in strategy_registry.SPECS.values():
+            if await db.get(M.Strategy, spec.id) is None:
+                db.add(M.Strategy(id=spec.id, name=spec.name, description=spec.description))
+                await db.flush()
+            has_default = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == spec.id, M.StrategyVersion.user_id.is_(None)))).first()
+            if not has_default:
+                db.add(M.StrategyVersion(strategy_id=spec.id, user_id=None, version=1, config=spec.default_config().model_dump(mode="json")))
         for d in arc_candidates():
             if not (await db.execute(select(M.Launchpad).where(M.Launchpad.chain_id == d.chain, M.Launchpad.name == d.name))).first():
                 db.add(M.Launchpad(chain_id=d.chain, name=d.name, descriptor=d.model_dump(mode="json"), verified=d.verified, enabled=d.enabled))
-        has_default = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == "traction_momentum", M.StrategyVersion.user_id.is_(None)))).first()
-        if not has_default:
-            db.add(M.StrategyVersion(strategy_id="traction_momentum", user_id=None, version=1, config=TractionMomentumConfig().model_dump(mode="json")))
-        if await db.get(M.Strategy, "liquidity_trend") is None:
-            db.add(M.Strategy(id="liquidity_trend", name="Liquidity Trend",
-                              description="Scores high-liquidity / established Arc tokens from Gecko trending; does not require fresh-launch buyer gates."))
-        has_lt = (await db.execute(select(M.StrategyVersion).where(M.StrategyVersion.strategy_id == "liquidity_trend", M.StrategyVersion.user_id.is_(None)))).first()
-        if not has_lt:
-            db.add(M.StrategyVersion(strategy_id="liquidity_trend", user_id=None, version=1, config=LiquidityTrendConfig().model_dump(mode="json")))
         await db.commit()
 
 

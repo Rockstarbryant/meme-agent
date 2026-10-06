@@ -27,10 +27,81 @@ class ExitConfig(BaseModel):
     trailing_activation_gain_pct: float = 30.0  # armed once first tier is hit or peak gain reaches this
     stagnation_seconds: int = 1800
     stagnation_min_gain_pct: float = 10.0
+    # When True, a flat position is NOT closed as "stagnant" while the market around it is improving (price trending
+    # up over the last hours, or liquidity growing). Needed for established tokens, whose moves play out over hours:
+    # closing them after 30 flat minutes sold positions that rose strongly a few hours later.
+    stagnation_trend_guard: bool = False
     momentum_exit_price_change_5m_pct: float = -8.0
     momentum_exit_max_buy_sell_ratio: float = 1.0
     liquidity_drop_exit_pct: float = 40.0
     exit_max_slippage_pct: float = 15.0
+
+
+    # ---- exit profiles: how long a trade is given to work depends on the kind of token the strategy buys ----
+    @classmethod
+    def launch(cls) -> "ExitConfig":
+        """Fresh launches: fast and violent. Minutes, wide targets, quick stagnation exit (the original defaults)."""
+        return cls()
+
+    @classmethod
+    def swing(cls) -> "ExitConfig":
+        """Established, liquid tokens (liquidity_trend / liquidity_growth): moves take hours and are smaller, so the
+        stop is tighter, targets are closer, and a flat position gets 12 hours (and is kept while the trend is up)."""
+        return cls(hard_stop_pct=15.0,
+                   tiers=[TakeProfitTier(gain_pct=10, sell_pct_of_initial=20), TakeProfitTier(gain_pct=25, sell_pct_of_initial=25),
+                          TakeProfitTier(gain_pct=50, sell_pct_of_initial=25), TakeProfitTier(gain_pct=100, sell_pct_of_initial=15)],
+                   trailing_stop_pct=12.0, trailing_activation_gain_pct=12.0,
+                   stagnation_seconds=12 * 3600, stagnation_min_gain_pct=3.0, stagnation_trend_guard=True,
+                   momentum_exit_price_change_5m_pct=-10.0, liquidity_drop_exit_pct=35.0, exit_max_slippage_pct=10.0)
+
+    @classmethod
+    def pullback(cls) -> "ExitConfig":
+        """Buying a dip in an uptrend: small, quick targets and a tight stop (a failed dip should be cut early)."""
+        return cls(hard_stop_pct=10.0,
+                   tiers=[TakeProfitTier(gain_pct=6, sell_pct_of_initial=25), TakeProfitTier(gain_pct=12, sell_pct_of_initial=25),
+                          TakeProfitTier(gain_pct=25, sell_pct_of_initial=25), TakeProfitTier(gain_pct=50, sell_pct_of_initial=15)],
+                   trailing_stop_pct=7.0, trailing_activation_gain_pct=8.0,
+                   stagnation_seconds=8 * 3600, stagnation_min_gain_pct=2.0, stagnation_trend_guard=True,
+                   momentum_exit_price_change_5m_pct=-8.0, liquidity_drop_exit_pct=35.0, exit_max_slippage_pct=10.0)
+
+    @classmethod
+    def breakout(cls) -> "ExitConfig":
+        """Volume breakouts: ride the move, protect gains quickly, leave if it does not follow through within hours."""
+        return cls(hard_stop_pct=12.0,
+                   tiers=[TakeProfitTier(gain_pct=10, sell_pct_of_initial=20), TakeProfitTier(gain_pct=20, sell_pct_of_initial=25),
+                          TakeProfitTier(gain_pct=40, sell_pct_of_initial=25), TakeProfitTier(gain_pct=80, sell_pct_of_initial=15)],
+                   trailing_stop_pct=10.0, trailing_activation_gain_pct=10.0,
+                   stagnation_seconds=3 * 3600, stagnation_min_gain_pct=3.0, stagnation_trend_guard=False,
+                   momentum_exit_price_change_5m_pct=-8.0, liquidity_drop_exit_pct=35.0, exit_max_slippage_pct=10.0)
+
+
+# The pre-profile defaults. A saved strategy config whose exit settings still equal these was never customised, so
+# it is upgraded to the strategy's own profile instead of keeping launch-token rules (see LiquidityTrendConfig).
+LEGACY_LAUNCH_EXIT = {
+    "hard_stop_pct": 20.0, "trailing_stop_pct": 20.0, "trailing_activation_gain_pct": 30.0, "stagnation_seconds": 1800,
+    "stagnation_min_gain_pct": 10.0, "momentum_exit_price_change_5m_pct": -8.0, "momentum_exit_max_buy_sell_ratio": 1.0,
+    "liquidity_drop_exit_pct": 40.0, "exit_max_slippage_pct": 15.0,
+    "tiers": [(30.0, 15.0), (60.0, 20.0), (100.0, 25.0), (200.0, 25.0)],
+}
+
+
+def is_legacy_launch_exit(raw: object) -> bool:
+    """True when ``raw`` (a stored ExitConfig dict) still holds exactly the old launch-token defaults."""
+    if not isinstance(raw, dict):
+        return False
+    for k, want in LEGACY_LAUNCH_EXIT.items():
+        if k not in raw:
+            continue                      # a missing key means "default", which is the legacy value
+        got = raw[k]
+        if k == "tiers":
+            try:
+                if [(float(t["gain_pct"]), float(t["sell_pct_of_initial"])) for t in got] != want:
+                    return False
+            except (KeyError, TypeError, ValueError):
+                return False
+        elif got != want:
+            return False
+    return True
 
 
 class ExitDecision(BaseModel):
@@ -101,6 +172,23 @@ class PositionManager:
         since_high = (now - pos.last_new_high_at).total_seconds()
         if (held >= c.stagnation_seconds and since_high >= c.stagnation_seconds
                 and pos.gain_pct < c.stagnation_min_gain_pct):
+            if c.stagnation_trend_guard and market is not None and self._improving(market):
+                return []   # flat, but the market around it is improving: keep giving it time
             return close(ExitReason.STAGNATION,
                          f"no new high for {since_high:.0f}s, gain {pos.gain_pct:.1f}% < {c.stagnation_min_gain_pct}%")
         return []
+
+    @staticmethod
+    def _improving(m: MarketState) -> bool:
+        """Is the token's own trend or liquidity turning up? (any one signal is enough to keep waiting)"""
+        for w in ("4h", "6h"):
+            ws = m.windows.get(w)
+            if ws is not None and ws.price_change_pct is not None and ws.price_change_pct > 0:
+                return True
+        w1 = m.windows.get("1h")
+        if w1 is not None and w1.price_change_pct is not None and w1.price_change_pct > 1.0:
+            return True
+        for g in (m.liquidity_growth.get("1h"), m.liquidity_growth.get("6h")):
+            if g is not None and g > 0:
+                return True
+        return False

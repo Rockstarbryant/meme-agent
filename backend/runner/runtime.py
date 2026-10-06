@@ -42,7 +42,7 @@ from app.risk.engine import RiskEngine, RiskLimits
 from app.services.decision import DecisionPipeline
 from app.services.engine import TradingEngine
 from app.strategies.traction_momentum import TractionMomentum, TractionMomentumConfig
-from app.strategies.liquidity_trend import LiquidityTrend, LiquidityTrendConfig
+from app.strategies import registry as strategy_registry
 from app.wallets.base import WalletPolicy, WalletProvider
 from runner import __version__
 from runner.client import ControlPlaneClient, ControlPlaneError, Revoked
@@ -505,29 +505,21 @@ class RunnerRuntime:
             pipeline=pipeline, executor=executor, approver=self.approver,
             exit_manager=PositionManager(cfg.exit), market_data=self.market_data,
             bus=self.bus, idempotency=self.idem,
+            exit_managers={sid: PositionManager(x) for sid, x in
+                           strategy_registry.exit_configs_for_positions(strategy_obj.strategy_id, cfg.exit).items()},
         )
 
 
     def _build_strategy(self, b):
-        """Pick strategy from enabled list + config blob.
-
-        Preference order: first id in strategies_enabled that we know how to build.
-        Config blob may be traction or liquidity shape; unknown keys are ignored by pydantic.
-        """
-        enabled = list(getattr(b, "strategies_enabled", None) or ["traction_momentum"])
+        """The strategy this account runs, built from the bundle: the server puts the ACTIVE strategy's id and saved
+        config in ``b.strategy`` (see control.build_bundle); we only fall back to the selection rule when it is
+        missing or not enabled."""
+        enabled = list(getattr(b, "strategies_enabled", None) or [])
         raw = dict(b.strategy or {})
-        # Prefer liquidity_trend when enabled (established / high-MC tokens).
-        if "liquidity_trend" in enabled:
-            sid = "liquidity_trend"
-        else:
-            sid = raw.get("strategy_id") or (enabled[0] if enabled else "traction_momentum")
-            if sid not in enabled and enabled:
-                sid = enabled[0]
-        if sid == "liquidity_trend":
-            cfg = LiquidityTrendConfig(**{**raw, "strategy_id": "liquidity_trend"})
-            return LiquidityTrend(cfg), cfg
-        cfg = TractionMomentumConfig(**{**raw, "strategy_id": "traction_momentum"})
-        return TractionMomentum(cfg), cfg
+        sid = raw.get("strategy_id")
+        if sid not in strategy_registry.SPECS or (enabled and sid not in enabled):
+            sid = strategy_registry.select_active(enabled)
+        return strategy_registry.build_strategy(sid, raw)
 
     def recompute(self) -> None:
         b = self.bundle
@@ -536,7 +528,7 @@ class RunnerRuntime:
         offline = not self.contact_ok()
         self.controls.emergency_stop = b.emergency_stop
         enabled = list(b.strategies_enabled or [])
-        known = ("traction_momentum", "liquidity_trend")
+        known = strategy_registry.known_ids()
         # Any known strategy enabled is enough; empty list falls back to traction.
         has_strategy = (not enabled) or any(s in known for s in enabled)
         # Do NOT pause solely for brief DNS blips. Offline only suspends *entries*

@@ -46,6 +46,7 @@ export function WalletPanel() {
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState<string | null>(null);
   const [tab, setTab] = useState<"wallet" | "access">("wallet");
+  const [policyConfirm, setPolicyConfirm] = useState(false);
 
   if (wallet.loading && !wallet.data) return <Loading />;
   if (!wallet.data) return wallet.error ? <ErrorState error={wallet.error} onRetry={() => void wallet.reload()} /> : null;
@@ -66,7 +67,9 @@ export function WalletPanel() {
     const signature = await personalSign(address, ch.message);
     await api("/wallet/connect", { method: "POST", body: { address, signature } });
   }, "Wallet connected. Ownership verified by signature; no funds moved.");
-  const savePolicy = () => run("policy", () => api("/wallet/policy", { method: "POST", body: form }), "Policy saved. Existing authorizations were revoked; authorize again.");
+  // In LIVE mode the server refuses a policy change without confirm=true, so the form asks first and then sends it.
+  const savePolicy = () => run("policy", () => api("/wallet/policy", { method: "POST", body: { ...form, confirm: w.mode === "LIVE" } }), "Policy saved. Existing authorizations were revoked; authorize again.");
+  const requestSave = () => (w.mode === "LIVE" ? setPolicyConfirm(true) : void savePolicy());
   const authorize = () => run("authorize", () => api("/wallet/authorize", { method: "POST", body: { capability: "PER_TRADE_SIGNING", expires_in_hours: 24 } }), "Per-trade signing authorized for 24 hours.");
   const provisionCloud = () => run("cloud", () => api("/wallet/cloud/provision", { method: "POST", body: { confirm: true } }), "Privy cloud wallet provisioned. Fund the displayed address with Arc USDC before enabling LIVE.");
   const copyAddress = async (addr: string) => {
@@ -154,7 +157,7 @@ export function WalletPanel() {
           </div>
           {problem && <Alert variant="warning">{problem}</Alert>}
           <div className="flex flex-wrap gap-2">
-            <Button disabled={!!problem || busy !== null} onClick={() => void savePolicy()}>Save policy</Button>
+            <Button disabled={!!problem || busy !== null} onClick={requestSave}>Save policy</Button>
             <Button variant="outline" disabled={!verified || !w.policy || busy !== null} onClick={() => void authorize()}>Authorize per-trade signing</Button>
             <Button variant="outline" disabled title="Not available: see Circle Agent Wallet below">Authorize autonomous delegation</Button>
             <Button variant="destructive" disabled={!w.authorization || busy !== null} onClick={() => setRevokeOpen(true)}>Revoke authorization</Button>
@@ -198,6 +201,9 @@ export function WalletPanel() {
           {(activity.data ?? []).length === 0 && <li className="text-muted-foreground">No wallet activity yet.</li>}</ul></CardContent>
       </Card>
 
+      <ConfirmDialog open={policyConfirm} onOpenChange={setPolicyConfirm} busy={busy !== null} destructive title="Change the LIVE wallet policy?" confirmLabel="Save policy"
+        description={`LIVE mode: this changes what the agent may spend. Allocated ${usd(form.allocated_capital_usdc)}, max ${usd(form.max_trade_usdc)} per trade, ${usd(form.max_position_usdc)} per position, daily loss limit ${usd(form.max_daily_loss_usdc)}. Existing authorizations are revoked and must be granted again.`}
+        onConfirm={async () => { await savePolicy(); setPolicyConfirm(false); }} />
       <ConfirmDialog open={revokeOpen} onOpenChange={setRevokeOpen} destructive busy={busy !== null} title="Revoke authorization?" confirmLabel="Revoke"
         description="The agent immediately loses permission to queue trades. If LIVE is on and no positions are open it switches back to PAPER." onConfirm={revoke} />
     </div>

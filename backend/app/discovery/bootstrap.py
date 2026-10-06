@@ -170,7 +170,7 @@ def build_global_market_data(settings: Any):
 # Fields added after the original snapshot format. They are carried generically so a snapshot served from the
 # registry (instead of a live fetch) still has every window / holder statistic the strategy, risk engine and AI use.
 _EXTRA_SNAPSHOT_FIELDS = (
-    "token_name", "windows", "holder_growth", "top_5pct_holders_pct", "top_20pct_holders_pct",
+    "token_name", "windows", "holder_growth", "liquidity_growth", "market_cap_growth", "top_5pct_holders_pct", "top_20pct_holders_pct",
     "top_30pct_holders_pct", "holders_sampled", "volume_1m", "buys_1m", "sells_1m", "unique_sellers_1m",
     "unique_buyers_15m", "unique_sellers_15m", "price_change_1m", "recent_high", "volatility_pct", "pool_id",
 )
@@ -336,6 +336,10 @@ class GlobalPipeline:
         # nearly every established token, which is why they never refreshed.
         self.strategy = TractionMomentum(TractionMomentumConfig())
         self.lt_strategy = LiquidityTrend(LiquidityTrendConfig())
+        # Screening uses EVERY registered strategy (best score wins) so a token that only suits a newer strategy
+        # is still kept warm and monitored.
+        from app.strategies import registry as _registry
+        self._screen_strategies = [spec.build()[0] for spec in _registry.SPECS.values()]
         self.snapshot_max_age_s = float(getattr(settings, "eval_snapshot_max_age_s", 150.0))
         self.retention_s = float(getattr(settings, "retention_hours", 24.0)) * 3600.0
         self._fetch_budget = 0
@@ -559,6 +563,20 @@ class GlobalPipeline:
                 token.creator_address = m.creator_address
             if m.token_created_at and not token.launched_at:
                 token.launched_at = m.token_created_at
+            # Liquidity / market-cap history (kept with the token) so strategies and exits can ask "is liquidity
+            # growing?": providers only report the current value.
+            try:
+                import time as _time
+                from app.domain.history import growth, update_history
+                meta = dict(token.meta or {})
+                hist = update_history(list(meta.get("hist") or []), _time.time(), m.liquidity, m.market_cap, m.price)
+                meta["hist"] = hist
+                token.meta = meta
+                now_ts = _time.time()
+                snap["liquidity_growth"] = growth(hist, now_ts, "liquidity", m.liquidity)
+                snap["market_cap_growth"] = growth(hist, now_ts, "market_cap", m.market_cap)
+            except Exception:  # noqa: BLE001 - history is an extra; never lose the snapshot over it
+                log.exception("history update failed for %s", token.token_key)
             await self.store.write_market_snapshot(token, snap)
             return snap
         raise DataUnavailable(f"no market state for {token.token_key}")
@@ -571,7 +589,7 @@ class GlobalPipeline:
             m = market_state_from_snapshot(snap, token)
             now = utcnow()
             best = 0.0
-            for strat in (self.strategy, self.lt_strategy):
+            for strat in self._screen_strategies:
                 try:
                     sig = strat.score(m, now)
                     if sig and sig.score is not None:

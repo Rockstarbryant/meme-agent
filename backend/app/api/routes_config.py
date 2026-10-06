@@ -11,8 +11,7 @@ from app.db import repo
 from app.risk.engine import RiskLimits
 from app.services import control
 from app.services.decision import tighten_limits
-from app.strategies.traction_momentum import TractionMomentumConfig
-from app.strategies.liquidity_trend import LiquidityTrendConfig
+from app.strategies import registry as strategy_registry
 
 router = APIRouter(tags=["config"])
 
@@ -46,10 +45,37 @@ class BlacklistIn(BaseModel):
 @router.get("/strategies")
 async def strategies(user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await control.get_config(db, user.id)
-    rows = (await db.execute(select(M.Strategy))).scalars().all()
+    rows = {s.id: s for s in (await db.execute(select(M.Strategy))).scalars().all()}
     enabled = set(cfg.strategies_enabled or [])
-    active = next((x for x in ("liquidity_trend", "traction_momentum") if x in enabled), "traction_momentum")
-    return [{"id": s.id, "name": s.name, "description": s.description, "enabled": s.id in enabled, "active": s.id == active} for s in rows]
+    chosen = await repo.get_setting(db, f"user:{user.id}:active_strategy")
+    active = strategy_registry.select_active(list(enabled), (chosen or {}).get("id") if isinstance(chosen, dict) else chosen)
+    out = []
+    for spec in strategy_registry.SPECS.values():
+        row = rows.get(spec.id)
+        ex = spec.default_exit()
+        out.append({"id": spec.id, "name": row.name if row else spec.name, "description": row.description if row else spec.description,
+                    "enabled": spec.id in enabled, "active": spec.id == active, "profile": spec.profile, "best_for": spec.best_for,
+                    "weights": spec.default_config().weights.model_dump() if hasattr(spec.default_config(), "weights") else {},
+                    "exit_profile": {"hard_stop_pct": ex.hard_stop_pct, "trailing_stop_pct": ex.trailing_stop_pct,
+                                     "first_target_pct": ex.tiers[0].gain_pct if ex.tiers else None,
+                                     "stagnation_hours": round(ex.stagnation_seconds / 3600.0, 2)}})
+    return out
+
+
+@router.put("/strategies/{sid}/activate")
+async def activate_strategy(sid: str, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Choose which enabled strategy the agent runs. It is enabled automatically if it was not."""
+    if strategy_registry.get(sid) is None:
+        raise HTTPException(404, "unknown strategy")
+    cfg = await control.get_config(db, user.id)
+    enabled = list(cfg.strategies_enabled or [])
+    if sid not in enabled:
+        enabled.append(sid)
+    await repo.put_setting(db, f"user:{user.id}:active_strategy", {"id": sid}, user.email)
+    await control.bump(db, user.id, strategies_enabled=enabled)
+    await repo.audit(db, user.id, user.email, "STRATEGY_ACTIVATED", strategy=sid)
+    await db.commit()
+    return {"strategy": sid, "active": True, "note": "Open positions keep the exit rules of the strategy that opened them."}
 
 
 @router.put("/strategies/{sid}/enabled")
@@ -72,14 +98,14 @@ async def versions(sid: str, user: M.User = Depends(current_user), db: AsyncSess
 
 @router.post("/strategies/{sid}/versions", status_code=201)
 async def new_version(sid: str, body: StrategyVersionIn, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    if sid not in ("traction_momentum", "liquidity_trend"):
+    spec = strategy_registry.get(sid)
+    if spec is None:
         raise HTTPException(404, "unknown strategy")
     if user.mode == "LIVE" and not body.confirm:
         raise HTTPException(409, "changing strategy configuration in LIVE mode requires confirm=true")
     top = (await db.execute(select(func.max(M.StrategyVersion.version)).where(M.StrategyVersion.strategy_id == sid))).scalar() or 0
     try:
-        Cls = LiquidityTrendConfig if sid == "liquidity_trend" else TractionMomentumConfig
-        cfg = Cls(**{**body.config, "strategy_id": sid, "version": top + 1})
+        cfg = spec.config_cls(**{**body.config, "strategy_id": sid, "version": top + 1})
     except (ValidationError, TypeError) as e:
         raise HTTPException(422, str(e)[:500])
     db.add(M.StrategyVersion(strategy_id=sid, user_id=user.id, version=cfg.version, config=cfg.model_dump(mode="json")))

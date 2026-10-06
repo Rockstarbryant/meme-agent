@@ -284,12 +284,48 @@ async def portfolio(request: Request, user: M.User = Depends(current_user), db: 
     realized_today = row.realized_today_usdc if row and row.day == now.date().isoformat() else 0.0
     snaps = (await db.execute(select(M.PortfolioSnapshot).join(M.Portfolio, M.Portfolio.id == M.PortfolioSnapshot.portfolio_id)
                               .where(M.Portfolio.user_id == user.id, M.Portfolio.mode == user.mode).order_by(M.PortfolioSnapshot.at.desc()).limit(200))).scalars().all()
+    from app.services.performance import derive_starting_value
+    realized_total = row.realized_total_usdc if row else 0.0
+    start, start_derived = derive_starting_value(row.starting_cash_usdc if row else cash, cash + expo, realized_total, sum(unreal))
     return {"mode": user.mode, "label": user.mode, "data_source": st.get("data_source") or "no runner connected", "reported_by_runner": row is not None,
             "cash_usdc": cash, "exposure_usdc": expo, "total_value_usdc": cash + expo,
-            "starting_cash_usdc": row.starting_cash_usdc if row else cash, "realized_pnl_usdc": row.realized_total_usdc if row else 0.0,
+            "starting_cash_usdc": start, "starting_cash_derived": start_derived, "realized_pnl_usdc": realized_total,
             "unrealized_pnl_usdc": sum(unreal), "daily_pnl_usdc": realized_today + sum(min(u, 0.0) for u in unreal),
             "open_positions": len(open_), "limits": limits.model_dump(mode="json"),
             "snapshots": [{"at": x.at, "total_value_usdc": x.total_value_usdc, "daily_pnl_usdc": x.daily_pnl_usdc} for x in reversed(snaps)]}
+
+
+_RANGES = {"1h": 3600, "6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "all": None}
+
+
+@router.get("/portfolio/history")
+async def portfolio_history(range: str = Query("24h"), user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Portfolio value over time for the dashboard chart, downsampled to ~240 points without losing peaks and dips."""
+    from app.services.performance import downsample
+    if range not in _RANGES:
+        raise HTTPException(422, f"range must be one of {', '.join(_RANGES)}")
+    q = (select(M.PortfolioSnapshot.at, M.PortfolioSnapshot.total_value_usdc)
+         .join(M.Portfolio, M.Portfolio.id == M.PortfolioSnapshot.portfolio_id)
+         .where(M.Portfolio.user_id == user.id, M.Portfolio.mode == user.mode))
+    secs = _RANGES[range]
+    if secs:
+        q = q.where(M.PortfolioSnapshot.at >= datetime.now(timezone.utc) - timedelta(seconds=secs))
+    rows = (await db.execute(q.order_by(M.PortfolioSnapshot.at.desc()).limit(20000))).all()
+    pts = [(_utc(at).timestamp(), float(v)) for at, v in reversed(rows)]
+    ds = downsample(pts, 240)
+    vals = [v for _, v in pts]
+    return {"range": range, "points": [{"t": t, "v": v} for t, v in ds], "samples": len(pts),
+            "first": vals[0] if vals else None, "last": vals[-1] if vals else None,
+            "high": max(vals) if vals else None, "low": min(vals) if vals else None}
+
+
+@router.get("/portfolio/performance")
+async def portfolio_performance(user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Win rate, profit factor and breakdowns from the account's closed positions in the current mode."""
+    from app.services.performance import performance
+    rows = (await db.execute(select(M.Position).where(M.Position.user_id == user.id, M.Position.mode == user.mode, M.Position.status == "CLOSED")
+                             .order_by(M.Position.closed_at.desc()).limit(500))).scalars().all()
+    return performance(rows)
 
 
 @router.get("/activity")
