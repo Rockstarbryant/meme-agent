@@ -8,8 +8,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { RunnerPanel } from "@/components/features/runner-panel";
-import { CloudRunnerPanel, RunnerModeCard } from "@/components/features/runner-mode";
+import { Cloud, Laptop } from "lucide-react";
 import { useToast } from "@/components/toast";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
@@ -86,7 +85,6 @@ export function AgentControl() {
 
   return (
     <div className="space-y-4">
-      <RunnerModeCard status={s} onChanged={async () => { await status.reload(); await refresh(); }} />
       <Card>
         <CardHeader><CardTitle>Agent</CardTitle></CardHeader>
         <CardContent className="space-y-3">
@@ -124,7 +122,14 @@ export function AgentControl() {
         </CardContent>
       </Card>
 
-      {cloud ? <CloudRunnerPanel status={s} /> : <RunnerPanel />}
+      <Card><CardContent className="flex flex-wrap items-center gap-3 p-4 text-sm">
+        {cloud ? <Cloud className="h-5 w-5" aria-hidden /> : <Laptop className="h-5 w-5" aria-hidden />}
+        <div className="min-w-0 flex-1">
+          <p className="font-medium">{cloud ? "Cloud runner" : "Local runner"} <Badge variant={s.runner?.online ? "success" : "warning"}>{s.runner?.online ? "ONLINE" : "OFFLINE"}</Badge></p>
+          <p className="text-xs text-muted-foreground">{cloud ? "Your agent runs on our servers." : "Your agent runs on your own machine."} Switching runner or pairing a local one is a setting.</p>
+        </div>
+        <Link href="/settings?tab=runner" className="text-sm underline">Runner settings</Link>
+      </CardContent></Card>
 
       <Card>
         <CardHeader><CardTitle>Wallet and policy</CardTitle></CardHeader>

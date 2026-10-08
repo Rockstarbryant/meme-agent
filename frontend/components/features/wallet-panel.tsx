@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import Link from "next/link";
 import { CheckCircle2, XCircle } from "lucide-react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ErrorState, Loading } from "@/components/states";
@@ -35,7 +36,12 @@ export function validatePolicy(p: WalletPolicy): string | null {
 
 const walletMessage = (e: unknown): ApiError => (e instanceof ApiError ? e : new ApiError(0, (e as { message?: string })?.message ?? "Wallet request failed"));
 
-export function WalletPanel() {
+/** /wallet shows the money (balance, deposit, withdraw, history). Policy, authorization and wallet connection are
+ *  settings and live under Settings > Wallet and policy. Both views share this component's state and handlers. */
+export function WalletPanel() { return <WalletPanelBase view="overview" />; }
+export function WalletPolicySettings() { return <WalletPanelBase view="settings" />; }
+
+function WalletPanelBase({ view }: { view: "overview" | "settings" }) {
   const wallet = useApi<WalletState>("/wallet");
   const signing = useApi<SigningRequest[]>("/wallet/signing-requests");
   const activity = useApi<AuditLog[]>("/wallet/activity");
@@ -45,7 +51,6 @@ export function WalletPanel() {
   const [notice, setNotice] = useState<string | null>(null);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState<string | null>(null);
-  const [tab, setTab] = useState<"wallet" | "access">("wallet");
   const [policyConfirm, setPolicyConfirm] = useState(false);
 
   if (wallet.loading && !wallet.data) return <Loading />;
@@ -87,25 +92,18 @@ export function WalletPanel() {
   });
 
   const cap = w.execution_capability.capability;
-  const tabs = (
-    <div className="flex gap-2" role="tablist" aria-label="Wallet sections">
-      {([["wallet", "Wallet"], ["access", "Policy and access"]] as const).map(([k, label]) => (
-        <Button key={k} role="tab" aria-selected={tab === k} size="sm" variant={tab === k ? "default" : "outline"} onClick={() => setTab(k)}>{label}</Button>))}
-    </div>
-  );
-  if (tab === "wallet") {
+  if (view === "overview") {
     return (
       <div className="space-y-4">
-        {tabs}
         {error && <ErrorState error={error} />}
         {notice && <Alert variant="success">{notice}</Alert>}
         <AgentWalletOverview w={w} busy={busy !== null} onProvision={() => void provisionCloud()} onChanged={async () => { await wallet.reload(); await activity.reload(); }} />
+        <p className="text-xs text-muted-foreground">Trading limits, per-trade signing and wallet connection are in <Link className="underline" href="/settings?tab=wallet">Settings &gt; Wallet and policy</Link>.</p>
       </div>
     );
   }
   return (
     <div className="space-y-4">
-      {tabs}
       {error && <ErrorState error={error} />}
       {notice && <Alert variant="success">{notice}</Alert>}
 

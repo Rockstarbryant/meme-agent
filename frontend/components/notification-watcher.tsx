@@ -4,6 +4,7 @@ import { useToast } from "@/components/toast";
 import { useApi } from "@/hooks/use-api";
 import { useEvents } from "@/lib/events";
 import { usd } from "@/lib/format";
+import { readPrefs, shouldToast } from "@/lib/prefs";
 import type { AgentStatus } from "@/types/api";
 
 /** Human wording for ExitReason values. */
@@ -37,11 +38,11 @@ export function NotificationWatcher() {
     lastState.current = s;
     if (prev === null || prev === s) return;
     const t = STATE_TEXT[s];
-    if (t && !autoSuppressed()) toast({ id: "agent-state", kind: t.kind, title: t.title });
+    if (t && !autoSuppressed() && readPrefs().agentState) toast({ id: "agent-state", kind: t.kind, title: t.title });
   }, [status.data?.state, toast, autoSuppressed]);
 
   useEffect(() => subscribe((ev) => {
-    if (autoSuppressed()) return;
+    if (autoSuppressed() || !shouldToast(ev.type, readPrefs())) return;   // honours Settings > Notifications
     const p = ev.payload ?? {};
     switch (ev.type) {
       case "ORDER_SUBMITTED":

@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import { ArrowDownToLine, ArrowUpFromLine, Check, Copy, ExternalLink, History, Wallet as WalletIcon } from "lucide-react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { ModeTabs, type HistoryMode } from "@/components/mode-tabs";
 import { ErrorState } from "@/components/states";
 import { useToast } from "@/components/toast";
 import { Alert } from "@/components/ui/alert";
@@ -44,8 +45,8 @@ const KIND_STYLE: Record<LedgerEntry["kind"], { label: string; variant: "success
   BUY: { label: "Buy", variant: "default" }, SELL: { label: "Sell", variant: "success" }, WITHDRAWAL: { label: "Withdrawal", variant: "warning" }, EVENT: { label: "Event", variant: "default" },
 };
 
-export function LedgerList({ rows }: { rows: LedgerEntry[] }) {
-  if (rows.length === 0) return <p className="text-sm text-muted-foreground">No transactions yet. Trades and withdrawals appear here as they happen.</p>;
+export function LedgerList({ rows, mode }: { rows: LedgerEntry[]; mode?: HistoryMode }) {
+  if (rows.length === 0) return <p className="text-sm text-muted-foreground">{mode === "PAPER" ? "No paper trades yet." : mode === "LIVE" ? "No live transactions yet. Real trades and withdrawals appear here as they happen." : "No transactions yet."}</p>;
   return (
     <ul className="divide-y rounded-md border">
       {rows.map((r, i) => {
@@ -81,7 +82,9 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
   const { toast } = useToast();
   const paper = w.mode === "PAPER";
   const portfolio = useApi<Portfolio>("/portfolio", { refreshOn: ["POSITION_OPENED", "POSITION_CLOSED"], intervalMs: 20000 });
-  const ledger = useApi<LedgerEntry[]>("/wallet/ledger?limit=100", { refreshOn: ["POSITION_OPENED", "POSITION_CLOSED", "ORDER_FILLED"], intervalMs: 20000 });
+  const [histMode, setHistMode] = useState<HistoryMode | null>(null);
+  const shownMode: HistoryMode = histMode ?? (paper ? "PAPER" : "LIVE");
+  const ledger = useApi<LedgerEntry[]>(`/wallet/ledger?limit=100&mode=${shownMode}`, { refreshOn: ["POSITION_OPENED", "POSITION_CLOSED", "ORDER_FILLED"], intervalMs: 20000 });
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -182,9 +185,11 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
 
       {/* History */}
       <Card>
-        <CardHeader><div className="flex items-center gap-2"><History className="h-4 w-4" aria-hidden /><CardTitle>Transaction history</CardTitle></div></CardHeader>
-        <CardContent>
-          {ledger.error && !ledger.data ? <ErrorState error={ledger.error} onRetry={() => void ledger.reload()} /> : <LedgerList rows={ledger.data ?? []} />}
+        <CardHeader><div className="flex flex-wrap items-center gap-3"><div className="flex items-center gap-2"><History className="h-4 w-4" aria-hidden /><CardTitle>Transaction history</CardTitle></div>
+          <ModeTabs value={shownMode} onChange={setHistMode} current={paper ? "PAPER" : "LIVE"} label="History mode" /></div></CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-muted-foreground">{shownMode === "PAPER" ? "Paper history: simulated trades with virtual money. There are no blockchain transactions, withdrawals or deposits here." : "Live history: real trades with their on-chain transaction links, plus withdrawals and wallet events."}</p>
+          {ledger.error && !ledger.data ? <ErrorState error={ledger.error} onRetry={() => void ledger.reload()} /> : <LedgerList rows={ledger.data ?? []} mode={shownMode} />}
         </CardContent>
       </Card>
 

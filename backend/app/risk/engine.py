@@ -18,12 +18,12 @@ log = logging.getLogger(__name__)
 
 
 class RiskLimits(BaseModel):
-    max_trade_usdc: float = 25.0
-    max_position_usdc: float = 50.0
+    max_trade_usdc: float = 3.0
+    max_position_usdc: float = 3.0
     max_daily_loss_usdc: float = 50.0
-    max_total_exposure_usdc: float = 250.0
+    max_total_exposure_usdc: float = 5.0
     max_open_positions: int = 5
-    max_chain_exposure_usdc: float = 250.0
+    max_chain_exposure_usdc: float = 3.0
     max_launchpad_exposure_usdc: float = 100.0
     max_slippage_pct: float = 2.0
     min_liquidity_usdc: float = 10_000.0

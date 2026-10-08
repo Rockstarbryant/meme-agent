@@ -82,11 +82,16 @@ def _pos(p) -> dict:
 
 
 @router.get("/opportunities")
-async def opportunities(request: Request, limit: int = Query(50, le=200), action: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def opportunities(request: Request, limit: int = Query(50, le=200), action: str | None = None, mode: str | None = None,
+                        user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     # Only opportunities from the retention window (default 24h) are shown; older ones are also deleted hourly.
+    # Decisions are made per trading mode: the list shows the CURRENT mode's (mode=ALL for both).
+    scope = mode_scope(mode, user)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1.0, C(request).settings.retention_hours))
-    rows = (await db.execute(select(M.Decision).where(M.Decision.user_id == user.id, M.Decision.created_at >= cutoff)
-                             .order_by(M.Decision.created_at.desc()).limit(1000))).scalars().all()
+    q = select(M.Decision).where(M.Decision.user_id == user.id, M.Decision.created_at >= cutoff)
+    if scope:
+        q = q.where(M.Decision.mode == scope)
+    rows = (await db.execute(q.order_by(M.Decision.created_at.desc()).limit(1000))).scalars().all()
     seen, out = set(), []
     for d in rows:  # latest decision per token
         if d.token_key in seen:
@@ -226,19 +231,34 @@ async def decision_detail(decision_id: str, user: M.User = Depends(current_user)
     }
 
 
+def mode_scope(mode: str | None, user: M.User) -> str | None:
+    """Which trading mode a history list shows: the account's CURRENT mode by default, PAPER or LIVE on request,
+    ALL for both. PAPER and LIVE history are different things (virtual vs real money) and are never mixed unless asked."""
+    m = (mode or user.mode or "PAPER").upper()
+    if m == "ALL":
+        return None
+    if m not in ("PAPER", "LIVE"):
+        raise HTTPException(422, "mode must be PAPER, LIVE or ALL")
+    return m
+
+
 def _utc(dt):
     return None if dt is None else (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc))
 
 
 @router.get("/positions")
-async def positions(status: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def positions(status: str | None = None, mode: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    scope = mode_scope(mode, user)
     q = select(M.Position).where(M.Position.user_id == user.id).order_by(M.Position.opened_at.desc()).limit(200)
+    if scope:
+        q = q.where(M.Position.mode == scope)
     if status:
         q = q.where(M.Position.status == status.upper())
     rows = (await db.execute(q)).scalars().all()
     out = [_pos(p) for p in rows]
     # Exit details come from the position's SELL orders: average exit price and the proceeds actually received.
-    sells = (await db.execute(select(M.Order).where(M.Order.user_id == user.id, M.Order.side == "SELL", M.Order.status == "FILLED")
+    sells = (await db.execute(select(M.Order).where(M.Order.user_id == user.id, M.Order.side == "SELL", M.Order.status == "FILLED",
+                                                    *( [M.Order.mode == scope] if scope else [] ))
                               .order_by(M.Order.created_at.desc()).limit(1000))).scalars().all()
     now = datetime.now(timezone.utc)
     for p, row in zip(rows, out):
@@ -258,11 +278,18 @@ async def positions(status: str | None = None, user: M.User = Depends(current_us
 
 
 @router.get("/orders")
-async def orders(limit: int = Query(100, le=500), user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db), request: Request = None):
-    rows = (await db.execute(select(M.Order).where(M.Order.user_id == user.id).order_by(M.Order.created_at.desc()).limit(limit))).scalars().all()
-    ex = C(request).settings.arc_explorer_url or None
+async def orders(limit: int = Query(100, le=500), mode: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db), request: Request = None):
+    scope = mode_scope(mode, user)
+    q = select(M.Order).where(M.Order.user_id == user.id).order_by(M.Order.created_at.desc()).limit(limit)
+    if scope:
+        q = q.where(M.Order.mode == scope)
+    rows = (await db.execute(q)).scalars().all()
+    ex = (C(request).settings.arc_explorer_url or "").rstrip("/")
+    # An explorer link only exists for a REAL transaction. Paper orders have no transaction, and used to be given the
+    # bare explorer address as if they had one.
     return [{"id": o.id, "decision_id": o.decision_id, "mode": o.mode, "side": o.side, "token_address": o.token_address, "status": o.status,
-             "simulated": o.simulated, "label": "PAPER (SIMULATED)" if o.simulated else "LIVE", "tx_hash": o.tx_hash, "explorer_url": ex,
+             "simulated": o.simulated, "label": "PAPER (SIMULATED)" if o.simulated else "LIVE", "tx_hash": o.tx_hash,
+             "explorer_url": (f"{ex}/tx/{o.tx_hash}" if (ex and o.tx_hash and not o.simulated) else None),
              "requested_amount_usdc": o.requested_amount_usdc, "filled_quantity": o.filled_quantity, "avg_price": o.avg_price,
              "fee_usdc": o.fee_usdc, "slippage_pct": o.slippage_pct, "error": o.error, "at": o.created_at} for o in rows]
 
@@ -329,12 +356,18 @@ async def portfolio_performance(user: M.User = Depends(current_user), db: AsyncS
 
 
 @router.get("/activity")
-async def activity(limit: int = Query(100, le=500), type: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    q = select(M.EventRow).where(M.EventRow.user_id == user.id).order_by(M.EventRow.at.desc()).limit(limit)
+async def activity(limit: int = Query(100, le=500), type: str | None = None, mode: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Events, newest first. Events about a decision (orders, positions, exits) carry that decision's trading mode and are
+    filtered by it; system events (agent state, errors, kill switch) belong to no single mode and always appear."""
+    scope = mode_scope(mode, user)
+    q = select(M.EventRow, M.Decision.mode).outerjoin(M.Decision, M.Decision.id == M.EventRow.correlation_id).where(M.EventRow.user_id == user.id)
+    if scope:
+        q = q.where((M.Decision.mode == scope) | M.Decision.id.is_(None))
     if type:
         q = q.where(M.EventRow.type == type.upper())
-    return [{"id": e.id, "type": e.type, "at": e.at, "correlation_id": e.correlation_id,
-             "payload": {k: v for k, v in e.payload.items() if k != "decision"}} for e in (await db.execute(q)).scalars().all()]
+    rows = (await db.execute(q.order_by(M.EventRow.at.desc()).limit(limit))).all()
+    return [{"id": e.id, "type": e.type, "at": e.at, "correlation_id": e.correlation_id, "mode": dmode,
+             "payload": {k: v for k, v in e.payload.items() if k != "decision"}} for e, dmode in rows]
 
 
 @router.get("/audit-logs")

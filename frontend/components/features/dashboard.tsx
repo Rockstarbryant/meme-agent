@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { Activity, ArrowDownRight, ArrowUpRight, Layers, ShieldCheck, Target, Wallet as WalletIcon } from "lucide-react";
 import { ActionBadge, ModeBadge, SimulatedLabel } from "@/components/badges";
+import { PageHeader } from "@/components/page-header";
 import { AreaChart, Sparkline } from "@/components/charts/area-chart";
 import { exitReasonLabel } from "@/components/notification-watcher";
 import { ErrorState, Loading } from "@/components/states";
@@ -81,6 +82,7 @@ export function Dashboard() {
 
   return (
     <div className="space-y-4">
+      <PageHeader title="Dashboard" description={`Your ${p.label === "PAPER" ? "paper" : "live"} portfolio at a glance.`} />
       {/* Hero: the one number that matters, with its chart */}
       <Card className="overflow-hidden border-primary/30 bg-gradient-to-br from-primary/10 via-background to-background">
         <CardContent className="space-y-3 p-4 md:p-5">

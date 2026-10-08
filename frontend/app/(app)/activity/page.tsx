@@ -1,5 +1,11 @@
 import { Activity } from "@/components/features/activity";
+import { PageHeader } from "@/components/page-header";
 
 export default function Page() {
-  return (<><h1 className="text-lg font-semibold">Activity</h1><Activity /></>);
+  return (
+    <>
+      <PageHeader title="Activity" description="What the agent did and why: events from the current trading mode, plus a record of the changes you made." />
+      <Activity />
+    </>
+  );
 }

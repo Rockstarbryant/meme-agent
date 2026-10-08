@@ -273,12 +273,21 @@ async def complete_signing(rid: str, body: SignedIn, user: M.User = Depends(curr
 
 
 @router.get("/ledger")
-async def wallet_ledger(request: Request, limit: int = 100, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """One transaction history for the agent wallet: trades (buys and sells), withdrawals and wallet events, newest first."""
+async def wallet_ledger(request: Request, limit: int = 100, mode: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Transaction history, newest first, for ONE trading mode (default: the current one; ALL shows both).
+
+    LIVE = real transactions (trades with on-chain hashes, withdrawals, wallet events). PAPER = simulated trades only:
+    virtual money has no withdrawals, no wallet events and no explorer links."""
     limit = max(1, min(int(limit), 300))
+    scope = (mode or user.mode or "PAPER").upper()
+    if scope not in ("PAPER", "LIVE", "ALL"):
+        raise HTTPException(422, "mode must be PAPER, LIVE or ALL")
     explorer = (C(request).settings.arc_explorer_url or "").rstrip("/")
     link = (lambda h: f"{explorer}/tx/{h}" if (explorer and h) else None)
-    orders = (await db.execute(select(M.Order).where(M.Order.user_id == user.id).order_by(M.Order.created_at.desc()).limit(limit))).scalars().all()
+    oq = select(M.Order).where(M.Order.user_id == user.id).order_by(M.Order.created_at.desc()).limit(limit)
+    if scope != "ALL":
+        oq = oq.where(M.Order.mode == scope)
+    orders = (await db.execute(oq)).scalars().all()
     ids = {o.decision_id for o in orders if o.decision_id}
     names: dict[str, str | None] = {}
     if ids:
@@ -289,16 +298,17 @@ async def wallet_ledger(request: Request, limit: int = 100, user: M.User = Depen
         notional = (o.filled_quantity or 0.0) * (o.avg_price or 0.0) if o.side == "SELL" else (o.requested_amount_usdc or 0.0)
         out.append({"at": o.created_at, "kind": o.side, "title": f"{'Bought' if o.side == 'BUY' else 'Sold'} {names.get(o.decision_id) or o.token_address[:10]}",
                     "amount_usdc": -notional if o.side == "BUY" else notional, "status": o.status, "mode": o.mode, "simulated": o.simulated,
-                    "tx_hash": o.tx_hash, "explorer_url": link(o.tx_hash), "detail": o.error, "token_address": o.token_address, "fee_usdc": o.fee_usdc})
+                    "tx_hash": o.tx_hash, "explorer_url": (None if o.simulated else link(o.tx_hash)), "detail": o.error, "token_address": o.token_address, "fee_usdc": o.fee_usdc})
+    real = scope in ("LIVE", "ALL")     # withdrawals and wallet events only exist for real funds
     wd = (await db.execute(select(M.RunnerCommand).where(M.RunnerCommand.user_id == user.id, M.RunnerCommand.type == "WITHDRAW_USDC")
-                           .order_by(M.RunnerCommand.created_at.desc()).limit(50))).scalars().all()
+                           .order_by(M.RunnerCommand.created_at.desc()).limit(50))).scalars().all() if real else []
     for c in wd:
         status = {"PENDING": "PENDING", "DONE": "SUBMITTED", "FAILED": "FAILED"}.get(c.status, c.status)
         tx = (c.detail or "").rsplit(" ", 1)[-1] if (c.status == "DONE" and "0x" in (c.detail or "")) else None
         out.append({"at": c.created_at, "kind": "WITHDRAWAL", "title": f"Withdrawal to {str((c.payload or {}).get('to', ''))[:10]}...",
                     "amount_usdc": -float((c.payload or {}).get("amount_usdc") or 0.0), "status": status, "mode": "LIVE", "simulated": False,
                     "tx_hash": tx, "explorer_url": link(tx), "detail": c.detail or None})
-    audit = (await db.execute(select(M.AuditLog).where(M.AuditLog.user_id == user.id, M.AuditLog.action.like("WALLET_%")).order_by(M.AuditLog.at.desc()).limit(50))).scalars().all()
+    audit = (await db.execute(select(M.AuditLog).where(M.AuditLog.user_id == user.id, M.AuditLog.action.like("WALLET_%")).order_by(M.AuditLog.at.desc()).limit(50))).scalars().all() if real else []
     for a in audit:
         if a.action == "WALLET_WITHDRAW_REQUESTED":
             continue   # already shown as the withdrawal itself

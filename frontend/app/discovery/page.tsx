@@ -82,7 +82,6 @@ function shortAddr(a: string): string {
 export default function DiscoveryPage() {
   const [window, setWindow] = useState<"24h" | "72h">("24h");
   const [data, setData] = useState<HistResp | null>(null);
-  const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [searchResults, setSearchResults] = useState<TokenCard[]>([]);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
@@ -91,17 +90,16 @@ export default function DiscoveryPage() {
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
+  // Loading is derived: the data on screen is for a different window than the one selected (or there is none yet).
+  const loading = data === null || data.window !== window;
+
   useEffect(() => {
-    setLoading(true);
     api<HistResp>("/discovery/historical/" + window)
       .then(function (r) {
         setData(r);
       })
       .catch(function () {
         setData({ window: window, tokens: [], count: 0 });
-      })
-      .finally(function () {
-        setLoading(false);
       });
   }, [window]);
 

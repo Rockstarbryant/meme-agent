@@ -7,9 +7,11 @@ import { useToast } from "@/components/toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ModeTabs, type HistoryMode } from "@/components/mode-tabs";
 import { Empty, ErrorState, Loading } from "@/components/states";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { waitForCommand } from "@/lib/commands";
 import { duration, pct, pnlClass, price, shortAddr, signedUsd, usd } from "@/lib/format";
 import type { Position } from "@/types/api";
@@ -94,7 +96,10 @@ function Summary({ rows }: { rows: Position[] }) {
 }
 
 export function Positions() {
-  const res = useApi<Position[]>("/positions", { refreshOn: ["POSITION_OPENED", "POSITION_UPDATED", "POSITION_CLOSED"], intervalMs: 10000 });
+  const { user } = useAuth();
+  const [picked, setPicked] = useState<HistoryMode | null>(null);
+  const mode: HistoryMode = picked ?? (user?.mode === "LIVE" ? "LIVE" : "PAPER");
+  const res = useApi<Position[]>(`/positions?mode=${mode}`, { refreshOn: ["POSITION_OPENED", "POSITION_UPDATED", "POSITION_CLOSED"], intervalMs: 10000 });
   const { toast, suppressAuto } = useToast();
   const [tab, setTab] = useState<"OPEN" | "CLOSED">("OPEN");
   const [sort, setSort] = useState<Sort>("NEWEST");
@@ -138,6 +143,10 @@ export function Positions() {
 
   return (
     <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <ModeTabs value={mode} onChange={(m) => { setPicked(m); setTab("OPEN"); }} current={user?.mode === "LIVE" ? "LIVE" : "PAPER"} />
+        <p className="text-xs text-muted-foreground">{mode === "PAPER" ? "Paper positions use virtual money." : "Live positions use real funds."}</p>
+      </div>
       <Summary rows={res.data} />
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex gap-2" role="group" aria-label="Position status">
@@ -150,9 +159,9 @@ export function Positions() {
         </div>
       </div>
       {error && <ErrorState error={error} />}
-      {rows.length === 0 ? <Empty>{tab === "OPEN" ? "No open positions." : "No closed positions yet."}</Empty> : rows.map((p) => <PositionCard key={p.id} p={p} onClose={setTarget} />)}
+      {rows.length === 0 ? <Empty>{tab === "OPEN" ? `No open ${mode.toLowerCase()} positions.` : `No closed ${mode.toLowerCase()} positions yet.`}</Empty> : rows.map((p) => <PositionCard key={p.id} p={p} onClose={setTarget} />)}
       <ConfirmDialog open={target !== null} onOpenChange={(o) => { if (!o) setTarget(null); }} busy={busy} destructive title="Close this position?"
-        description="A close request is sent to your Agent, which sells at the current market price using your slippage limits." confirmLabel="Close position" onConfirm={close} />
+        description="A close request is sent to your runner, which sells at the current market price using your slippage limits." confirmLabel="Close position" onConfirm={close} />
     </div>
   );
 }

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import models as M
 from app.db import repo
+from app.services.webhook_safety import check_webhook_url
 from app.domain.runner_protocol import EventAck, EventBatch, RunnerEvent
 from app.events.bus import EventType as E
 from app.services.hub import EventHub
@@ -113,11 +114,13 @@ async def ingest(db: AsyncSession, hub: EventHub, runner: M.Runner, batch: Event
 async def _dispatch_webhook(db: AsyncSession, user_id: str, streamed: list[RunnerEvent]) -> None:
     """Best-effort push of a user's own selected events to their configured webhook.
 
-    Settings UI: GET/PUT /notifications (routes_config.py). Delivery is
-    synchronous and best-effort (a slow/unreachable endpoint only delays this
-    event-batch response by its own short timeout — it never drops or retries
-    events, and a failure here must never affect ingestion, which has already
-    committed above).
+    Settings UI: GET/PUT /notifications (routes_config.py). Delivery is synchronous and best-effort (a slow or
+    unreachable endpoint only delays this event-batch response by its own short timeout; it never drops or retries
+    events, and a failure here must never affect ingestion, which has already committed above).
+
+    Which events: exactly the ones the user ticked. If NONE are ticked, every streamed event is sent (the Settings
+    screen says so). The URL is re-checked right before sending (private / internal addresses are refused) and
+    redirects are never followed. The outcome of the latest delivery is stored so Settings can show whether it works.
     """
     cfg = await repo.get_setting(db, f"user:{user_id}:notifications")
     if not cfg or not cfg.get("enabled") or not cfg.get("webhook_url"):
@@ -126,9 +129,33 @@ async def _dispatch_webhook(db: AsyncSession, user_id: str, streamed: list[Runne
     to_send = [ev for ev in streamed if not wanted or ev.type in wanted]
     if not to_send:
         return
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        for ev in to_send:
-            try:
-                await client.post(cfg["webhook_url"], json={"type": ev.type, "at": ev.at.isoformat(), "payload": ev.payload})
-            except Exception:  # noqa: BLE001 - never let a bad webhook affect the runner
-                log.warning("notification webhook delivery failed for user %s (%s)", user_id, ev.type)
+    ok_url, why = check_webhook_url(cfg["webhook_url"])
+    outcome: dict
+    if not ok_url:
+        log.warning("notification webhook refused for user %s: %s", user_id, why)
+        outcome = {"at": datetime.now(timezone.utc).isoformat(), "ok": False, "error": why, "event": to_send[0].type}
+    else:
+        outcome = {"at": datetime.now(timezone.utc).isoformat(), "ok": True, "event": to_send[-1].type}
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+            for ev in to_send:
+                try:
+                    r = await client.post(cfg["webhook_url"], json={"type": ev.type, "at": ev.at.isoformat(), "payload": ev.payload})
+                    outcome["http_status"] = r.status_code
+                    if not (200 <= r.status_code < 300):
+                        outcome.update(ok=False, error=f"The endpoint answered HTTP {r.status_code}", event=ev.type)
+                except Exception as exc:  # noqa: BLE001 - never let a bad webhook affect the runner
+                    log.warning("notification webhook delivery failed for user %s (%s)", user_id, ev.type)
+                    outcome.update(ok=False, error=f"Could not deliver ({type(exc).__name__})", event=ev.type)
+    prev = cfg.get("last_delivery") or {}
+    # Persist only when the result changed or is stale, so a busy account does not write settings on every batch.
+    try:
+        prev_at = datetime.fromisoformat(prev["at"]) if prev.get("at") else None
+    except ValueError:
+        prev_at = None
+    stale = prev_at is None or (datetime.now(timezone.utc) - prev_at).total_seconds() > 600
+    if stale or bool(prev.get("ok")) != bool(outcome["ok"]):
+        try:
+            await repo.put_setting(db, f"user:{user_id}:notifications", {**cfg, "last_delivery": outcome}, "system")
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            log.exception("could not store webhook delivery status for %s", user_id)

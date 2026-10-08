@@ -11,6 +11,7 @@ from app.db import repo
 from app.risk.engine import RiskLimits
 from app.services import control
 from app.services.decision import tighten_limits
+from app.services.webhook_safety import check_webhook_url
 from app.strategies import registry as strategy_registry
 
 router = APIRouter(tags=["config"])
@@ -207,13 +208,25 @@ async def settings(request: Request, user: M.User = Depends(current_user), db: A
             "notifications": {"implemented": True, "enabled": bool(notif.get("enabled")), "webhook_configured": bool(notif.get("webhook_url"))}}
 
 
-# Events a user can subscribe a webhook to — a curated subset of app.services.ingest.STREAMED
-# (the events already pushed to the live UI), since those are the ones a person would plausibly
-# want pushed to Slack/Discord/etc. too.
+# Events a user can subscribe a webhook to: a curated subset of app.services.ingest.STREAMED (the events already pushed
+# to the live UI), since those are the ones a person would plausibly want pushed to Slack / Discord / their own server.
 NOTIFICATION_EVENTS = [
     "POSITION_OPENED", "POSITION_CLOSED", "ORDER_FILLED", "ORDER_FAILED",
     "TAKE_PROFIT_TRIGGERED", "STOP_LOSS_TRIGGERED", "TRAILING_STOP_TRIGGERED",
     "EMERGENCY_STOP_CHANGED", "RISK_ALERT", "AGENT_ERROR",
+]
+# What each event means, in plain words, grouped for the Settings screen.
+NOTIFICATION_CATALOG = [
+    {"id": "POSITION_OPENED", "group": "Trades", "label": "Position opened", "description": "The agent bought a token."},
+    {"id": "POSITION_CLOSED", "group": "Trades", "label": "Position closed", "description": "A position was fully sold, with the reason and the result."},
+    {"id": "ORDER_FILLED", "group": "Trades", "label": "Order filled", "description": "A buy or sell order completed."},
+    {"id": "ORDER_FAILED", "group": "Trades", "label": "Order failed", "description": "An order was rejected or could not be completed."},
+    {"id": "TAKE_PROFIT_TRIGGERED", "group": "Exits", "label": "Take-profit hit", "description": "A profit target was reached and part of the position sold."},
+    {"id": "STOP_LOSS_TRIGGERED", "group": "Exits", "label": "Stop-loss hit", "description": "The hard stop was reached and the position is being closed."},
+    {"id": "TRAILING_STOP_TRIGGERED", "group": "Exits", "label": "Trailing stop hit", "description": "Price fell back from its peak by the trailing amount."},
+    {"id": "EMERGENCY_STOP_CHANGED", "group": "Safety", "label": "Emergency stop changed", "description": "The kill switch was turned on or off."},
+    {"id": "RISK_ALERT", "group": "Safety", "label": "Risk alert", "description": "A risk limit was reached or a risk condition appeared."},
+    {"id": "AGENT_ERROR", "group": "Safety", "label": "Agent error", "description": "The agent hit an error it could not recover from by itself."},
 ]
 
 
@@ -229,6 +242,9 @@ class NotificationsIn(BaseModel):
                 raise ValueError("webhook_url is required when enabled=true")
             if not (self.webhook_url.startswith("https://") or self.webhook_url.startswith("http://")):
                 raise ValueError("webhook_url must start with http:// or https://")
+            ok, why = check_webhook_url(self.webhook_url)
+            if not ok:
+                raise ValueError(why)
         unknown = set(self.events) - set(NOTIFICATION_EVENTS)
         if unknown:
             raise ValueError(f"unknown event type(s): {sorted(unknown)}")
@@ -239,13 +255,51 @@ class NotificationsIn(BaseModel):
 async def get_notifications(user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = await repo.get_setting(db, f"user:{user.id}:notifications") or {}
     return {"enabled": bool(cfg.get("enabled")), "webhook_url": cfg.get("webhook_url"),
-            "events": cfg.get("events") or [], "available_events": NOTIFICATION_EVENTS}
+            "events": cfg.get("events") or [], "available_events": NOTIFICATION_EVENTS, "event_catalog": NOTIFICATION_CATALOG,
+            "last_delivery": cfg.get("last_delivery")}
 
 
 @router.put("/notifications")
 async def put_notifications(body: NotificationsIn, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     data = body.model_dump()
+    prev = await repo.get_setting(db, f"user:{user.id}:notifications") or {}
+    if prev.get("webhook_url") == data.get("webhook_url") and prev.get("last_delivery"):
+        data["last_delivery"] = prev["last_delivery"]      # same endpoint: keep its delivery history
     await repo.put_setting(db, f"user:{user.id}:notifications", data, user.email)
     await repo.audit(db, user.id, user.email, "NOTIFICATIONS_UPDATED", enabled=body.enabled, events=body.events)
     await db.commit()
-    return {**data, "available_events": NOTIFICATION_EVENTS}
+    return {**data, "available_events": NOTIFICATION_EVENTS, "event_catalog": NOTIFICATION_CATALOG}
+
+
+class WebhookTestIn(BaseModel):
+    webhook_url: str | None = None   # test the URL typed in the form before saving; defaults to the saved one
+
+
+@router.post("/notifications/test")
+async def test_notification(body: WebhookTestIn, request: Request, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Send one sample event to the webhook so the user can see that it works (and what it receives)."""
+    import time
+    import httpx
+    from app.api.deps import limit
+    await limit(request, "webhooktest", 6, 60, extra=user.id)
+    cfg = await repo.get_setting(db, f"user:{user.id}:notifications") or {}
+    url = (body.webhook_url or cfg.get("webhook_url") or "").strip()
+    if not url:
+        raise HTTPException(422, "Enter a webhook URL first.")
+    ok, why = check_webhook_url(url)
+    if not ok:
+        raise HTTPException(422, why)
+    sample = {"type": "TEST", "at": datetime.now(timezone.utc).isoformat(), "payload": {"message": "This is a test from Arc Agent. Real events look like this, with their own type and details."}}
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+            r = await client.post(url, json=sample)
+        ms = round((time.monotonic() - started) * 1000)
+        delivered = 200 <= r.status_code < 300
+        return {"delivered": delivered, "http_status": r.status_code, "elapsed_ms": ms, "sent": sample,
+                "message": "Delivered." if delivered else f"The endpoint answered HTTP {r.status_code}. A 2xx answer is needed."}
+    except httpx.TimeoutException:
+        return {"delivered": False, "http_status": None, "elapsed_ms": 5000, "sent": sample, "message": "The endpoint did not answer within 5 seconds."}
+    except httpx.HTTPError as e:
+        return {"delivered": False, "http_status": None, "elapsed_ms": round((time.monotonic() - started) * 1000), "sent": sample,
+                "message": f"Could not connect ({type(e).__name__})."}
