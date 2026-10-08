@@ -138,6 +138,18 @@ async def wallet_state(request: Request, user: M.User = Depends(current_user), d
     if cloud is not None and getattr(cfg, "execution_mode", "self_hosted") == "cloud_managed":
         cap = {"capability": "AUTONOMOUS_DELEGATED", "label": "Autonomous cloud execution", "autonomous": True,
                "detail": "The shared worker can execute through your per-user Privy managed wallet, subject to the configured policy and LIVE gates."}
+    available = pf.cash_usdc if pf else None
+    if user.mode == "LIVE":
+        from app.portfolio.live_cash import spendable_usdc
+        from app.services.live_balance import live_wallet_balance
+        bal = usdc.get("balance")
+        if bal is None:
+            bal = await live_wallet_balance(db, c.chain, user.id)
+        if bal is not None:
+            expo = sum((p.quantity * p.last_price) for p in (await db.execute(select(M.Position).where(
+                M.Position.user_id == user.id, M.Position.mode == "LIVE", M.Position.status == "OPEN"))).scalars().all())
+            alloc = pol.policy.get("allocated_capital_usdc") if pol else None
+            available = spendable_usdc(bal, alloc, expo)
     return {
         "network": {"chain": "arc", "network": c.settings.arc_network, "chain_id": c.settings.arc_chain_id,
                     "explorer_url": c.settings.arc_explorer_url, "health": (await c.chain.health()).model_dump(),
@@ -151,7 +163,7 @@ async def wallet_state(request: Request, user: M.User = Depends(current_user), d
         "policy": None if not pol else {"version": pol.version, **pol.policy},
         "usdc": usdc,
         "allocated_capital_usdc": pol.policy["allocated_capital_usdc"] if pol else None,
-        "available_trading_capital_usdc": pf.cash_usdc if pf else None,
+        "available_trading_capital_usdc": available,
         "runner_wallet": None if runner is None else {"provider": rst.get("wallet_provider"), "online": control.is_online(runner), "live": rst.get("live")},
         "capital_label": "PAPER (virtual USDC)" if user.mode == "PAPER" else "LIVE",
         "mode": user.mode,

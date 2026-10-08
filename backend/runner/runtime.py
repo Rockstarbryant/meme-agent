@@ -437,9 +437,50 @@ class RunnerRuntime:
         if eff != self.mode_eff or self.engine is None:
             self._load_portfolio(eff, b)
         self._assemble(b)
+        await self.sync_live_cash(force=True)
         self.applied_version = b.version
         self.recompute()
         self.store.kv_set("config", b.model_dump(mode="json"))
+
+    async def sync_live_cash(self, force: bool = False) -> None:
+        """LIVE only: make the portfolio's cash match the REAL wallet.
+
+        The wallet balance is the source of truth; the agent may deploy at most
+        ``min(wallet USDC, allocated capital - open exposure)``. Without this, LIVE cash was whatever number the
+        portfolio was first seeded with (0), so position sizing returned 0 and every entry was vetoed with
+        NON_POSITIVE_AMOUNT even though USDC was sitting in the wallet.
+
+        A failed balance read never zeroes cash (the live executor re-checks the real balance before every
+        order anyway); if cash is empty and nothing is open, it falls back to the allocated capital."""
+        pf = self.portfolio
+        if pf is None or self.mode_eff != TradingMode.LIVE or self.wallet is None:
+            return
+        if not force and self.mono() - getattr(self, "_cash_sync_at", -1e9) < 20.0:
+            return
+        self._cash_sync_at = self.mono()
+        from app.portfolio.live_cash import spendable_usdc
+        policy = (self.bundle.wallet_policy if self.bundle else None) or {}
+        try:
+            allocated = float(policy.get("allocated_capital_usdc") or 0.0)
+        except (TypeError, ValueError):
+            allocated = 0.0
+        exposure = pf.total_exposure()
+        try:
+            balance = float(await self.wallet.get_usdc_balance())
+        except Exception as e:  # noqa: BLE001
+            log.warning("LIVE cash sync: wallet balance unavailable (%s: %s); keeping cash=%.6f",
+                        type(e).__name__, e, pf.cash_usdc)
+            self._failed(e)
+            if pf.cash_usdc <= 0 and pf.open_count() == 0 and allocated > 0:
+                pf.cash_usdc = round(allocated, 6)
+            return
+        new_cash = spendable_usdc(balance, allocated or None, exposure)
+        if abs(new_cash - pf.cash_usdc) > 1e-9:
+            log.info("LIVE cash sync: wallet=%.6f allocated=%.6f exposure=%.6f -> cash %.6f (was %.6f)",
+                     balance, allocated, exposure, new_cash, pf.cash_usdc)
+        pf.cash_usdc = new_cash
+        if pf.open_count() == 0 and not pf.closed and not pf.realized_total and pf.starting_cash <= 0:
+            pf.starting_cash = new_cash
 
     def _load_portfolio(self, mode: TradingMode, b: ConfigBundle) -> None:
         scope = b.user_id or "local"
@@ -454,7 +495,11 @@ class RunnerRuntime:
             cash = float(self.s.paper_starting_usdc)
         if saved:
             pf = PortfolioState.from_dict(saved)
-            if mode == TradingMode.PAPER and pf.cash_usdc <= 0 and pf.open_count() == 0:
+            # An empty, cash-less portfolio carries no information worth keeping (nothing open, nothing earned):
+            # reseed it. For LIVE this is the "stuck at $0" case: the control plane used to hand out a
+            # fabricated cash=0 portfolio that was then saved back forever. Real LIVE cash is re-synced from the
+            # wallet right after (sync_live_cash).
+            if pf.cash_usdc <= 0 and pf.open_count() == 0 and not pf.realized_total:
                 pf = PortfolioState(cash, mode)
             self.portfolio = pf
         else:
@@ -945,6 +990,7 @@ class RunnerRuntime:
     async def monitor_once(self) -> None:
         if self.engine is None or self.portfolio is None:
             return
+        await self.sync_live_cash()
         await self.engine.monitor_positions(self.clock())
         if self.mono() - self._pf_at >= self.s.snapshot_interval_s:
             self._pf_at = self.mono()

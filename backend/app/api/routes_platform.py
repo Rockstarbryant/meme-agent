@@ -233,14 +233,18 @@ async def tenant_state(
         tm = TradingMode(mode)
     except ValueError:
         raise HTTPException(400, "mode must be PAPER or LIVE")
-    pf = await repo.load_portfolio(db, user_id, tm, 0.0, utcnow())
+    # No stored portfolio yet (first LIVE start): return None so the worker seeds it from the allocation / wallet
+    # balance. This used to fabricate a portfolio with cash=0.0, which the worker then saved back, leaving LIVE
+    # cash stuck at $0 forever (every entry then vetoed with NON_POSITIVE_AMOUNT).
+    has_row = (await db.execute(select(M.Portfolio.id).where(M.Portfolio.user_id == user_id, M.Portfolio.mode == tm.value))).first() is not None
+    pf = await repo.load_portfolio(db, user_id, tm, 0.0, utcnow()) if has_row else None
     active = (await db.execute(
         select(M.Order.idempotency_key, M.Order.status).where(
             M.Order.user_id == user_id, M.Order.mode == tm.value,
             M.Order.status.in_(["PENDING_SIGNATURE", "SUBMITTED", "TIMEOUT", "FILLED", "PARTIALLY_FILLED"])
         )
     )).all()
-    return {"user_id": user_id, "mode": tm.value, "portfolio": pf.to_dict(),
+    return {"user_id": user_id, "mode": tm.value, "portfolio": pf.to_dict() if pf is not None else None,
             "active_idempotency": [{"key": k, "status": st} for k, st in active]}
 
 

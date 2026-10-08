@@ -307,6 +307,16 @@ async def portfolio(request: Request, user: M.User = Depends(current_user), db: 
     st = ((await control.active_runner(db, user.id)) or M.Runner(status={})).status or {}
     cash = row.cash_usdc if row else (policy.allocated_capital_usdc if policy else c.settings.paper_starting_usdc)
     expo = sum(p.quantity * p.last_price for p in open_)
+    cash_source = "runner" if row else "default"
+    if user.mode == "LIVE":
+        # LIVE: the wallet is the source of truth. The stored row is only the worker's last report and can be
+        # stale or zero (it was seeded with 0 before the first deposit), which made the dashboard read $0.00.
+        from app.portfolio.live_cash import spendable_usdc
+        from app.services.live_balance import live_wallet_balance
+        bal = await live_wallet_balance(db, c.chain, user.id)
+        if bal is not None:
+            cash = spendable_usdc(bal, policy.allocated_capital_usdc if policy else None, expo)
+            cash_source = "wallet"
     unreal = [p.quantity * p.last_price - p.cost_basis_usdc for p in open_]
     realized_today = row.realized_today_usdc if row and row.day == now.date().isoformat() else 0.0
     snaps = (await db.execute(select(M.PortfolioSnapshot).join(M.Portfolio, M.Portfolio.id == M.PortfolioSnapshot.portfolio_id)
@@ -314,8 +324,10 @@ async def portfolio(request: Request, user: M.User = Depends(current_user), db: 
     from app.services.performance import derive_starting_value
     realized_total = row.realized_total_usdc if row else 0.0
     start, start_derived = derive_starting_value(row.starting_cash_usdc if row else cash, cash + expo, realized_total, sum(unreal))
+    if user.mode == "LIVE" and not (row and row.starting_cash_usdc and row.starting_cash_usdc > 0) and not open_ and realized_total == 0:
+        start, start_derived = cash + expo, False   # nothing traded yet: you started with what is spendable now
     return {"mode": user.mode, "label": user.mode, "data_source": st.get("data_source") or "no runner connected", "reported_by_runner": row is not None,
-            "cash_usdc": cash, "exposure_usdc": expo, "total_value_usdc": cash + expo,
+            "cash_usdc": cash, "cash_source": cash_source, "exposure_usdc": expo, "total_value_usdc": cash + expo,
             "starting_cash_usdc": start, "starting_cash_derived": start_derived, "realized_pnl_usdc": realized_total,
             "unrealized_pnl_usdc": sum(unreal), "daily_pnl_usdc": realized_today + sum(min(u, 0.0) for u in unreal),
             "open_positions": len(open_), "limits": limits.model_dump(mode="json"),
