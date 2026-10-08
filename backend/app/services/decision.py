@@ -120,6 +120,7 @@ class DecisionPipeline:
             # upgrade to BUY, or REJECT. Strategy reasons stay attached to the decision.
 
         ai_out: AIOutcome | None = None
+        size_note = ""
         size_cap = amount
         strategy_note = "; ".join(signal.reasons) if signal.reasons else (
             "qualified signal" if signal.qualified else "watch-band signal"
@@ -136,7 +137,11 @@ class DecisionPipeline:
             # qualified + AI disabled + PAPER → fall through to deterministic BUY below
         else:
             # AI stage: qualified signals and WATCH-band signals (not hard REJECT).
-            ai_out = await self.analyzer.analyze(m, signal, pre)
+            if amount < self.min_order:   # nothing the AI says can fit: say so precisely instead of asking it
+                return rec(Action.WATCH, f"MAX_ENTRY_BELOW_MINIMUM_ORDER: max {amount:.2f} < min {self.min_order:.2f} USDC",
+                           amount=amount)
+            ai_out = await self.analyzer.analyze(m, signal, pre, {"min_order_usdc": self.min_order,
+                                                                   "max_order_usdc": amount})
             if ai_out.status != "OK" or ai_out.decision is None:
                 return rec(
                     Action.WATCH,
@@ -162,8 +167,13 @@ class DecisionPipeline:
                     f"AI confidence {d.confidence:.2f} below {self.min_ai_conf}; {strategy_note}",
                     ai=ai_out,
                 )
-            # AI may only SHRINK the position, never enlarge it beyond deterministic sizing.
-            size_cap = min(amount, portfolio.total_value() * d.recommended_position_percent / 100.0)
+            # The AI chooses a size INSIDE [min_order, max_entry]; it can shrink within that band but never enlarge past
+            # the deterministic maximum, and a too-small answer is lifted to the venue minimum instead of cancelling
+            # the trade (a 3% pick of a $5 portfolio is $0.16, which used to end as SIZE_BELOW_MINIMUM_ORDER).
+            wanted = d.recommended_order_usdc or portfolio.total_value() * d.recommended_position_percent / 100.0
+            size_cap = min(amount, max(self.min_order, wanted))
+            if abs(size_cap - wanted) > 1e-9:
+                size_note = f" (AI size {wanted:.2f} adjusted to {size_cap:.2f}, allowed {self.min_order:.2f}-{amount:.2f})"
 
         final_amount = round(min(amount, size_cap), 6)
         if final_amount < self.min_order:
@@ -176,8 +186,8 @@ class DecisionPipeline:
         decision_id = uuid.uuid4().hex
         req = self._request(m, final_amount, mode, now, decision_id, limits.max_slippage_pct)
         approved = self.approver.approve(req, final)
-        out = rec(Action.BUY, ("approved: watch-band upgraded by AI, risk approved" if watch_band else
-                           "approved: qualified signal, AI agreement, risk approved") if ai_out
+        out = rec(Action.BUY, (("approved: watch-band upgraded by AI, risk approved" if watch_band else
+                            "approved: qualified signal, AI agreement, risk approved") + size_note) if ai_out
                   else "approved: qualified signal and risk approved (AI disabled, PAPER only)",
                   ai=ai_out, final_risk=final, amount=final_amount, approved_trade=approved)
         out.id = decision_id

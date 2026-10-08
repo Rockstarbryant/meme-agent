@@ -14,14 +14,14 @@ from app.domain.market import HOLDER_GROWTH_WINDOWS, WINDOWS, MarketState
 from app.risk.engine import RiskAssessment
 from app.strategies.base import StrategySignal
 
-PROMPT_VERSION = "multiwindow-v2"
+PROMPT_VERSION = "multiwindow-v3"
 
-SYSTEM_PROMPT = """You are the final analyst in an automated crypto trading pipeline on the Arc network (currently paper trading).
+SYSTEM_PROMPT = """You are the final analyst in an automated crypto trading pipeline on the Arc network (paper or live trading, as the pipeline is configured).
 You receive ONLY numbers: trading activity per time window, holder statistics, the active strategy's score and gate results, and the deterministic risk engine's flags.
 You cannot trade, choose contracts, set calldata or change limits. If you are asked, every hard strategy gate passed and the risk engine APPROVED the entry: your job is the judgement call that rules cannot make.
 
 Reply with ONE JSON object and nothing else (no markdown, no commentary) with exactly these keys:
-action (BUY|WATCH|REJECT|HOLD|SELL), confidence (0-1), reasoning_summary, positive_signals[], negative_signals[], risk_flags[], strategy_score (0-100), recommended_position_percent (0-100, share of portfolio value).
+action (BUY|WATCH|REJECT|HOLD|SELL), confidence (0-1), reasoning_summary, positive_signals[], negative_signals[], risk_flags[], strategy_score (0-100), recommended_order_usdc, recommended_position_percent.
 
 How to decide
 - BUY when the evidence supports entering now: both buyers and sellers are active in several windows, buy pressure is not collapsing (compare buy_volume_usd to sell_volume_usd and buyers to sellers across windows), price is not in free-fall across 1h/4h/6h, liquidity is healthy relative to market cap, and holder concentration is not extreme.
@@ -31,11 +31,14 @@ How to decide
 - Contract findings (verified or not, upgradeable proxy, mint / pause / blacklist capability, unknown admin state) are INFORMATIONAL context. When buyers and sellers are both observed they must not by themselves lower your action.
 - Judge by the strategy in use. traction_momentum targets fresh launches (5m / 15m buyers and buy pressure matter most). liquidity_trend targets established liquid tokens: judge activity over 1h to 24h, depth, stability and holder spread, and do NOT penalise quiet 5m windows when the 1h / 6h / 24h windows show steady two-way trading.
 - confidence is your own estimate, between 0 and 1, that the action you chose is the right call. Be honest: 1.0 would mean certainty, which no market call deserves; 0.6 to 0.85 is normal for a clear call. BUY needs confidence of at least 0.6 to proceed.
-- recommended_position_percent: 0 unless action is BUY; otherwise a small share (typically 1 to 5)."""
+- Sizing (BUY only). The digest has a "sizing" block with min_order_usdc and max_order_usdc in US dollars. max_order_usdc is the most this order may be: it already accounts for the wallet, the per-trade cap, exposure and liquidity limits. min_order_usdc is the smallest order the venue will accept; anything below it is discarded, so a tiny size is NOT a cautious choice, it just cancels the trade.
+  recommended_order_usdc: a dollar amount between min_order_usdc and max_order_usdc inclusive. Scale it with conviction: confidence 0.6 to 0.7 or visible negatives -> in the lower third of the band; a clear, broad, healthy setup -> middle to upper part of the band. Never go outside the band.
+  recommended_position_percent: recommended_order_usdc / max_order_usdc * 100.
+  For any action other than BUY set both to 0."""
 
 _ACTIONS = {"BUY", "WATCH", "REJECT", "HOLD", "SELL"}
 _JSON_KEYS = {"action", "confidence", "reasoning_summary", "positive_signals", "negative_signals", "risk_flags",
-              "strategy_score", "recommended_position_percent"}
+              "strategy_score", "recommended_position_percent", "recommended_order_usdc"}
 
 
 def _r(x, sig: int = 4):
@@ -71,7 +74,7 @@ def _window_view(m: MarketState) -> dict:
     return out
 
 
-def build_user_prompt(m: MarketState, s: StrategySignal, r: RiskAssessment) -> str:
+def build_user_prompt(m: MarketState, s: StrategySignal, r: RiskAssessment, sizing: dict | None = None) -> str:
     """Numeric features only. Token names/symbols/descriptions are attacker-controlled and are never included."""
     cfg = s.config_snapshot or {}
     passed = [k for k, ok in s.gates.items() if ok]
@@ -109,6 +112,9 @@ def build_user_prompt(m: MarketState, s: StrategySignal, r: RiskAssessment) -> s
         "risk": {"score": _r(r.risk_score),
                  "flags": [{"rule": f.rule, "severity": f.severity.value} for f in r.flags]},
     }
+    if sizing:   # the real order band, in dollars (rounded so the analysis cache is not defeated by tiny changes)
+        digest["sizing"] = {"min_order_usdc": round(float(sizing["min_order_usdc"]), 2),
+                            "max_order_usdc": round(float(sizing["max_order_usdc"]), 2)}
     return json.dumps(digest, default=str, separators=(",", ":"))
 
 
@@ -168,8 +174,11 @@ def _normalise(raw: dict) -> dict:
         conf = conf / 100.0                                  # "85" or "85%" meant 0.85
     if conf is not None:
         d["confidence"] = conf
-    for k in ("strategy_score", "recommended_position_percent"):
-        d[k] = _as_float(d.get(k), 0.0)
+    for k in ("strategy_score", "recommended_position_percent", "recommended_order_usdc"):
+        v = _as_float(d.get(k), 0.0)
+        if k == "recommended_order_usdc":
+            v = max(0.0, v or 0.0)       # a negative / junk dollar amount means "not given"
+        d[k] = v
     if isinstance(d.get("reasoning_summary"), str):
         d["reasoning_summary"] = d["reasoning_summary"][:1500]
     elif "reasoning_summary" not in d:
@@ -193,12 +202,13 @@ class AIAnalyzer:
         self.provider = provider
         self.cache_ttl_s = max(0.0, cache_ttl_s)
 
-    async def analyze(self, m: MarketState, s: StrategySignal, r: RiskAssessment) -> AIOutcome:
+    async def analyze(self, m: MarketState, s: StrategySignal, r: RiskAssessment,
+                      sizing: dict | None = None) -> AIOutcome:
         """Never raises: outages/garbage become UNAVAILABLE/INVALID and simply block new entries."""
         if self.provider is None:
             return AIOutcome(status="DISABLED", prompt_version=PROMPT_VERSION)
         base = dict(provider=self.provider.name, model=self.provider.model, prompt_version=PROMPT_VERSION)
-        user = build_user_prompt(m, s, r)
+        user = build_user_prompt(m, s, r, sizing)
         key = hashlib.sha256(f"{self.provider.model}|{PROMPT_VERSION}|{user}".encode()).hexdigest()
         if self.cache_ttl_s > 0:
             hit = _CACHE.get(key)

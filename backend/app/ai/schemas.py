@@ -21,6 +21,9 @@ class AIDecision(BaseModel):
     risk_flags: list[Short] = Field(default_factory=list, max_length=10)
     strategy_score: float = Field(ge=0.0, le=100.0)
     recommended_position_percent: float = Field(ge=0.0, le=100.0)
+    # Dollar size the model wants, inside the min/max band it is shown in the prompt. 0 = not given (legacy replies,
+    # models that ignore it): the pipeline then falls back to recommended_position_percent. Always clamped in code.
+    recommended_order_usdc: float = Field(default=0.0, ge=0.0, le=1_000_000.0)
 
 
 class AIOutcome(BaseModel):

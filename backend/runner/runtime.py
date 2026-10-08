@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Callable
 
 from app.ai.analyzer import AIAnalyzer
+from app.ai.exit_analyzer import AIExitAnalyzer
 from app.ai.provider import build_provider
 from app.chains.arc.adapter import ArcAdapter
 from app.chains.arc.market_data import UnavailableArcMarketData, BitqueryArcMarketData
@@ -534,6 +535,7 @@ class RunnerRuntime:
             strategy_obj, RiskEngine(), limits, self.approver,
             AIAnalyzer(self.llm, cache_ttl_s=float(getattr(self.s, "ai_cache_ttl_s", 0.0) or 0.0)),
             AIMode.ENABLED if self.llm else AIMode.DISABLED,
+            min_order_usdc=float(getattr(self.s, "min_order_usdc", 1.0) or 1.0),
             entry_window_seconds=getattr(cfg, "entry_window_seconds", 300), wallet_policy=policy,
         )
         if self.mode_eff == TradingMode.PAPER:
@@ -550,6 +552,11 @@ class RunnerRuntime:
             pipeline=pipeline, executor=executor, approver=self.approver,
             exit_manager=PositionManager(cfg.exit), market_data=self.market_data,
             bus=self.bus, idempotency=self.idem,
+            ai_exit=AIExitAnalyzer(self.llm) if self.llm is not None else None,
+            ai_exit_mode=getattr(self.s, "ai_exit_mode", "off"),
+            ai_exit_min_confidence=float(getattr(self.s, "ai_exit_min_confidence", 0.7)),
+            ai_exit_interval_s=float(getattr(self.s, "ai_exit_interval_s", 300.0)),
+            ai_exit_timeout_s=float(getattr(self.s, "ai_exit_timeout_s", 30.0)),
             exit_managers={sid: PositionManager(x) for sid, x in
                            strategy_registry.exit_configs_for_positions(strategy_obj.strategy_id, cfg.exit).items()},
         )

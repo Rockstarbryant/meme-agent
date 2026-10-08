@@ -241,6 +241,8 @@ class RunnerSettings(BaseSettings):
     # Anything not refreshed/seen for this long is dropped from the registry and database.
     retention_hours: float = Field(24.0, validation_alias=_alias("RETENTION_HOURS"))
     paper_starting_usdc: float = 1000.0
+    # Smallest BUY the venue/agent will place. The AI is told this number and sizes inside [min_order_usdc, max entry].
+    min_order_usdc: float = Field(1.0, validation_alias=_alias("MIN_ORDER_USDC"))
 
     # ------------------------------------------------------------------ AI
     llm_provider: Literal["none", "openrouter", "anthropic", "openai", "cerebras", "groq", "gemini", "serv", "openserv"] = Field("none", validation_alias=_alias("LLM_PROVIDER"))
@@ -263,6 +265,12 @@ class RunnerSettings(BaseSettings):
     ai_min_interval_s: float = Field(0.0, validation_alias=_alias("AI_MIN_INTERVAL_S"))  # 0 = per-provider default pacing
     ai_fallback_models: str = Field("", validation_alias=_alias("AI_FALLBACK_MODELS"))  # comma separated model ids
     ai_cache_ttl_s: float = Field(900.0, validation_alias=_alias("AI_CACHE_TTL_S"))
+    # AI exit reviewer for OPEN positions. "off" | "shadow" (records what it would sell, never sells) | "live".
+    # Rule-based exits always run first and are never overridden; the AI can only sell EARLIER.
+    ai_exit_mode: Literal["off", "shadow", "live"] = Field("shadow", validation_alias=_alias("AI_EXIT_MODE"))
+    ai_exit_min_confidence: float = Field(0.7, validation_alias=_alias("AI_EXIT_MIN_CONFIDENCE"))
+    ai_exit_interval_s: float = Field(300.0, validation_alias=_alias("AI_EXIT_INTERVAL_S"))   # per position
+    ai_exit_timeout_s: float = Field(30.0, validation_alias=_alias("AI_EXIT_TIMEOUT_S"))
     anthropic_api_key: SecretStr | None = Field(None, validation_alias=_alias("ANTHROPIC_API_KEY"))
     openai_api_key: SecretStr | None = Field(None, validation_alias=_alias("OPENAI_API_KEY"))
     openai_base_url: str = Field("https://api.openai.com/v1", validation_alias=_alias("OPENAI_BASE_URL"))
