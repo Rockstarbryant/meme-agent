@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime
 
+from app.ai.exit_analyzer import AIExitAnalyzer
 from app.chains.base import MarketDataProvider
 from app.core.clock import utcnow
 from app.core.errors import DataUnavailable
@@ -21,15 +24,27 @@ _EXIT_EVENT = {ExitReason.HARD_STOP: E.STOP_LOSS_TRIGGERED, ExitReason.TAKE_PROF
                ExitReason.TRAILING_STOP: E.TRAILING_STOP_TRIGGERED}
 _DONE = (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
 _RETRYABLE = (OrderStatus.FAILED, OrderStatus.REJECTED)
+log = logging.getLogger(__name__)
+
+# Last AI exit review per position id. Module-level on purpose: the cloud worker builds a fresh engine every cycle,
+# and the throttle must survive that or every 30 s cycle would call the LLM again for the same position.
+_AI_EXIT_LAST: dict[str, datetime] = {}
 
 
 class TradingEngine:
-    """Orchestrates entries and exits. Exits never touch the AI layer, so an AI outage cannot stop protection."""
+    """Orchestrates entries and exits.
+
+    Protective exits are deterministic and run FIRST for every position, so an AI outage or a slow model can never
+    stop or delay protection. The optional AI exit reviewer (ai_exit_mode "shadow" | "live") runs afterwards, only on
+    positions the rules left alone, and can only sell earlier."""
 
     def __init__(self, *, mode: TradingMode, portfolio: PortfolioState, controls: ControlState,
                  pipeline: DecisionPipeline, executor: ExecutionAdapter, approver: TradeApprover,
                  exit_manager: PositionManager, market_data: MarketDataProvider, bus: EventBus,
-                 idempotency: IdempotencyStore, exit_managers: dict[str, PositionManager] | None = None):
+                 idempotency: IdempotencyStore, exit_managers: dict[str, PositionManager] | None = None,
+                 ai_exit: AIExitAnalyzer | None = None, ai_exit_mode: str = "off",
+                 ai_exit_min_confidence: float = 0.7, ai_exit_interval_s: float = 300.0,
+                 ai_exit_timeout_s: float = 30.0):
         assert_executor_matches_mode(mode, executor)
         self.mode, self.portfolio, self.controls = mode, portfolio, controls
         self.pipeline, self.executor, self.approver = pipeline, executor, approver
@@ -37,6 +52,11 @@ class TradingEngine:
         # Exit rules per strategy id: a position is managed by the rules of the strategy that OPENED it, not by
         # whichever strategy happens to be active now (a launch-token stagnation rule must not close a swing trade).
         self.exit_managers = dict(exit_managers or {})
+        self.ai_exit = ai_exit
+        self.ai_exit_mode = ai_exit_mode if ai_exit_mode in ("off", "shadow", "live") and ai_exit is not None else "off"
+        self.ai_exit_min_confidence = ai_exit_min_confidence
+        self.ai_exit_interval_s = max(30.0, float(ai_exit_interval_s))
+        self.ai_exit_timeout_s = max(5.0, float(ai_exit_timeout_s))
 
     def exit_manager_for(self, strategy_id: str | None) -> PositionManager:
         return self.exit_managers.get(strategy_id or "", self.exits)
@@ -119,6 +139,7 @@ class TradingEngine:
     async def monitor_positions(self, now: datetime | None = None, *, manual_close: set[str] | None = None,
                                 emergency_close: bool = False) -> list[ExecutionResult]:
         now, out = now or utcnow(), []
+        review: list[tuple] = []   # positions the rules left alone: candidates for the AI exit reviewer
         for pos in list(self.portfolio.open_positions()):
             try:
                 m = await self.market_data.get_market_state(pos.token_address)
@@ -127,17 +148,71 @@ class TradingEngine:
                 continue
             if m.price and m.price > 0:
                 self.portfolio.mark(pos.id, m.price, now)
-            for d in self.exit_manager_for(pos.strategy_id).evaluate(pos, now, m, manual_close=pos.id in (manual_close or set()),
-                                                                     emergency=emergency_close):
+            decisions = self.exit_manager_for(pos.strategy_id).evaluate(
+                pos, now, m, manual_close=pos.id in (manual_close or set()), emergency=emergency_close)
+            for d in decisions:
                 res = await self._exit(pos.id, d, m)
                 if res is not None:
                     out.append(res)
+            if not decisions and pos.is_open and not emergency_close and not (manual_close and pos.id in manual_close):
+                review.append((pos, m))
             await self.bus.publish(E.POSITION_UPDATED, pos.id, price=pos.last_price, pnl=round(pos.unrealized_pnl, 6))
+        # Only now, with every rule exit already executed, is the (possibly slow) AI consulted.
+        if self.ai_exit_mode != "off":
+            live_ids = {p.id for p in self.portfolio.open_positions()}
+            for stale in [k for k in _AI_EXIT_LAST if k not in live_ids]:
+                _AI_EXIT_LAST.pop(stale, None)
+            for pos, m in review:
+                if not pos.is_open or pos.quantity <= 0:
+                    continue
+                res = await self._ai_exit_review(pos, m, now)
+                if res is not None:
+                    out.append(res)
         return out
+
+    async def _ai_exit_review(self, pos, m: MarketState, now: datetime) -> ExecutionResult | None:
+        """Ask the model about one open position. Anything unexpected means HOLD. Never raises."""
+        assert self.ai_exit is not None
+        last = _AI_EXIT_LAST.get(pos.id)
+        if last is not None and (now - last).total_seconds() < self.ai_exit_interval_s:
+            return None
+        _AI_EXIT_LAST[pos.id] = now
+        cfg = self.exit_manager_for(pos.strategy_id).cfg
+        try:
+            outcome = await asyncio.wait_for(self.ai_exit.analyze(pos, m, cfg, now), self.ai_exit_timeout_s)
+        except Exception as exc:  # noqa: BLE001 - includes timeout
+            log.warning("AI exit review failed for %s: %s: %s", pos.id, type(exc).__name__, exc)
+            return None
+        d = outcome.decision
+        if outcome.status != "OK" or d is None:
+            log.warning("AI exit review %s for %s: %s", outcome.status, pos.id, outcome.error)
+            return None
+        if d.action == "HOLD" or d.confidence < self.ai_exit_min_confidence:
+            log.info("AI exit review: HOLD %s (action=%s conf=%.2f) %s", pos.id, d.action, d.confidence,
+                     d.reasoning_summary[:120])
+            return None
+        if d.action == "SELL_ALL":
+            qty, kind = pos.quantity, "all"
+        else:   # SELL_PARTIAL: clamp so a partial is never trivially small and never a hidden full exit
+            frac = min(0.9, max(0.1, d.sell_fraction))
+            qty, kind = pos.quantity * frac, f"{frac:.2f}"
+        audit = dict(kind="AI_EXIT_SHADOW" if self.ai_exit_mode == "shadow" else "AI_EXIT", action=d.action,
+                     confidence=round(d.confidence, 3), sell_fraction=round(qty / pos.quantity, 4),
+                     reasoning=d.reasoning_summary[:500], gain_pct=round(pos.gain_pct, 2),
+                     provider=outcome.provider, model=outcome.model, prompt_version=outcome.prompt_version)
+        await self.bus.publish(E.RISK_ALERT, pos.id, **audit)
+        if self.ai_exit_mode == "shadow":
+            log.info("AI exit SHADOW (no order): %s %s conf=%.2f", d.action, pos.id, d.confidence)
+            return None
+        bucket = int(now.timestamp() // self.ai_exit_interval_s)
+        decision = ExitDecision(position_id=pos.id, reason=ExitReason.AI_EXIT, close_all=d.action == "SELL_ALL",
+                                quantity=qty, detail=d.reasoning_summary[:200] or d.action,
+                                key_suffix=f"ai{kind}{bucket}")
+        return await self._exit(pos.id, decision, m)
 
     async def _exit(self, position_id: str, d: ExitDecision, m: MarketState) -> ExecutionResult | None:
         pos = self.portfolio.positions[position_id]
-        kind = "all" if d.close_all else f"tier{d.tier_index}"
+        kind = d.key_suffix or ("all" if d.close_all else f"tier{d.tier_index}")
         req = TradeRequest(idempotency_key=f"exit:{pos.id}:{kind}", mode=self.mode, chain=pos.chain,
                            token_address=pos.token_address, side=Side.SELL, quantity=d.quantity,
                            max_slippage_pct=self.exit_manager_for(pos.strategy_id).cfg.exit_max_slippage_pct, reference_price=m.price,

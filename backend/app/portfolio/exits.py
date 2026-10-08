@@ -1,4 +1,5 @@
-"""Deterministic position management. The LLM has NO role here."""
+"""Deterministic position management (the protective floor). The AI exit reviewer (app.ai.exit_analyzer) runs only
+AFTER these rules found nothing to do, and can only sell earlier: it can never hold a position through a rule exit."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -111,6 +112,7 @@ class ExitDecision(BaseModel):
     quantity: float
     tier_index: int | None = None
     detail: str = ""
+    key_suffix: str = ""   # AI exits: makes the idempotency key unique per review window
 
 
 class PositionManager:
