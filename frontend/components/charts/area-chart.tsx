@@ -44,7 +44,7 @@ export function AreaChart({ points, range, baseline = null, height = 220, label,
   }, [points, baseline, H]);
 
   if (!geo) {
-    return <div className="flex items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground" style={{ height }}>
+    return <div className="flex items-center justify-center rounded-md border border-dashed border-border-hover px-4 text-center text-sm text-muted-foreground" style={{ height }}>
       Not enough history for this range yet. Points appear as the agent runs.</div>;
   }
   const first = points[0].v, last = points[points.length - 1].v;
@@ -70,27 +70,27 @@ export function AreaChart({ points, range, baseline = null, height = 220, label,
         onPointerMove={(e) => move(e.clientX)} onPointerDown={(e) => move(e.clientX)} onPointerLeave={() => setHover(null)}>
         <defs>
           <linearGradient id={`g${gid}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.38" /><stop offset="100%" stopColor={color} stopOpacity="0" />
+            <stop offset="0%" stopColor={color} stopOpacity="0.22" /><stop offset="100%" stopColor={color} stopOpacity="0" />
           </linearGradient>
         </defs>
         {geo.ticks.map((v) => (
-          <g key={v}><line x1={PAD.l} x2={W - PAD.r} y1={geo.y(v)} y2={geo.y(v)} stroke="hsl(var(--border))" strokeOpacity="0.5" strokeDasharray="2 5" />
-            <text x={W - PAD.r + 6} y={geo.y(v) + 3} fontSize="10" fill="hsl(var(--muted-foreground))">{format(v).replace(/\.00$/, "")}</text></g>
+          <g key={v}><line x1={PAD.l} x2={W - PAD.r} y1={geo.y(v)} y2={geo.y(v)} stroke="hsl(var(--border))" strokeOpacity="0.7" strokeDasharray="1 5" />
+            <text x={W - PAD.r + 6} y={geo.y(v) + 3} fontSize="10" fontFamily="var(--font-mono), monospace" fill="hsl(var(--muted-foreground))">{format(v).replace(/\.00$/, "")}</text></g>
         ))}
         {baseline != null && <g><line x1={PAD.l} x2={W - PAD.r} y1={geo.y(baseline)} y2={geo.y(baseline)} stroke="hsl(var(--muted-foreground))" strokeOpacity="0.8" strokeDasharray="5 4" />
-          <text x={PAD.l + 2} y={geo.y(baseline) - 4} fontSize="10" fill="hsl(var(--muted-foreground))">start</text></g>}
+          <text x={PAD.l + 2} y={geo.y(baseline) - 4} fontSize="10" fontFamily="var(--font-mono), monospace" fill="hsl(var(--muted-foreground))">start</text></g>}
         <path d={geo.area} fill={`url(#g${gid})`} />
-        <path d={geo.line} fill="none" stroke={color} strokeWidth="2.25" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={geo.line} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
         <circle cx={geo.xy[geo.xy.length - 1].x} cy={geo.xy[geo.xy.length - 1].y} r="4" fill={color} />
         <circle cx={geo.xy[geo.xy.length - 1].x} cy={geo.xy[geo.xy.length - 1].y} r="9" fill={color} fillOpacity="0.2" />
         {geo.xt.map((t, i) => (
-          <text key={i} x={Math.min(Math.max(geo.x(t), 18), W - PAD.r - 16)} y={H - 6} fontSize="10" textAnchor="middle" fill="hsl(var(--muted-foreground))">{axisTime(t, range)}</text>))}
+          <text key={i} x={Math.min(Math.max(geo.x(t), 18), W - PAD.r - 16)} y={H - 6} fontSize="10" fontFamily="var(--font-mono), monospace" textAnchor="middle" fill="hsl(var(--muted-foreground))">{axisTime(t, range)}</text>))}
         {activeXY && <g><line x1={activeXY.x} x2={activeXY.x} y1={PAD.t} y2={H - PAD.b} stroke="hsl(var(--foreground))" strokeOpacity="0.35" />
           <circle cx={activeXY.x} cy={activeXY.y} r="5" fill="hsl(var(--background))" stroke={color} strokeWidth="2.5" /></g>}
       </svg>
       {active && delta != null && (
-        <div className="pointer-events-none absolute top-1 -translate-x-1/2 rounded-md border bg-background px-2 py-1 text-xs shadow-md" style={{ left: `${tipLeft}%` }}>
-          <p className="font-semibold tabular-nums">{format(active.v)}</p>
+        <div className="pointer-events-none absolute top-1 -translate-x-1/2 rounded-md border bg-card px-3 py-2 text-xs shadow-md" style={{ left: `${tipLeft}%` }}>
+          <p className="display-num text-base">{format(active.v)}</p>
           <p className={`tabular-nums ${delta >= 0 ? "text-success" : "text-destructive"}`}>{delta >= 0 ? "+" : ""}{format(delta)} vs start</p>
           <p className="text-muted-foreground">{new Date(active.t * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p>
         </div>)}

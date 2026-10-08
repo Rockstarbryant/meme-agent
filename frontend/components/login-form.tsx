@@ -35,18 +35,18 @@ export function LoginForm() {
   }
 
   return (
-    <Card className="w-full max-w-sm">
-      <CardHeader><CardTitle className="text-base">{mode === "login" ? "Sign in" : "Create account"}</CardTitle>
-        <p className="text-xs text-muted-foreground">New accounts start in PAPER mode. LIVE trading is off by default.</p></CardHeader>
-      <CardContent>
-        <form onSubmit={(e) => void submit(e)} className="space-y-3" noValidate>
-          <div className="space-y-1"><Label htmlFor="email">Email</Label>
+    <Card accentTop elevated className="w-full max-w-md">
+      <CardHeader className="p-6 pb-2 sm:p-8 sm:pb-3"><CardTitle className="text-2xl font-normal tracking-[-0.01em]">{mode === "login" ? "Sign in" : "Create account"}</CardTitle>
+        <p className="text-sm leading-relaxed text-muted-foreground">New accounts start in PAPER mode. LIVE trading is off by default.</p></CardHeader>
+      <CardContent className="p-6 pt-3 sm:p-8 sm:pt-4">
+        <form onSubmit={(e) => void submit(e)} className="space-y-5" noValidate>
+          <div className="space-y-1.5"><Label htmlFor="email">Email</Label>
             <Input id="email" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></div>
-          <div className="space-y-1"><Label htmlFor="password">Password</Label>
+          <div className="space-y-1.5"><Label htmlFor="password">Password</Label>
             <Input id="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(e) => setPassword(e.target.value)} required /></div>
           {error && <Alert variant="destructive">{error}</Alert>}
-          <Button type="submit" className="w-full" disabled={busy || !email || !password}>{mode === "login" ? "Sign in" : "Create account"}</Button>
-          <button type="button" className="w-full text-center text-xs text-muted-foreground underline" onClick={() => { setError(null); setMode(mode === "login" ? "register" : "login"); }}>
+          <Button type="submit" size="lg" className="w-full" disabled={busy || !email || !password}>{mode === "login" ? "Sign in" : "Create account"}</Button>
+          <button type="button" className="min-h-[44px] w-full touch-manipulation text-center text-sm text-muted-foreground underline" onClick={() => { setError(null); setMode(mode === "login" ? "register" : "login"); }}>
             {mode === "login" ? "Need an account? Register" : "Have an account? Sign in"}
           </button>
         </form>

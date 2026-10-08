@@ -29,7 +29,7 @@ export function EmergencyControl({ status, onDone }: { status: AgentStatus; onDo
     catch (e) { setError(toApiError(e)); } finally { setBusy(false); }
   }
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <Button variant={enable ? "destructive" : "outline"} onClick={() => setOpen(true)}>{enable ? "EMERGENCY STOP" : "Disable emergency stop"}</Button>
       {error && <ErrorState error={error} />}
       <ConfirmDialog open={open} onOpenChange={setOpen} busy={busy} destructive={enable}
@@ -84,10 +84,10 @@ export function AgentControl() {
   const pol = wallet.data?.policy;
 
   return (
-    <div className="space-y-4">
-      <Card>
+    <div className="space-y-6">
+      <Card accentTop elevated>
         <CardHeader><CardTitle>Agent</CardTitle></CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-4">
           <div className="flex flex-wrap items-center gap-2"><ModeBadge mode={s.mode} /><Badge variant={s.state === "RUNNING" ? "success" : s.state === "OFFLINE" || s.state === "LIVE_BLOCKED" ? "warning" : "default"}>{s.state.replace("_", " ")}</Badge>
             {s.applying && <Badge variant="default">applying…</Badge>}
             {s.emergency_stop && <Badge variant="solidDestructive">EMERGENCY STOP</Badge>}</div>
@@ -104,7 +104,7 @@ export function AgentControl() {
           {s.state === "LIVE_BLOCKED" && <Alert variant="warning">LIVE was requested but your runner refused to trade LIVE (it never falls back to PAPER). See the reasons below.</Alert>}
           <p className="text-xs text-muted-foreground">Pause and Stop halt new entries only. Open positions stay protected by stop-loss, take-profit and trailing logic on your {cloud ? "cloud" : "local"} runner.</p>
           {error && !liveOpen && <ErrorState error={error} />}
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm md:grid-cols-3">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t pt-4 text-sm md:grid-cols-3">
             <div><dt className="text-xs text-muted-foreground">Strategy in use</dt><dd>{s.strategy.id.replaceAll("_", " ")}{s.strategy.version ? ` v${s.strategy.version}` : ""}
               {(s.strategy.enabled ?? []).length > 1 && <span className="block text-xs text-muted-foreground">enabled: {s.strategy.enabled!.join(", ")}</span>}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Data source</dt><dd>{s.data_source}</dd></div>
@@ -114,7 +114,7 @@ export function AgentControl() {
             <div><dt className="text-xs text-muted-foreground">Open positions</dt><dd>{s.open_positions}</dd></div>
           </dl>
           {s.last_decision && (
-            <div className="rounded-md border p-2 text-sm"><p className="mb-1 text-xs text-muted-foreground">Last decision</p>
+            <div className="rounded-md border border-l-[3px] border-l-accent p-3.5 text-sm"><p className="mb-1.5 text-xs tracking-[0.03em] text-muted-foreground">Last decision</p>
               <div className="flex flex-wrap items-center gap-2"><ActionBadge action={s.last_decision.action} /><span>{s.last_decision.symbol ?? s.last_decision.token}</span>
                 <Link className="text-xs underline" href={`/decisions/${s.last_decision.id}`}>why?</Link></div>
               <p className="mt-1 text-xs text-muted-foreground">{s.last_decision.reason}</p></div>
@@ -122,10 +122,10 @@ export function AgentControl() {
         </CardContent>
       </Card>
 
-      <Card><CardContent className="flex flex-wrap items-center gap-3 p-4 text-sm">
-        {cloud ? <Cloud className="h-5 w-5" aria-hidden /> : <Laptop className="h-5 w-5" aria-hidden />}
+      <Card><CardContent className="flex flex-wrap items-center gap-4 p-5 text-sm sm:p-6">
+        {cloud ? <Cloud className="h-5 w-5 text-accent-ink" aria-hidden /> : <Laptop className="h-5 w-5 text-accent-ink" aria-hidden />}
         <div className="min-w-0 flex-1">
-          <p className="font-medium">{cloud ? "Cloud runner" : "Local runner"} <Badge variant={s.runner?.online ? "success" : "warning"}>{s.runner?.online ? "ONLINE" : "OFFLINE"}</Badge></p>
+          <p className="font-serif text-lg font-semibold">{cloud ? "Cloud runner" : "Local runner"} <Badge variant={s.runner?.online ? "success" : "warning"}>{s.runner?.online ? "ONLINE" : "OFFLINE"}</Badge></p>
           <p className="text-xs text-muted-foreground">{cloud ? "Your agent runs on our servers." : "Your agent runs on your own machine."} Switching runner or pairing a local one is a setting.</p>
         </div>
         <Link href="/settings?tab=runner" className="text-sm underline">Runner settings</Link>

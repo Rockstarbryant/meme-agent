@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { Loading, Empty } from "@/components/states";
+import { PageHeader } from "@/components/page-header";
 
 type TokenCard = {
   chain: string;
@@ -184,7 +185,7 @@ export default function DiscoveryPage() {
 
     return (
       <Card key={key}>
-        <CardHeader className="pb-1">
+        <CardHeader className="pb-1 sm:pb-1">
           <button
             type="button"
             className="w-full text-left"
@@ -193,7 +194,7 @@ export default function DiscoveryPage() {
             }}
           >
             <div className="flex items-start justify-between gap-2">
-              <CardTitle className="text-base hover:underline">{title}{t.name && t.symbol ? <span className="ml-2 text-xs font-normal text-muted-foreground">{t.symbol}</span> : null}</CardTitle>
+              <CardTitle className="text-lg hover:underline">{title}{t.name && t.symbol ? <span className="ml-2 text-xs font-normal text-muted-foreground">{t.symbol}</span> : null}</CardTitle>
               <div className="flex gap-1">
                 <Badge variant={statusVariant(t.global_screening_passed)}>
                   {t.status || "—"}
@@ -207,7 +208,7 @@ export default function DiscoveryPage() {
           </button>
         </CardHeader>
         <CardContent className="space-y-2">
-          <div className="grid grid-cols-2 gap-1 text-xs">
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 border-t pt-3 text-xs tabular-nums">
             <span>Score: {fmtScore(t.score)}</span>
             <span>Δ: {fmtDelta(t.score_delta)}</span>
             <span>Price: {fmtPrice(t.price)}</span>
@@ -216,13 +217,13 @@ export default function DiscoveryPage() {
             <span>Liq: {fmtUsd(t.liquidity)}</span>
           </div>
           {t.last_monitored_at ? (
-            <p className="text-[10px] text-muted-foreground">
+            <p className="text-[11px] text-muted-foreground">
               Last monitored: {new Date(t.last_monitored_at).toLocaleString()}
             </p>
           ) : null}
 
           {isOpen ? (
-            <div className="rounded-md border p-2 text-xs space-y-1">
+            <div className="space-y-1.5 rounded-md border border-l-[3px] border-l-accent p-3 text-xs leading-relaxed">
               {detailLoading ? (
                 <Loading label="Loading detail…" />
               ) : detail ? (
@@ -234,11 +235,11 @@ export default function DiscoveryPage() {
                     Metrics refresh via monitoring. Thin data → low score → REJECTED/COLD is normal until holders and buy/sell enrich.
                   </p>
                   <p>
-                    <Link href={tokenHref} className="text-primary underline">
+                    <Link href={tokenHref} className="text-accent-ink underline">
                       Open the full token page
                     </Link>
                     {" · "}
-                    <Link href="/opportunities" className="text-primary underline">
+                    <Link href="/opportunities" className="text-accent-ink underline">
                       Opportunities
                     </Link>
                     {" "}
@@ -289,27 +290,25 @@ export default function DiscoveryPage() {
 
   return (
     <AppShell>
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-xl font-bold">Token Discovery</h1>
-          {status ? (
+      <div className="space-y-6">
+        <PageHeader
+          title="Token Discovery"
+          description="Historical tokens from the global registry. Market data is refreshed by monitoring. Opening this page does not trigger a launchpad scan. For Buy anyway, use Opportunities after the agent records a WATCH decision."
+          actions={status ? (
             <Badge variant={premiumOn ? "success" : "default"}>
               {premiumOn ? "Premium on" : "Premium off"} · global · every {String(intervalH)}h
             </Badge>
           ) : null}
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Historical tokens from the global registry. Market data is refreshed by monitoring.
-          Opening this page does not trigger a launchpad scan. For Buy anyway, use Opportunities after the agent records a WATCH decision.
-        </p>
+        />
         {statusMsg ? (
-          <p className="text-xs text-muted-foreground">{statusMsg}</p>
+          <p className="text-sm text-muted-foreground">{statusMsg}</p>
         ) : null}
 
         <div className="flex gap-2">
           <Button
             size="sm"
             variant={window === "24h" ? "default" : "outline"}
+            aria-pressed={window === "24h"}
             onClick={function () {
               setWindow("24h");
             }}
@@ -319,6 +318,7 @@ export default function DiscoveryPage() {
           <Button
             size="sm"
             variant={window === "72h" ? "default" : "outline"}
+            aria-pressed={window === "72h"}
             onClick={function () {
               setWindow("72h");
             }}
@@ -329,7 +329,7 @@ export default function DiscoveryPage() {
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Search tokens</CardTitle>
+            <CardTitle className="text-xl">Search tokens</CardTitle>
           </CardHeader>
           <CardContent className="flex gap-2">
             <Input
@@ -347,7 +347,7 @@ export default function DiscoveryPage() {
         </Card>
 
         {searchResults.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-5 sm:grid-cols-2">
             {searchResults.map(function (t) {
               return <TokenRow key={"s-" + t.token_address} t={t} />;
             })}
@@ -356,8 +356,8 @@ export default function DiscoveryPage() {
 
         {bookmarks.length > 0 ? (
           <div className="space-y-2">
-            <h2 className="text-lg font-semibold">Bookmarks</h2>
-            <div className="grid gap-3 sm:grid-cols-2">
+            <h2 className="font-serif text-2xl font-normal tracking-[-0.01em]">Bookmarks</h2>
+            <div className="grid gap-5 sm:grid-cols-2">
               {bookmarks.map(function (b) {
                 return (
                   <div key={b.id} className="space-y-1">
@@ -365,7 +365,7 @@ export default function DiscoveryPage() {
                       <TokenRow t={b.token} showBookmark={false} />
                     ) : (
                       <Card>
-                        <CardContent className="p-3 text-sm">
+                        <CardContent className="p-4 text-sm sm:p-4">
                           {b.chain}:{b.token_address}
                         </CardContent>
                       </Card>
@@ -387,7 +387,7 @@ export default function DiscoveryPage() {
           </div>
         ) : null}
 
-        <h2 className="text-lg font-semibold">Discovered · {window}</h2>
+        <h2 className="font-serif text-2xl font-normal tracking-[-0.01em]">Discovered · {window}</h2>
         {loading ? (
           <Loading label="Loading historical tokens…" />
         ) : !data || data.count === 0 ? (
@@ -395,7 +395,7 @@ export default function DiscoveryPage() {
             No tokens in this window yet. Global discovery has not populated candidates for this period.
           </Empty>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-5 sm:grid-cols-2">
             {data.tokens.map(function (t) {
               return (
                 <TokenRow key={t.chain + ":" + t.token_address} t={t} />

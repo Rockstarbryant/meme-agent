@@ -56,7 +56,7 @@ export function RiskLimitsForm() {
       <CardContent className="space-y-3">
         <div className="grid gap-3 sm:grid-cols-2">
           {FIELDS.map((f) => (
-            <div key={f.key} className="space-y-1"><Label htmlFor={`rl-${f.key}`}>{f.label}</Label>
+            <div key={f.key} className="space-y-1.5"><Label htmlFor={`rl-${f.key}`}>{f.label}</Label>
               <Input id={`rl-${f.key}`} type="number" inputMode="decimal" step={f.step ?? "any"}
                 value={Number.isNaN(values[f.key] as number) ? "" : (values[f.key] as number)}
                 onChange={(e) => setEdits({ ...edits, [f.key]: e.target.value === "" ? NaN : Number(e.target.value) })} /></div>

@@ -29,26 +29,26 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
   const launchpadDetected = !m.launchpad && m.launchpad_detected;
   const gaps = (m.enrichment_gaps as string[] | undefined) ?? [];
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-semibold">{(m.token_name as string) ?? (m.symbol as string) ?? t.token_key}</h2>
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center gap-3"><h2 className="font-serif text-3xl font-normal leading-[1.15] tracking-[-0.01em]">{(m.token_name as string) ?? (m.symbol as string) ?? t.token_key}</h2>
         {m.token_name && m.symbol ? <span className="text-sm text-muted-foreground">{m.symbol as string}</span> : null}<DataLabel label={t.data_label} />
         {t.latest_decision && <ActionBadge action={t.latest_decision.final_action} />}<span className="break-all text-xs text-muted-foreground">{t.token_key}</span></div>
-      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
         <span>Launchpad: {launchpad ?? "unknown"}{launchpadDetected ? ` (detected, ${(m.launchpad_evidence as string) ?? "on-chain"})` : ""}</span>
         <span>Scanned: {ago((m.scanned_at as string) ?? (m.enriched_at as string) ?? null)}</span>
       </div>
       {gaps.length > 0 && <p className="text-xs text-muted-foreground">Not enriched: {gaps.join("; ")}</p>}
-      <Card><CardContent className="space-y-3 pt-4"><div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <Card elevated><CardContent className="space-y-5 pt-5 sm:pt-6"><div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Price" value={price(n(m, "price"))} /><Stat label="Market cap" value={compact(n(m, "market_cap"))} /><Stat label="Liquidity" value={compact(n(m, "liquidity"))} />
         <Stat label="Volume 5m / 1h / 24h" value={`${compact(n(m, "volume_5m"))} / ${compact(winVol(m, "1h"))} / ${compact(winVol(m, "24h"))}`} /></div>
         <PriceChart points={t.price_series} /></CardContent></Card>
       {t.evaluated === false && <Alert>{t.note ?? "This token has not been evaluated by your agent yet."}</Alert>}
       <MarketWindowsCard market={m} />
       <HoldersCard market={m} />
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-6 md:grid-cols-2">
         <Card><CardHeader><CardTitle>Creator</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
           {m.creator_known ? <><p>Balance: {plainPct(n(m, "creator_balance_pct"))}</p><p>Sold: {plainPct(n(m, "creator_sold_pct"))}</p></> : <p>Creator behaviour could not be verified. It is not assumed to be safe.</p>}</CardContent></Card>
-        <Card><CardHeader><CardTitle>Contract risk</CardTitle></CardHeader><CardContent><dl className="grid grid-cols-2 gap-1 text-sm">
+        <Card><CardHeader><CardTitle>Contract risk</CardTitle></CardHeader><CardContent><dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
           {(["verified", "owner_renounced", "mint_authority_active", "pausable", "blacklist_capability", "transfer_restricted", "is_proxy", "sell_simulation_ok"] as const).map((k) => (
             <div key={k} className="flex justify-between gap-2"><dt className="text-muted-foreground">{k.replaceAll("_", " ")}</dt><dd>{tri(c[k])}</dd></div>))}
           <div className="flex justify-between gap-2"><dt className="text-muted-foreground">buy / sell tax</dt><dd>{plainPct(typeof c.buy_tax_pct === "number" ? c.buy_tax_pct : null)} / {plainPct(typeof c.sell_tax_pct === "number" ? c.sell_tax_pct : null)}</dd></div></dl>

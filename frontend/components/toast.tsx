@@ -30,9 +30,13 @@ const Ctx = createContext<ToastApi>(noop);
 export const useToast = () => useContext(Ctx);
 
 const ICON = { success: CheckCircle2, error: XCircle, warning: AlertTriangle, info: Info, loading: Loader2 } as const;
+// A coloured rule on the left edge and a coloured icon carry the kind; the words stay in ink.
 const TONE: Record<ToastKind, string> = {
-  success: "border-success text-success", error: "border-destructive text-destructive", warning: "border-warning text-warning",
-  info: "border-border text-foreground", loading: "border-border text-foreground",
+  success: "border-l-success", error: "border-l-destructive", warning: "border-l-warning",
+  info: "border-l-accent", loading: "border-l-accent",
+};
+const ICON_TONE: Record<ToastKind, string> = {
+  success: "text-success", error: "text-destructive", warning: "text-warning", info: "text-accent-ink", loading: "text-accent-ink",
 };
 const MAX_VISIBLE = 4;
 const defaultDuration = (k: ToastKind) => (k === "error" ? 10000 : k === "loading" ? 0 : 6000);
@@ -79,14 +83,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           const Icon = ICON[t.kind];
           return (
             <div key={t.id} role={t.kind === "error" ? "alert" : "status"}
-              className={cn("pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg border bg-background p-3 shadow-lg", TONE[t.kind])}>
-              <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", t.kind === "loading" && "animate-spin")} aria-hidden />
+              className={cn("pointer-events-auto flex w-full max-w-sm animate-[fade-in_0.25s_ease-out_both] items-start gap-3 rounded-lg border border-l-[3px] bg-card p-4 text-card-foreground shadow-lg", TONE[t.kind])}>
+              <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", ICON_TONE[t.kind], t.kind === "loading" && "animate-spin")} aria-hidden />
               <div className="min-w-0 flex-1 text-sm">
                 <p className="font-medium leading-snug">{t.title}</p>
-                {t.description && <p className="mt-0.5 break-words text-xs text-muted-foreground">{t.description}</p>}
-                {t.href && <Link href={t.href} className="mt-1 inline-block text-xs underline">{t.linkLabel ?? "View"}</Link>}
+                {t.description && <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">{t.description}</p>}
+                {t.href && <Link href={t.href} className="mt-1.5 inline-block text-xs underline">{t.linkLabel ?? "View"}</Link>}
               </div>
-              <button type="button" aria-label="Dismiss notification" onClick={() => dismiss(t.id)} className="rounded p-1 text-muted-foreground hover:bg-muted"><X className="h-3.5 w-3.5" /></button>
+              <button type="button" aria-label="Dismiss notification" onClick={() => dismiss(t.id)} className="-m-1 grid h-9 w-9 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"><X className="h-3.5 w-3.5" /></button>
             </div>
           );
         })}

@@ -37,7 +37,7 @@ function BlacklistCard() {
   return (
     <Card><CardHeader><CardTitle>Blacklists</CardTitle></CardHeader><CardContent className="space-y-3">
       <p className="text-sm text-muted-foreground">Tokens, creators or launchpads the agent must never trade.</p>
-      <div className="flex flex-wrap gap-2"><select aria-label="Blacklist kind" className="h-10 rounded-md border bg-background px-2 text-sm" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
+      <div className="flex flex-wrap gap-2"><select aria-label="Blacklist kind" className="h-11 rounded-md border bg-background px-2.5 text-sm" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
         {KINDS.map(([k]) => <option key={k} value={k}>{k}</option>)}</select>
         <Input aria-label="Blacklist value" className="min-w-0 flex-1" placeholder="address or launchpad name" value={value} onChange={(e) => setValue(e.target.value)} />
         <Button disabled={!value.trim()} onClick={() => void call("POST", kind, value.trim())}>Add</Button></div>
@@ -54,7 +54,7 @@ function General({ s }: { s: ServerSettings }) {
   const pads = useApi<{ launchpads: LaunchpadInfo[]; note: string }>("/launchpads");
   const arc = chains.data?.find((c) => c.id === "arc");
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <Card><CardHeader><CardTitle>Trading mode</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
         <ModeBadge mode={s.mode} /><p className="text-muted-foreground">LIVE is {s.live_trading_enabled_on_server ? "permitted" : "disabled"} on the server and always needs explicit confirmation on the <Link className="underline" href="/agent">Agent</Link> page.</p></CardContent></Card>
       <Card><CardHeader><CardTitle>Chain</CardTitle></CardHeader><CardContent className="space-y-1 text-sm">
@@ -72,7 +72,7 @@ function General({ s }: { s: ServerSettings }) {
 function RunnerAndAi({ status, reload }: { status: AgentStatus; reload: () => Promise<void> }) {
   const chain = status.ai.chain ?? [];
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <RunnerModeCard status={status} onChanged={reload} />
       {status.execution_mode === "cloud_managed" ? <CloudRunnerPanel status={status} /> : <RunnerPanel />}
       <Card><CardHeader><CardTitle>AI providers</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
@@ -100,19 +100,19 @@ export function SettingsView() {
   const current = SETTINGS_TABS.find((t) => t.id === tab)!;
 
   return (
-    <div className="md:flex md:gap-6">
-      <nav aria-label="Settings sections" className="mb-4 flex gap-1 overflow-x-auto md:sticky md:top-20 md:mb-0 md:w-52 md:shrink-0 md:flex-col md:self-start md:overflow-visible">
+    <div className="md:flex md:gap-10">
+      <nav aria-label="Settings sections" className="-mx-1 mb-6 flex gap-1 overflow-x-auto border-b px-1 pb-2 md:sticky md:top-24 md:mx-0 md:mb-0 md:w-56 md:shrink-0 md:flex-col md:self-start md:overflow-visible md:border-b-0 md:border-r md:px-0 md:pb-0 md:pr-4">
         {SETTINGS_TABS.map((t) => (
           <button key={t.id} type="button" aria-current={tab === t.id ? "page" : undefined} onClick={() => go(t.id)}
-            className={cn("shrink-0 rounded-md px-3 py-2 text-left text-sm transition-colors", tab === t.id ? "bg-primary text-primary-foreground font-semibold" : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+            className={cn("min-h-[44px] shrink-0 touch-manipulation rounded-md px-3.5 py-2 text-left text-sm font-medium tracking-[0.03em] transition-colors duration-200 md:min-h-[40px] md:rounded-l-none md:border-l-2", tab === t.id ? "border-accent bg-muted text-foreground max-md:shadow-[inset_0_-2px_0_hsl(var(--accent))] md:border-accent" : "text-muted-foreground hover:bg-muted/70 hover:text-foreground md:border-transparent")}>
             {t.label}
           </button>))}
       </nav>
-      <div className="min-w-0 flex-1 space-y-4">
-        <div><h2 className="text-base font-semibold">{current.label}</h2><p className="text-sm text-muted-foreground">{current.hint}</p></div>
+      <div className="min-w-0 flex-1 space-y-6">
+        <div><h2 className="font-serif text-2xl font-normal tracking-[-0.01em]">{current.label}</h2><p className="mt-1 text-sm text-muted-foreground">{current.hint}</p></div>
         {tab === "general" && <General s={s.data} />}
         {tab === "strategy" && <StrategySettings />}
-        {tab === "risk" && <div className="space-y-4"><RiskLimitsForm /><BlacklistCard /></div>}
+        {tab === "risk" && <div className="space-y-6"><RiskLimitsForm /><BlacklistCard /></div>}
         {tab === "wallet" && <WalletPolicySettings />}
         {tab === "runner" && (agent.data ? <RunnerAndAi status={agent.data} reload={async () => { await agent.reload(); }} /> : agent.error ? <ErrorState error={agent.error} onRetry={() => void agent.reload()} /> : <Loading />)}
         {tab === "notifications" && <NotificationSettings />}

@@ -19,11 +19,11 @@ interface OptionProps {
 }
 function Option({ mode, current, title, icon: Icon, blurb, lines, badge, disabledReason, onChoose, busy }: OptionProps) {
   return (
-    <div className={cn("flex flex-col gap-2 rounded-lg border p-3", current && "border-primary ring-1 ring-primary")} data-testid={`runner-option-${mode}`}>
-      <div className="flex items-center gap-2"><Icon className="h-5 w-5" aria-hidden /><h3 className="font-semibold">{title}</h3>
+    <div className={cn("relative flex flex-col gap-3 rounded-lg border p-5 transition-colors duration-200", current ? "border-accent bg-accent/[0.06] before:absolute before:inset-x-0 before:-top-px before:h-0.5 before:rounded-t-lg before:bg-accent" : "hover:border-border-hover")} data-testid={`runner-option-${mode}`}>
+      <div className="flex items-center gap-2"><Icon className="h-5 w-5 text-accent-ink" aria-hidden /><h3 className="font-serif text-lg font-semibold">{title}</h3>
         {current && <Badge variant="success">IN USE</Badge>}<Badge variant={badge.variant}>{badge.label}</Badge></div>
       <p className="text-sm text-muted-foreground">{blurb}</p>
-      <ul className="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">{lines.map((l) => <li key={l}>{l}</li>)}</ul>
+      <ul className="list-disc space-y-1 pl-5 text-xs leading-relaxed text-muted-foreground marker:text-accent">{lines.map((l) => <li key={l}>{l}</li>)}</ul>
       <div className="mt-auto pt-1">
         {current ? <p className="text-xs text-muted-foreground">This is your active runner.</p>
           : <Button size="sm" variant="outline" disabled={busy || !!disabledReason} onClick={() => onChoose(mode)}>{`Use ${mode === "cloud_managed" ? "cloud" : "local"} runner`}</Button>}
@@ -58,9 +58,9 @@ export function RunnerModeCard({ status, onChanged }: { status: AgentStatus; onC
   return (
     <Card>
       <CardHeader><CardTitle>Where does your agent run?</CardTitle></CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">Pick one. Each runner keeps its own positions, so you can switch only while nothing is open.</p>
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-4 md:grid-cols-2">
           <Option mode="cloud_managed" current={mode === "cloud_managed"} icon={Cloud} title="Cloud runner" busy={busy} onChoose={setTarget}
             blurb="We run the agent for you, always on. Nothing to install."
             lines={["PAPER mode works immediately: no wallet needed.", "LIVE mode needs a Privy wallet (create it on the Wallet page).", "Positions are monitored 24/7."]}

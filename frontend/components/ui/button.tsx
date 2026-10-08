@@ -3,17 +3,32 @@ import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
+/**
+ * Primary is burnished gold with dark text. Outline is an ink hairline. Ghost is quiet text that gains a gold underline.
+ * Any button with aria-pressed (filters, ranges, sort) shows its selected state as an ink fill, so gold stays reserved for actions.
+ */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:pointer-events-none disabled:opacity-50",
+  [
+    "inline-flex touch-manipulation items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium tracking-[0.02em]",
+    "transition-all duration-200 ease-out motion-reduce:transform-none",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+    "disabled:pointer-events-none disabled:opacity-50",
+    "aria-[pressed=true]:translate-y-0 aria-[pressed=true]:border-foreground aria-[pressed=true]:bg-foreground aria-[pressed=true]:text-background aria-[pressed=true]:shadow-none",
+    "aria-[pressed=true]:hover:translate-y-0 aria-[pressed=true]:hover:border-foreground aria-[pressed=true]:hover:bg-foreground aria-[pressed=true]:hover:text-background",
+  ].join(" "),
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:opacity-90",
-        outline: "border bg-transparent hover:bg-muted",
-        destructive: "bg-destructive text-destructive-foreground hover:opacity-90",
-        ghost: "hover:bg-muted",
+        default: "border border-transparent bg-primary text-primary-foreground shadow-sm hover:-translate-y-0.5 hover:bg-accent-secondary hover:shadow-gold active:translate-y-0",
+        outline: "border border-foreground bg-transparent text-foreground hover:border-accent hover:bg-muted hover:text-accent-ink",
+        destructive: "border border-transparent bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+        ghost: "border border-transparent text-muted-foreground decoration-accent underline-offset-4 hover:text-foreground hover:underline",
       },
-      size: { default: "h-10 px-4 py-2", sm: "h-8 px-3", lg: "h-12 px-6 text-base" },
+      size: {
+        default: "h-10 px-5 max-md:min-h-[44px]",
+        sm: "h-9 px-3.5 text-[13px] max-md:min-h-[44px]",
+        lg: "h-12 px-7 text-base",
+      },
     },
     defaultVariants: { variant: "default", size: "default" },
   },

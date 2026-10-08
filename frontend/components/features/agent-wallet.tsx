@@ -48,12 +48,12 @@ const KIND_STYLE: Record<LedgerEntry["kind"], { label: string; variant: "success
 export function LedgerList({ rows, mode }: { rows: LedgerEntry[]; mode?: HistoryMode }) {
   if (rows.length === 0) return <p className="text-sm text-muted-foreground">{mode === "PAPER" ? "No paper trades yet." : mode === "LIVE" ? "No live transactions yet. Real trades and withdrawals appear here as they happen." : "No transactions yet."}</p>;
   return (
-    <ul className="divide-y rounded-md border">
+    <ul className="divide-y rounded-md border bg-card">
       {rows.map((r, i) => {
         const k = KIND_STYLE[r.kind];
         return (
-          <li key={`${r.at}-${i}`} className="flex flex-wrap items-start justify-between gap-2 p-3 text-sm">
-            <div className="min-w-0 space-y-0.5">
+          <li key={`${r.at}-${i}`} className="flex flex-wrap items-start justify-between gap-3 px-4 py-3.5 text-sm transition-colors duration-200 hover:bg-muted/40">
+            <div className="min-w-0 space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={k.variant}>{k.label}</Badge><span className="font-medium">{r.title}</span>
                 {r.simulated && <Badge>PAPER</Badge>}
@@ -65,7 +65,7 @@ export function LedgerList({ rows, mode }: { rows: LedgerEntry[]; mode?: History
                 ? <a className="inline-flex items-center gap-1 text-xs underline" href={r.explorer_url} target="_blank" rel="noopener noreferrer">{shortAddr(r.tx_hash)}<ExternalLink className="h-3 w-3" aria-hidden /></a>
                 : <code className="text-xs">{shortAddr(r.tx_hash)}</code>)}
             </div>
-            {r.amount_usdc != null && <span className={`shrink-0 font-semibold tabular-nums ${pnlClass(r.amount_usdc)}`}>{signedUsd(r.amount_usdc)}</span>}
+            {r.amount_usdc != null && <span className={`display-num shrink-0 text-lg ${pnlClass(r.amount_usdc)}`}>{signedUsd(r.amount_usdc)}</span>}
           </li>
         );
       })}
@@ -74,7 +74,7 @@ export function LedgerList({ rows, mode }: { rows: LedgerEntry[]; mode?: History
 }
 
 function Stat({ label, value, sub, className }: { label: string; value: React.ReactNode; sub?: React.ReactNode; className?: string }) {
-  return <div className={className}><p className="text-xs text-muted-foreground">{label}</p><p className="text-lg font-semibold tabular-nums">{value}</p>{sub && <p className="text-xs text-muted-foreground">{sub}</p>}</div>;
+  return <div className={className}><p className="text-xs tracking-[0.03em] text-muted-foreground">{label}</p><p className="display-num mt-1 break-words text-xl md:text-2xl">{value}</p>{sub && <p className="mt-0.5 text-xs text-muted-foreground">{sub}</p>}</div>;
 }
 
 /** The agent wallet the way a user expects it: balance, deposit, withdraw, transaction history. */
@@ -116,10 +116,10 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       {/* Balance */}
-      <Card>
-        <CardHeader><div className="flex flex-wrap items-center gap-2"><WalletIcon className="h-4 w-4" aria-hidden /><CardTitle>{paper ? "Paper wallet" : "Agent wallet"}</CardTitle>
+      <Card accentTop elevated>
+        <CardHeader><div className="flex flex-wrap items-center gap-2"><WalletIcon className="h-4 w-4 text-accent-ink" aria-hidden /><CardTitle>{paper ? "Paper wallet" : "Agent wallet"}</CardTitle>
           <Badge variant={paper ? "default" : "warning"}>{paper ? "VIRTUAL USDC" : "REAL USDC"}</Badge></div></CardHeader>
         <CardContent className="space-y-3">
           {paper ? (
@@ -144,14 +144,14 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-6 lg:grid-cols-2">
         {/* Deposit */}
         <Card>
-          <CardHeader><div className="flex items-center gap-2"><ArrowDownToLine className="h-4 w-4" aria-hidden /><CardTitle>Deposit</CardTitle></div></CardHeader>
-          <CardContent className="space-y-3 text-sm">
+          <CardHeader><div className="flex items-center gap-2"><ArrowDownToLine className="h-4 w-4 text-accent-ink" aria-hidden /><CardTitle>Deposit</CardTitle></div></CardHeader>
+          <CardContent className="space-y-4 text-sm">
             {cloud ? (<>
               <p>Send <strong>USDC on Arc {w.network.network}</strong> to your agent wallet address:</p>
-              <code className="block break-all rounded bg-muted px-2 py-2 text-xs" data-testid="deposit-address">{cloud.address}</code>
+              <code className="block break-all rounded-md border bg-muted px-3 py-3 font-mono text-xs leading-relaxed" data-testid="deposit-address">{cloud.address}</code>
               <div className="flex flex-wrap gap-2"><CopyButton text={cloud.address} />
                 {explorer && <a className="inline-flex items-center gap-1 text-xs underline" href={`${explorer}/address/${cloud.address}`} target="_blank" rel="noopener noreferrer">View on explorer<ExternalLink className="h-3 w-3" aria-hidden /></a>}</div>
               <Alert variant="warning">Only send USDC on the Arc network (chain id {w.network.chain_id}). Tokens sent on another network, or a different token, can be lost.</Alert>
@@ -166,12 +166,12 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
 
         {/* Withdraw */}
         <Card>
-          <CardHeader><div className="flex items-center gap-2"><ArrowUpFromLine className="h-4 w-4" aria-hidden /><CardTitle>Withdraw</CardTitle></div></CardHeader>
-          <CardContent className="space-y-3 text-sm">
+          <CardHeader><div className="flex items-center gap-2"><ArrowUpFromLine className="h-4 w-4 text-accent-ink" aria-hidden /><CardTitle>Withdraw</CardTitle></div></CardHeader>
+          <CardContent className="space-y-4 text-sm">
             {cloud ? (<>
-              <div className="space-y-1"><Label htmlFor="wd-to">Destination address</Label>
+              <div className="space-y-1.5"><Label htmlFor="wd-to">Destination address</Label>
                 <Input id="wd-to" placeholder="0x…" value={to} onChange={(e) => setTo(e.target.value)} autoComplete="off" spellCheck={false} /></div>
-              <div className="space-y-1"><Label htmlFor="wd-amt">Amount (USDC)</Label>
+              <div className="space-y-1.5"><Label htmlFor="wd-amt">Amount (USDC)</Label>
                 <div className="flex gap-2"><Input id="wd-amt" inputMode="decimal" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
                   <Button type="button" variant="outline" disabled={balance == null} onClick={() => balance != null && setAmount(String(balance))}>Max</Button></div></div>
               {(to || amount) && problem && <p className="text-xs text-warning" role="status">{problem}</p>}
@@ -185,7 +185,7 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
 
       {/* History */}
       <Card>
-        <CardHeader><div className="flex flex-wrap items-center gap-3"><div className="flex items-center gap-2"><History className="h-4 w-4" aria-hidden /><CardTitle>Transaction history</CardTitle></div>
+        <CardHeader><div className="flex flex-wrap items-center gap-3"><div className="flex items-center gap-2"><History className="h-4 w-4 text-accent-ink" aria-hidden /><CardTitle>Transaction history</CardTitle></div>
           <ModeTabs value={shownMode} onChange={setHistMode} current={paper ? "PAPER" : "LIVE"} label="History mode" /></div></CardHeader>
         <CardContent className="space-y-3">
           <p className="text-xs text-muted-foreground">{shownMode === "PAPER" ? "Paper history: simulated trades with virtual money. There are no blockchain transactions, withdrawals or deposits here." : "Live history: real trades with their on-chain transaction links, plus withdrawals and wallet events."}</p>
@@ -195,7 +195,7 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
 
       <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} busy={sending} destructive title="Send this withdrawal?" confirmLabel="Withdraw"
         description={`${amount ? usd(Number(amount)) : "—"} USDC will be sent from your agent wallet to ${to.trim() ? shortAddr(to.trim()) : "—"}. Blockchain transfers cannot be undone, so check the address.`}
-        extra={<code className="block break-all rounded bg-muted p-2 text-xs">{to.trim()}</code>} onConfirm={withdraw} />
+        extra={<code className="block break-all rounded-md border bg-muted p-3 font-mono text-xs leading-relaxed">{to.trim()}</code>} onConfirm={withdraw} />
     </div>
   );
 }

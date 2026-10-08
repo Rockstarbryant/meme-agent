@@ -30,15 +30,15 @@ export function DecisionDetail({ decisionId }: { decisionId: string }) {
   const symbol = typeof saw["symbol"] === "string" ? (saw["symbol"] as string) : null;
   const launchpadLabel = (saw["launchpad"] as string | null) ?? (saw["launchpad_detected"] as string | null | undefined) ?? null;
   return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <div className="flex flex-wrap items-center gap-2"><ActionBadge action={d.decision.final_action} />
-          <h2 className="text-lg font-semibold">{tokenName ?? symbol ?? d.decision.token_key}</h2>
+    <div className="space-y-6">
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-3"><ActionBadge action={d.decision.final_action} />
+          <h2 className="font-serif text-3xl font-normal leading-[1.15] tracking-[-0.01em]">{tokenName ?? symbol ?? d.decision.token_key}</h2>
           {tokenName && symbol ? <span className="text-sm text-muted-foreground">{symbol}</span> : null}
           <DataLabel label={d.decision.data_label} /><Badge>{d.decision.mode}</Badge></div>
         <p className="break-all text-xs text-muted-foreground">{d.decision.token_key}</p></div>
-      <p className="text-sm">{d.decision.final_reason}</p>
-      <Card><CardHeader><CardTitle>1. What the agent saw</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
+      <p className="max-w-3xl border-l-[3px] border-l-accent pl-4 text-base leading-[1.75]">{d.decision.final_reason}</p>
+      <Card><CardHeader><CardTitle>1. What the agent saw</CardTitle></CardHeader><CardContent className="grid grid-cols-2 gap-x-4 gap-y-4 text-sm md:grid-cols-4">
         {([["price", "price"], ["market_cap", "num"], ["liquidity", "num"], ["mev_risk_score", "num"]] as const)
           .map(([k, kind]) => <div key={k}><p className="text-xs text-muted-foreground">{k.replaceAll("_", " ")}</p>
             <p>{typeof saw[k] === "number" ? (kind === "price" ? price(saw[k] as number) : compact(saw[k] as number)) : "—"}</p></div>)}

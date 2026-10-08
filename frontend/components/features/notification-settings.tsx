@@ -31,7 +31,7 @@ function InAppCard() {
       <CardContent className="space-y-3 text-sm">
         <p className="text-muted-foreground">The small messages that appear on screen while you use the app (for example &quot;Position opened&quot;). They only show while a page is open, and this choice is remembered in this browser only.</p>
         {IN_APP.map((o) => (
-          <label key={o.key} className="flex items-start gap-3 rounded-md border p-3">
+          <label key={o.key} className="flex min-h-[44px] cursor-pointer items-start gap-3 rounded-md border p-3.5 transition-colors duration-200 hover:border-border-hover hover:bg-muted/40">
             <input type="checkbox" className="mt-1 h-4 w-4" checked={prefs[o.key]} onChange={(e) => update({ [o.key]: e.target.checked })} />
             <span><span className="font-medium">{o.label}</span><span className="block text-xs text-muted-foreground">{o.detail}</span></span>
           </label>))}
@@ -97,9 +97,9 @@ function WebhookCard() {
             <Badge variant={all ? "warning" : "success"}>{all ? "ALL events" : `${events.length} selected`}</Badge></div>
           {all && <Alert variant="warning">Nothing is selected, so <strong>every</strong> event is sent, including each decision the agent records (dozens per hour). Pick only the events you want.</Alert>}
           {groups.map((g) => (
-            <div key={g} className="space-y-1"><p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g}</p>
+            <div key={g} className="space-y-1"><p className="small-caps text-[11px] text-muted-foreground">{g}</p>
               {catalog.filter((c) => c.group === g).map((c) => (
-                <label key={c.id} className="flex items-start gap-3 rounded-md border p-2.5">
+                <label key={c.id} className="flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors duration-200 hover:border-border-hover hover:bg-muted/40">
                   <input type="checkbox" className="mt-1 h-4 w-4" checked={events.includes(c.id)} onChange={() => toggle(c.id)} />
                   <span><span className="font-medium">{c.label}</span> <code className="text-[11px] text-muted-foreground">{c.id}</code>{c.description && <span className="block text-xs text-muted-foreground">{c.description}</span>}</span>
                 </label>))}

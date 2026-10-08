@@ -15,12 +15,12 @@ export function ModeBanner({ status, connected }: { status: AgentStatus; connect
         {demo && <Badge variant="solidWarning">DEMO DATA</Badge>}
         <Badge variant={status.state === "RUNNING" ? "success" : status.state === "OFFLINE" || status.state === "LIVE_BLOCKED" ? "warning" : "default"}>AGENT {status.state.replace("_", " ")}</Badge>
         <Badge variant={status.runner?.online ? "success" : "warning"}>{status.runner === null ? "NO RUNNER" : status.runner.online ? "RUNNER ONLINE" : "RUNNER OFFLINE"}</Badge>
-        <span title={connected ? "Live updates connected" : "Live updates offline"} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        <span title={connected ? "Live updates connected" : "Live updates offline"} className="inline-flex items-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-muted-foreground">
           <Radio className={`h-3 w-3 ${connected ? "text-success" : ""}`} aria-hidden />{connected ? "live" : "offline"}
         </span>
       </div>
       {status.emergency_stop && (
-        <div role="alert" className="mt-2 flex items-start gap-2 rounded-md bg-destructive p-2 text-sm font-semibold text-destructive-foreground">
+        <div role="alert" className="mt-3 flex items-start gap-2.5 rounded-md bg-destructive px-3.5 py-3 text-sm font-semibold leading-snug text-destructive-foreground shadow-sm">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           <span>EMERGENCY STOP ACTIVE: no new positions. Existing positions stay protected until you disable it.</span>
         </div>

@@ -94,7 +94,7 @@ export function StrategySettings() {
   const num_ = (v: string) => (v === "" ? NaN : Number(v));
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <Card><CardHeader><CardTitle>Strategy to configure</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
         <div className="flex flex-wrap gap-2" role="group" aria-label="Strategy">
           {(list.data ?? []).map((s) => (
@@ -112,12 +112,12 @@ export function StrategySettings() {
         <p className="text-xs text-muted-foreground">Versions are immutable. Every trade decision records the version and full configuration that produced it. Saving restarts the agent in STOPPED state.</p>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {([["min", "Qualify score"], ["watch", "Watch score"], ["hard", "Hard stop (%)"], ["trail", "Trailing stop (%)"], ["stagn", "Flat-trade exit after (hours)"]] as const).map(([k, label]) => (
-            <div key={k} className="space-y-1"><Label htmlFor={`s-${k}`}>{label}</Label>
+            <div key={k} className="space-y-1.5"><Label htmlFor={`s-${k}`}>{label}</Label>
               <Input id={`s-${k}`} type="number" value={Number.isNaN(d[k]) ? "" : d[k]} onChange={(e) => setDraft({ ...d, [k]: num_(e.target.value) })} /></div>))}
         </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {keys.map((w) => (
-            <div key={w} className="space-y-1"><Label htmlFor={`w-${w}`}>{w.replaceAll("_", " ")} (%)</Label>
+            <div key={w} className="space-y-1.5"><Label htmlFor={`w-${w}`}>{w.replaceAll("_", " ")} (%)</Label>
               <Input id={`w-${w}`} type="number" value={Number.isNaN(d.weights[w]) ? "" : Math.round(d.weights[w] * 10) / 10}
                 onChange={(e) => setDraft({ ...d, weights: { ...d.weights, [w]: num_(e.target.value) } })} /></div>))}
         </div>

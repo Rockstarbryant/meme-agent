@@ -46,11 +46,11 @@ export function RunnerPanel() {
           <div className="space-y-3">
             <Alert variant="warning">No runner is paired, so the agent cannot trade. PAPER mode needs a runner too, but no wallet.</Alert>
             {code ? (
-              <div className="space-y-2 rounded-md border p-3">
+              <div className="space-y-3 rounded-md border border-l-[3px] border-l-accent p-4">
                 <p>Pairing code (single use, expires in {Math.round(code.expires_in / 60)} minutes):</p>
-                <p className="font-mono text-lg font-semibold tracking-wider">{code.code}</p>
+                <p className="font-mono text-2xl font-medium tracking-[0.2em]">{code.code}</p>
                 <p className="text-xs text-muted-foreground">On the machine that will run the agent:</p>
-                <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">{`python -m runner pair --server ${API_URL} --code ${code.code}\npython -m runner run`}</pre>
+                <pre className="overflow-x-auto rounded-md border bg-muted p-3 text-xs leading-relaxed">{`python -m runner pair --server ${API_URL} --code ${code.code}\npython -m runner run`}</pre>
                 <p className="text-xs text-muted-foreground">Pairing gives the runner a token that only authenticates it to this server. It carries no wallet or signing authority.</p>
               </div>
             ) : <Button disabled={busy} onClick={() => void createCode()}>Add runner</Button>}

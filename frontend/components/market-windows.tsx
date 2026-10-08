@@ -40,22 +40,22 @@ export function MarketWindowsCard({ market }: { market: Market }) {
   const rows = WINDOWS.map((w) => [w, windowOf(market, w, wins)] as const);
   const anyBasis = rows.some(([, x]) => x && x.basis);
   return (
-    <Card><CardHeader><CardTitle>Trading by time window</CardTitle></CardHeader><CardContent className="space-y-2">
+    <Card><CardHeader><CardTitle>Trading by time window</CardTitle></CardHeader><CardContent className="space-y-3">
       <div className="overflow-x-auto">
         <table className="w-full min-w-[34rem] text-sm tabular-nums">
-          <thead><tr className="text-left text-xs text-muted-foreground">
-            <th className="py-1 pr-2 font-normal">Window</th><th className="pr-2 font-normal">Buyers</th><th className="pr-2 font-normal">Sellers</th>
-            <th className="pr-2 font-normal">Buys / sells</th><th className="pr-2 font-normal">Volume</th>
-            <th className="pr-2 font-normal">Buy vol</th><th className="pr-2 font-normal">Sell vol</th><th className="font-normal">Price Δ</th></tr></thead>
+          <thead><tr className="small-caps border-b text-left text-[11px] text-muted-foreground">
+            <th className="py-2 pr-3 font-medium">Window</th><th className="pr-3 font-medium">Buyers</th><th className="pr-3 font-medium">Sellers</th>
+            <th className="pr-3 font-medium">Buys / sells</th><th className="pr-3 font-medium">Volume</th>
+            <th className="pr-3 font-medium">Buy vol</th><th className="pr-3 font-medium">Sell vol</th><th className="font-medium">Price Δ</th></tr></thead>
           <tbody>{rows.map(([w, x]) => (
-            <tr key={w} className="border-t">
-              <td className="py-1 pr-2 font-medium">{w}</td><td className="pr-2">{cnt(x?.buyers)}</td><td className="pr-2">{cnt(x?.sellers)}</td>
-              <td className="pr-2">{x ? `${cnt(x.buys)} / ${cnt(x.sells)}` : "—"}</td>
-              <td className="pr-2">{compact(x?.volume_usd)}</td><td className="pr-2">{compact(x?.buy_volume_usd)}</td><td className="pr-2">{compact(x?.sell_volume_usd)}</td>
+            <tr key={w} className="border-t transition-colors duration-200 hover:bg-muted/40">
+              <td className="py-2 pr-3 font-medium">{w}</td><td className="pr-3">{cnt(x?.buyers)}</td><td className="pr-3">{cnt(x?.sellers)}</td>
+              <td className="pr-3">{x ? `${cnt(x.buys)} / ${cnt(x.sells)}` : "—"}</td>
+              <td className="pr-3">{compact(x?.volume_usd)}</td><td className="pr-3">{compact(x?.buy_volume_usd)}</td><td className="pr-3">{compact(x?.sell_volume_usd)}</td>
               <td className={chgClass(x?.price_change_pct)}>{chg(x?.price_change_pct)}</td></tr>))}</tbody>
         </table>
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-xs leading-relaxed text-muted-foreground">
         Buyers / sellers are unique trading addresses. A dash means the data sources could not supply that figure; it is not zero.
         {anyBasis ? " Windows come from the pool's own statistics, completed from its trade history where that history covers the whole window." : ""}
       </p>
@@ -72,13 +72,13 @@ export function HoldersCard({ market }: { market: Market }) {
   const cell = (label: string, v: unknown) => (<div key={label}><p className="text-xs text-muted-foreground">{label}</p><p>{isNum(v) ? plainPct(v) : "—"}</p></div>);
   return (
     <Card><CardHeader><CardTitle>Holders</CardTitle></CardHeader><CardContent className="space-y-3 text-sm">
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <div><p className="text-xs text-muted-foreground">Holder count</p><p>{isNum(market.holder_count) ? market.holder_count.toLocaleString() : "—"}</p></div>
         {GROWTH_WINDOWS.map((w) => (<div key={w}><p className="text-xs text-muted-foreground">Growth {w}</p>
           <p className={chgClass(growth[w])}>{isNum(growth[w]) ? chg(growth[w]) : "—"}</p></div>))}
       </div>
       {!hasWindowed && <p className="text-xs text-muted-foreground">Holder growth is measured from this worker&apos;s own history and fills in after about 1h of running.</p>}
-      <div className="grid grid-cols-3 gap-2 md:grid-cols-6">
+      <div className="grid grid-cols-3 gap-3 border-t pt-4 md:grid-cols-6">
         {cell("Top 5 holders", market.top5_holder_pct)}{cell("Top 10 holders", market.top10_holder_pct)}{cell("Top 20 holders", market.top20_holder_pct)}
         {cell("Top 5% of holders", market.top_5pct_holders_pct)}{cell("Top 20% of holders", market.top_20pct_holders_pct)}{cell("Top 30% of holders", market.top_30pct_holders_pct)}
       </div>

@@ -94,7 +94,7 @@ function WalletPanelBase({ view }: { view: "overview" | "settings" }) {
   const cap = w.execution_capability.capability;
   if (view === "overview") {
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
         {error && <ErrorState error={error} />}
         {notice && <Alert variant="success">{notice}</Alert>}
         <AgentWalletOverview w={w} busy={busy !== null} onProvision={() => void provisionCloud()} onChanged={async () => { await wallet.reload(); await activity.reload(); }} />
@@ -103,14 +103,14 @@ function WalletPanelBase({ view }: { view: "overview" | "settings" }) {
     );
   }
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       {error && <ErrorState error={error} />}
       {notice && <Alert variant="success">{notice}</Alert>}
 
       <Card>
         <CardHeader><CardTitle>Execution capability</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
-          <p className="text-base font-semibold">{w.execution_capability.label}</p>
+          <p className="font-serif text-xl font-semibold">{w.execution_capability.label}</p>
           <p className="text-muted-foreground">{w.execution_capability.detail}</p>
           <ul className="space-y-1">
             <li className="flex items-start gap-2">{w.execution_mode === "cloud_managed" ? <CheckCircle2 className="mt-0.5 h-4 w-4 text-success" aria-hidden /> : <XCircle className="mt-0.5 h-4 w-4 text-muted-foreground" aria-hidden />}<span><strong>Autonomous cloud execution:</strong> {w.execution_mode === "cloud_managed" ? "uses your per-user Privy managed wallet on the shared cloud worker." : "not enabled for this account."}</span></li>
@@ -137,7 +137,7 @@ function WalletPanelBase({ view }: { view: "overview" | "settings" }) {
         <CardHeader><CardTitle>Browser wallet (optional, manual signing)</CardTitle></CardHeader>
         <CardContent className="space-y-2 text-sm">
           {w.wallets.length === 0 && <p className="text-muted-foreground">No wallet connected.</p>}
-          {w.wallets.map((x) => <p key={x.id} className="flex flex-wrap items-center gap-2">{x.provider}: <code>{shortAddr(x.address)}</code> <Button size="sm" variant="outline" onClick={() => void copyAddress(x.address)}>{copiedAddr === x.address ? "Copied!" : "Copy"}</Button> {x.ownership_verified ? <Badge variant="success">ownership verified</Badge> : <Badge>paper placeholder</Badge>}</p>)}
+          {w.wallets.map((x) => <p key={x.id} className="flex flex-wrap items-center gap-2">{x.provider}: <code className="rounded-sm bg-muted px-1.5 py-0.5 text-xs">{shortAddr(x.address)}</code> <Button size="sm" variant="outline" onClick={() => void copyAddress(x.address)}>{copiedAddr === x.address ? "Copied!" : "Copy"}</Button> {x.ownership_verified ? <Badge variant="success">ownership verified</Badge> : <Badge>paper placeholder</Badge>}</p>)}
           <Button onClick={() => void connect()} disabled={busy !== null}>{verified ? "Reconnect / switch account" : "Connect wallet"}</Button>
           <p className="text-xs text-muted-foreground">Connecting asks your wallet to switch to Arc and sign a one-time message. It never asks for a private key and moves no funds.</p>
         </CardContent>
@@ -148,7 +148,7 @@ function WalletPanelBase({ view }: { view: "overview" | "settings" }) {
         <CardContent className="space-y-3">
           <div className="grid gap-3 sm:grid-cols-2">
             {FIELDS.map((f) => (
-              <div key={f.key} className="space-y-1"><Label htmlFor={f.key}>{f.label}</Label>
+              <div key={f.key} className="space-y-1.5"><Label htmlFor={f.key}>{f.label}</Label>
                 <Input id={f.key} type="number" inputMode="decimal" step={f.step ?? "any"} value={Number.isNaN(form[f.key]) ? "" : form[f.key]}
                   onChange={(e) => setPolicy({ ...form, [f.key]: e.target.value === "" ? NaN : Number(e.target.value) })} /></div>
             ))}
@@ -173,9 +173,9 @@ function WalletPanelBase({ view }: { view: "overview" | "settings" }) {
             <div><p className="mb-1 text-xs font-semibold">Not documented (unverified)</p><ul className="list-disc pl-5 text-xs text-muted-foreground">{w.agent_wallet.not_documented.map((d) => <li key={d}>{d}</li>)}</ul></div>
           </div>
           <p className="text-xs text-muted-foreground">Decision needed: see {w.agent_wallet.decision_doc}. Funding an agent wallet is unavailable until that is settled; PAPER uses virtual USDC.</p>
-          <ul className="divide-y rounded-md border">
+          <ul className="divide-y rounded-md border bg-card">
             {w.wallet_options.map((o) => (
-              <li key={o.id} className="flex flex-wrap items-start justify-between gap-2 p-2"><div><p className="font-medium">{o.label}</p><p className="text-xs text-muted-foreground">{o.note}</p></div>
+              <li key={o.id} className="flex flex-wrap items-start justify-between gap-3 px-4 py-3"><div><p className="font-medium">{o.label}</p><p className="text-xs text-muted-foreground">{o.note}</p></div>
                 <Badge variant={o.status === "available" ? "success" : o.status === "forbidden" ? "destructive" : "warning"}>{o.status === "forbidden" ? "Forbidden (custodial)" : o.status === "available" ? "Available" : "Not integrated"}</Badge></li>
             ))}
           </ul>
@@ -187,7 +187,7 @@ function WalletPanelBase({ view }: { view: "overview" | "settings" }) {
         <CardContent className="space-y-2 text-sm">
           {(signing.data ?? []).length === 0 && <p className="text-muted-foreground">No pending requests. In LIVE mode each trade appears here for your wallet to sign.</p>}
           {(signing.data ?? []).map((r) => (
-            <div key={r.id} className="flex items-center justify-between gap-2 rounded-md border p-2"><span>{r.tx.side} {usd(r.tx.amount_usdc)} · {r.status}</span>
+            <div key={r.id} className="flex items-center justify-between gap-3 rounded-md border p-3.5"><span>{r.tx.side} {usd(r.tx.amount_usdc)} · {r.status}</span>
               {r.status === "PENDING" && <Button size="sm" disabled={busy !== null} onClick={() => void signRequest(r)}>Review and sign</Button>}</div>
           ))}
         </CardContent>

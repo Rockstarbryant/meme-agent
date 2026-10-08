@@ -19,8 +19,8 @@ import type { Position } from "@/types/api";
 const stamp = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—");
 const TP_TIERS_LABEL = (hit: number[]) => (hit.length ? `tier${hit.length > 1 ? "s" : ""} ${hit.map((t) => t + 1).join(", ")} hit` : "none hit");
 
-function Field({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
-  return <div className={className}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-words">{children}</dd></div>;
+function Field({ label, children, className, big }: { label: string; children: React.ReactNode; className?: string; big?: boolean }) {
+  return <div className={className}><dt className="text-xs tracking-[0.03em] text-muted-foreground">{label}</dt><dd className={big ? "display-num mt-1 break-words text-xl" : "mt-0.5 break-words"}>{children}</dd></div>;
 }
 
 export function PositionCard({ p, onClose }: { p: Position; onClose?: (p: Position) => void }) {
@@ -34,22 +34,22 @@ export function PositionCard({ p, onClose }: { p: Position; onClose?: (p: Positi
   const held = p.status === "CLOSED" ? (p.held_seconds ?? null) : (nowMs && p.opened_at ? Math.max(0, (nowMs - new Date(p.opened_at).getTime()) / 1000) : (p.held_seconds ?? null));
   const ret = open ? (p.cost_basis_usdc ? (p.unrealized_pnl_usdc / p.cost_basis_usdc) * 100 : null) : (p.return_pct ?? null);
   return (
-    <Card><CardContent className="space-y-3 pt-4">
+    <Card hoverEffect><CardContent className="space-y-4 pt-5 sm:pt-6">
       <div className="flex flex-wrap items-center gap-2">
-        <Link className="font-semibold underline-offset-2 hover:underline" href={`/tokens/${encodeURIComponent(key)}`}>{name}</Link>
+        <Link className="font-serif text-xl font-semibold underline-offset-4 hover:underline" href={`/tokens/${encodeURIComponent(key)}`}>{name}</Link>
         <Badge variant={p.mode === "LIVE" ? "solidDestructive" : "solidPrimary"}>{p.mode}</Badge>
         <Badge variant={open ? "success" : "default"}>{p.status}</Badge>
-        <span className={`ml-auto text-sm font-semibold ${pnlClass(total)}`}>{signedUsd(total)}{ret != null ? ` (${pct(ret)})` : ""}</span>
+        <span className={`display-num ml-auto text-lg ${pnlClass(total)}`}>{signedUsd(total)}{ret != null ? ` (${pct(ret)})` : ""}</span>
       </div>
 
       {!open && (
-        <div className="rounded-md border bg-muted/40 p-2 text-sm">
+        <div className="rounded-md border border-l-[3px] border-l-accent bg-muted/50 p-3 text-sm">
           <p><span className="text-muted-foreground">Closed because: </span><strong>{exitReasonLabel(p.exit_reason)}</strong></p>
           <p className="text-xs text-muted-foreground">Closed {stamp(p.closed_at)} · held {duration(held)}</p>
         </div>
       )}
 
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm md:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t pt-4 text-sm md:grid-cols-4">
         <Field label="Opened">{stamp(p.opened_at)}</Field>
         <Field label={open ? "Held for" : "Closed"}>{open ? duration(held) : stamp(p.closed_at)}</Field>
         <Field label="Entry price">{price(p.entry_price)}</Field>
@@ -66,7 +66,7 @@ export function PositionCard({ p, onClose }: { p: Position; onClose?: (p: Positi
         <Field label="Strategy">{p.strategy_id.replaceAll("_", " ")} v{p.strategy_version}</Field>
       </dl>
 
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t pt-4">
         {open && onClose && <Button size="sm" variant="outline" onClick={() => onClose(p)}>Close position</Button>}
         <Link className="text-xs underline" href={`/decisions/${p.decision_id}`}>Why did the agent buy this?</Link>
         <Link className="text-xs underline" href={`/tokens/${encodeURIComponent(key)}`}>Token page</Link>
@@ -85,12 +85,12 @@ function Summary({ rows }: { rows: Position[] }) {
   const realized = rows.reduce((a, p) => a + p.realized_pnl_usdc, 0);
   const wins = closed.filter((p) => p.realized_pnl_usdc > 0).length;
   return (
-    <Card><CardContent className="grid grid-cols-2 gap-3 pt-4 text-sm md:grid-cols-5">
-      <Field label="Open positions">{open.length}</Field>
-      <Field label="Exposure">{usd(exposure)}</Field>
-      <Field label="Unrealized P&L"><span className={pnlClass(unreal)}>{signedUsd(unreal)}</span></Field>
-      <Field label="Realized P&L"><span className={pnlClass(realized)}>{signedUsd(realized)}</span></Field>
-      <Field label="Win rate (closed)">{closed.length ? `${Math.round((wins / closed.length) * 100)}% of ${closed.length}` : "—"}</Field>
+    <Card elevated><CardContent className="grid grid-cols-2 gap-x-4 gap-y-5 pt-5 text-sm sm:pt-6 md:grid-cols-5">
+      <Field big label="Open positions">{open.length}</Field>
+      <Field big label="Exposure">{usd(exposure)}</Field>
+      <Field big label="Unrealized P&L"><span className={pnlClass(unreal)}>{signedUsd(unreal)}</span></Field>
+      <Field big label="Realized P&L"><span className={pnlClass(realized)}>{signedUsd(realized)}</span></Field>
+      <Field big label="Win rate (closed)">{closed.length ? `${Math.round((wins / closed.length) * 100)}% of ${closed.length}` : "—"}</Field>
     </CardContent></Card>
   );
 }
@@ -142,18 +142,18 @@ export function Positions() {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-3">
         <ModeTabs value={mode} onChange={(m) => { setPicked(m); setTab("OPEN"); }} current={user?.mode === "LIVE" ? "LIVE" : "PAPER"} />
-        <p className="text-xs text-muted-foreground">{mode === "PAPER" ? "Paper positions use virtual money." : "Live positions use real funds."}</p>
+        <p className="text-sm text-muted-foreground">{mode === "PAPER" ? "Paper positions use virtual money." : "Live positions use real funds."}</p>
       </div>
       <Summary rows={res.data} />
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex gap-2" role="group" aria-label="Position status">
           {(["OPEN", "CLOSED"] as const).map((t) => <Button key={t} size="sm" variant={tab === t ? "default" : "outline"} aria-pressed={tab === t} onClick={() => setTab(t)}>{t === "OPEN" ? "Open" : "Closed"} ({counts[t]})</Button>)}
         </div>
-        <div className="ml-auto flex items-center gap-1 text-xs" role="group" aria-label="Sort positions">
-          <span className="text-muted-foreground">Sort</span>
+        <div className="ml-auto flex flex-wrap items-center gap-1.5 text-xs" role="group" aria-label="Sort positions">
+          <span className="mr-1 text-muted-foreground">Sort</span>
           {([["NEWEST", tab === "OPEN" ? "Newest" : "Recently closed"], ["PNL", "P&L"], ["SIZE", "Size"]] as const).map(([k, label]) => (
             <Button key={k} size="sm" variant={sort === k ? "default" : "outline"} aria-pressed={sort === k} onClick={() => setSort(k)}>{label}</Button>))}
         </div>

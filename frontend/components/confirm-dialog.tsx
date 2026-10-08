@@ -16,16 +16,16 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) setTyped(""); onOpenChange(o); }}>
       <DialogContent>
-        <DialogTitle className="text-base font-semibold">{title}</DialogTitle>
-        <DialogDescription className="mt-2 text-sm text-muted-foreground">{description}</DialogDescription>
+        <DialogTitle className="text-2xl font-normal leading-[1.2] tracking-[-0.01em]">{title}</DialogTitle>
+        <DialogDescription className="mt-3 text-base leading-[1.7] text-muted-foreground">{description}</DialogDescription>
         {phrase !== undefined && (
-          <div className="mt-3 space-y-1">
-            <p className="text-xs text-muted-foreground">Type <code className="font-mono font-semibold">{phrase}</code> to continue</p>
+          <div className="mt-5 space-y-2">
+            <p className="text-sm text-muted-foreground">Type <code className="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-[13px] font-medium text-foreground">{phrase}</code> to continue</p>
             <Input aria-label="confirmation phrase" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
           </div>
         )}
-        {extra && <div className="mt-3">{extra}</div>}
-        <div className="mt-5 flex justify-end gap-2">
+        {extra && <div className="mt-4">{extra}</div>}
+        <div className="mt-8 flex flex-col-reverse gap-2 border-t pt-5 sm:flex-row sm:justify-end">
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button variant={destructive ? "destructive" : "default"} disabled={blocked} onClick={() => void onConfirm()}>{confirmLabel}</Button>
         </div>

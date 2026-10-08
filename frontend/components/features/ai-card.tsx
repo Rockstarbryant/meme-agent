@@ -56,7 +56,7 @@ export function AiCard({ d, onRetried }: { d: DD; onRetried: () => void | Promis
             <p>{a.response.reasoning_summary}</p></>}
         </div>))}
       {failed && (
-        <div className="rounded-md border p-2">
+        <div className="rounded-md border border-l-[3px] border-l-warning p-3.5">
           <p className="text-sm font-medium">The AI could not assess this token when it was scanned.</p>
           {canRetry ? (
             <div className="mt-2 flex flex-wrap items-center gap-2">

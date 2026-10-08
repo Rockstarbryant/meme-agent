@@ -54,7 +54,7 @@ function matchesCategory(o: Opportunity, cat: Category): boolean {
 }
 
 const Cell = ({ label, value, title }: { label: string; value: React.ReactNode; title?: string }) => (
-  <div title={title}><dt className="text-[11px] text-muted-foreground">{label}</dt><dd className="text-sm tabular-nums">{value}</dd></div>
+  <div title={title}><dt className="text-[11px] tracking-[0.03em] text-muted-foreground">{label}</dt><dd className="mt-0.5 text-sm tabular-nums">{value}</dd></div>
 );
 
 export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnyway?: (o: Opportunity) => void }) {
@@ -67,9 +67,9 @@ export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnywa
     : o.buy_sell_basis === "estimated_from_counts" ? "Estimated: total volume split by buy/sell transaction counts"
     : o.buy_sell_basis === "counts" ? "From buy/sell transaction counts only (no USD volume available)" : undefined;
   return (
-    <Card><CardContent className="space-y-2 pt-4">
+    <Card hoverEffect><CardContent className="space-y-3 pt-5 sm:pt-6">
       <div className="flex flex-wrap items-center gap-2">
-        <Link className="font-semibold underline" href={`/tokens/${encodeURIComponent(o.token_key)}`}>{o.token_name ?? o.symbol ?? shortAddr(o.token_key)}</Link>
+        <Link className="font-serif text-xl font-semibold underline" href={`/tokens/${encodeURIComponent(o.token_key)}`}>{o.token_name ?? o.symbol ?? shortAddr(o.token_key)}</Link>
         {o.token_name && o.symbol ? <span className="text-xs text-muted-foreground">{o.symbol}</span> : null}
         <span className="text-xs text-muted-foreground" title={launchpadTitle}>
           {o.chain}{launchpad ? ` · ${launchpad}${launchpadTitle ? " (detected)" : ""}` : ""}
@@ -77,7 +77,7 @@ export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnywa
         <ActionBadge action={o.final_action} /><DataLabel label={o.data_label} />
         <Link className="ml-auto text-xs underline" href={`/decisions/${o.decision_id}`}>why?</Link>
       </div>
-      <dl className="grid grid-cols-3 gap-2 md:grid-cols-6 lg:grid-cols-7">
+      <dl className="grid grid-cols-3 gap-x-3 gap-y-3.5 border-t pt-4 md:grid-cols-6 lg:grid-cols-7">
         <Cell label="Age" value={duration(o.age_seconds)} /><Cell label="Scanned" value={ago(o.scanned_at)} title="When our scanner last refreshed this token's data" />
         <Cell label="Price" value={price(o.price)} /><Cell label="Market cap" value={compact(o.market_cap)} />
         <Cell label="Liquidity" value={compact(o.liquidity)} /><Cell label="Volume 5m" value={compact(o.volume_5m)} /><Cell label="Buyers 5m" value={o.unique_buyers_5m ?? "—"} />
@@ -88,7 +88,7 @@ export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnywa
         <Cell label="AI" value={o.ai_status} />
         <Cell label="MEV" value={o.mev_risk_score != null ? num(o.mev_risk_score, 2) : "—"} title={o.mev_method ? `Heuristic estimate (${o.mev_method}), not a mempool simulation` : undefined} />
       </dl>
-      <p className="text-xs text-muted-foreground">{o.final_reason}</p>
+      <p className="text-sm leading-relaxed text-muted-foreground">{o.final_reason}</p>
       {o.enrichment_gaps.length > 0 && (
         <p className="text-[11px] text-muted-foreground">Not enriched: {o.enrichment_gaps.slice(0, 3).join("; ")}{o.enrichment_gaps.length > 3 ? "…" : ""}</p>
       )}
@@ -141,7 +141,7 @@ export function Opportunities() {
     void res.reload();
   }
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by action">
         {FILTERS.map((f) => <Button key={f} size="sm" variant={filter === f ? "default" : "outline"} aria-pressed={filter === f} onClick={() => setFilter(f)}>{f}</Button>)}
       </div>
