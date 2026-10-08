@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,6 +22,9 @@ class TradeRequest(BaseModel):
     quantity: float | None = None  # SELL token quantity
     max_slippage_pct: float
     reference_price: float | None = None
+    # Pool liquidity (USDC) the decision was made on. The DEX quote does not report it, so the live pre-flight uses
+    # this as the liquidity evidence for the policy minimum.
+    reference_liquidity_usdc: float | None = None
     launchpad: str | None = None
     pool_address: str | None = None
     decision_id: str = ""
@@ -51,6 +55,7 @@ class Quote(BaseModel):
     fee_usdc: float
     router_address: str
     pool_liquidity_usdc: float | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)   # raw numbers behind the quote, for rejection messages
     quoted_at: datetime
     expires_at: datetime
     source: str

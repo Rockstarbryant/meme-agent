@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.ai.exit_analyzer import AIExitAnalyzer
 from app.chains.base import MarketDataProvider
@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 # Last AI exit review per position id. Module-level on purpose: the cloud worker builds a fresh engine every cycle,
 # and the throttle must survive that or every 30 s cycle would call the LLM again for the same position.
 _AI_EXIT_LAST: dict[str, datetime] = {}
+# token key -> time until which new LIVE entries are skipped after the safety pre-flight rejected an order for it.
+# Module-level for the same reason: the cloud worker rebuilds the engine every cycle.
+_ENTRY_BLOCK_UNTIL: dict[str, datetime] = {}
 
 
 class TradingEngine:
@@ -44,7 +47,7 @@ class TradingEngine:
                  idempotency: IdempotencyStore, exit_managers: dict[str, PositionManager] | None = None,
                  ai_exit: AIExitAnalyzer | None = None, ai_exit_mode: str = "off",
                  ai_exit_min_confidence: float = 0.7, ai_exit_interval_s: float = 300.0,
-                 ai_exit_timeout_s: float = 30.0):
+                 ai_exit_timeout_s: float = 30.0, live_reject_cooldown_s: float = 600.0, scope: str = ""):
         assert_executor_matches_mode(mode, executor)
         self.mode, self.portfolio, self.controls = mode, portfolio, controls
         self.pipeline, self.executor, self.approver = pipeline, executor, approver
@@ -57,6 +60,8 @@ class TradingEngine:
         self.ai_exit_min_confidence = ai_exit_min_confidence
         self.ai_exit_interval_s = max(30.0, float(ai_exit_interval_s))
         self.ai_exit_timeout_s = max(5.0, float(ai_exit_timeout_s))
+        self.live_reject_cooldown_s = max(0.0, float(live_reject_cooldown_s))
+        self.scope = scope   # tenant id: the rejection cooldown must never leak from one user to another
 
     def exit_manager_for(self, strategy_id: str | None) -> PositionManager:
         return self.exit_managers.get(strategy_id or "", self.exits)
@@ -105,6 +110,10 @@ class TradingEngine:
         assert approved is not None
         req, cid = approved.request, rec.id
         key, pend = req.idempotency_key, f"{req.chain}:{req.token_address.lower()}"
+        until = _ENTRY_BLOCK_UNTIL.get(f"{self.scope}|{pend}")
+        if until is not None and utcnow() < until:
+            await self.bus.publish(E.BUY_REJECTED, cid, reason=f"ENTRY_COOLDOWN_AFTER_LIVE_REJECTION until {until:%H:%M:%S}")
+            return None
         if not await self.idem.claim(key):
             await self.bus.publish(E.ORDER_FAILED, cid, error="DUPLICATE_ORDER", key=key)
             return None
@@ -131,6 +140,9 @@ class TradingEngine:
                 await self.bus.publish(E.POSITION_OPENED, cid, position_id=res.position_id, simulated=res.simulated)
         elif res.status in _RETRYABLE:
             await self.idem.release(key)
+            if (opened and self.live_reject_cooldown_s > 0 and res.status == OrderStatus.REJECTED
+                    and str(res.error or "").startswith("LiveSafetyError")):
+                _ENTRY_BLOCK_UNTIL[f"{self.scope}|arc:{res.token_address.lower()}"] = utcnow() + timedelta(seconds=self.live_reject_cooldown_s)
             await self.bus.publish(E.ORDER_FAILED, cid, order=res.model_dump(mode="json"))
         else:  # TIMEOUT / PENDING_SIGNATURE / SUBMITTED: keep the claim; must be reconciled, never blindly retried
             await self.bus.publish(E.ORDER_SUBMITTED, cid, order=res.model_dump(mode="json"))

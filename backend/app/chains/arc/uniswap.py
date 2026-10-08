@@ -30,7 +30,9 @@ class UniswapArcAdapter:
     name = "uniswap_arc"
     live_trading_verified = True
 
-    def __init__(self, api_key: str, rpc, wallet_address: str, base_url: str = "https://trade-api.gateway.uniswap.org/v1"):
+    def __init__(self, api_key: str, rpc, wallet_address: str, base_url: str = "https://trade-api.gateway.uniswap.org/v1",
+                 impact_unit: str = "percent"):
+        self.impact_unit = impact_unit if impact_unit in ("percent", "fraction") else "percent"
         self.api_key, self.rpc, self.wallet_address, self.base_url = api_key, rpc, wallet_address, base_url.rstrip("/")
         self.http = httpx.AsyncClient(timeout=20.0, headers={
             "x-api-key": api_key,
@@ -95,7 +97,10 @@ class UniswapArcAdapter:
         expected_out = expected_raw_int / (10 ** out_dec)
         amount_in_human = (request.amount_usdc or 0.0) if request.side == Side.BUY else (request.quantity or 0.0)
         price = ((request.amount_usdc or 0.0) / expected_out) if request.side == Side.BUY and expected_out else ((expected_out / (request.quantity or 1.0)) if request.side == Side.SELL else 0.0)
-        impact = _pct(_first(q, "priceImpact", "priceImpactPercent") or _first(body, "priceImpact", "priceImpactPercent")) or 0.0
+        impact_raw = _first(q, "priceImpact", "priceImpactPercent")
+        if impact_raw is None:
+            impact_raw = _first(body, "priceImpact", "priceImpactPercent")
+        impact = _impact_pct(impact_raw, self.impact_unit)
         router = str(_first(body, "swapRouter", "routerAddress") or ARC_UNIVERSAL_ROUTER).lower()
         expires = datetime.now(timezone.utc) + timedelta(seconds=20)
         # Keep Permit2 payload private to the adapter. If it exists, the Circle provider must
@@ -104,7 +109,8 @@ class UniswapArcAdapter:
         self._last_quote = body
         return Quote(side=request.side, token_address=token, amount_in=amount_in_human, expected_out=expected_out,
                      price=price, price_impact_pct=impact, fee_usdc=0.0, router_address=router,
-                     pool_liquidity_usdc=None, quoted_at=datetime.now(timezone.utc), expires_at=expires, source="uniswap-trading-api")
+                     pool_liquidity_usdc=None, diagnostics=_diagnostics(q, body, impact_raw, self.impact_unit, routing),
+                     quoted_at=datetime.now(timezone.utc), expires_at=expires, source="uniswap-trading-api")
 
     async def build_swap_tx(self, quote: Quote, request: TradeRequest, deadline: datetime) -> UnsignedTransaction:
         body = getattr(self, "_last_quote", None)
@@ -246,6 +252,30 @@ def _nested(obj: dict, path: list[str]):
         if not isinstance(cur, dict): return None
         cur = cur.get(p)
     return cur
+
+
+def _impact_pct(raw, unit: str = "percent") -> float:
+    """Uniswap's priceImpact as a PERCENT. The unit is explicit: guessing "< 1 means fraction" inflated a real
+    0.03% impact to 3% and rejected tiny trades on deep pools. Set ARC_RUNNER_UNISWAP_IMPACT_UNIT=fraction if the
+    API turns out to return 0.0003 for 0.03%."""
+    try:
+        x = abs(float(raw))
+    except (TypeError, ValueError):
+        return 0.0
+    return x * 100.0 if unit == "fraction" else x
+
+
+def _diagnostics(q: dict, body: dict, impact_raw, unit: str, routing: str) -> dict:
+    """Small, JSON-safe summary of the quote for rejection messages (never includes keys or signatures)."""
+    route = None
+    try:
+        legs = q.get("route") or []
+        route = "|".join(str(leg.get("type") or leg.get("poolType") or "?") + ":" + str(leg.get("fee", "?"))
+                         for hop in legs for leg in (hop if isinstance(hop, list) else [hop]) if isinstance(leg, dict))[:120] or None
+    except Exception:  # noqa: BLE001
+        route = None
+    return {"price_impact_raw": impact_raw, "impact_unit": unit, "routing": routing, "route": route,
+            "slippage": q.get("slippage") if isinstance(q, dict) else None}
 
 
 def _pct(v) -> float | None:

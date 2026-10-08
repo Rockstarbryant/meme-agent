@@ -77,7 +77,7 @@ class DecisionPipeline:
         raw = f"{mode.value}|{m.key}|{self.strategy.strategy_id}|{self.strategy.version}|{bucket}"
         return TradeRequest(idempotency_key=hashlib.sha256(raw.encode()).hexdigest()[:32], mode=mode, chain=m.chain,
                             token_address=m.token_address, side=Side.BUY, amount_usdc=amount, max_slippage_pct=slippage,
-                            reference_price=m.price, launchpad=m.launchpad, pool_address=m.pool_address,
+                            reference_price=m.price, reference_liquidity_usdc=m.liquidity, launchpad=m.launchpad, pool_address=m.pool_address,
                             decision_id=decision_id, strategy_id=self.strategy.strategy_id,
                             strategy_version=self.strategy.version, reason="traction_momentum_entry")
 

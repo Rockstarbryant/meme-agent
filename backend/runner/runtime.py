@@ -110,7 +110,8 @@ class RunnerRuntime:
             wallet_addr = settings.circle_wallet_address or settings.privy_wallet_address or ""
             if settings.uniswap_api_key and wallet_addr:
                 self._uniswap = UniswapArcAdapter(
-                    settings.uniswap_api_key.get_secret_value(), rpc, wallet_addr, settings.uniswap_api_url
+                    settings.uniswap_api_key.get_secret_value(), rpc, wallet_addr, settings.uniswap_api_url,
+                    impact_unit=getattr(settings, "uniswap_impact_unit", "percent"),
                 )
             self.chain = ArcAdapter(
                 rpc, settings.network.chain_id, settings.network.explorer_url,
@@ -543,7 +544,8 @@ class RunnerRuntime:
         else:
             executor = ArcExecutionEngine(
                 self.chain, self.wallet, self.approver, self.portfolio, self.idem,
-                LiveSettings(live_trading_enabled=self.s.live_enabled),
+                LiveSettings(live_trading_enabled=self.s.live_enabled,
+                             max_quote_deviation_pct=float(getattr(self.s, "max_quote_deviation_pct", 3.0))),
             )
         self.controls = ControlState(**b.controls)
         self.effective_limits = limits
@@ -557,6 +559,8 @@ class RunnerRuntime:
             ai_exit_min_confidence=float(getattr(self.s, "ai_exit_min_confidence", 0.7)),
             ai_exit_interval_s=float(getattr(self.s, "ai_exit_interval_s", 300.0)),
             ai_exit_timeout_s=float(getattr(self.s, "ai_exit_timeout_s", 30.0)),
+            live_reject_cooldown_s=float(getattr(self.s, "live_reject_cooldown_s", 600.0)),
+            scope=b.user_id or "local",
             exit_managers={sid: PositionManager(x) for sid, x in
                            strategy_registry.exit_configs_for_positions(strategy_obj.strategy_id, cfg.exit).items()},
         )

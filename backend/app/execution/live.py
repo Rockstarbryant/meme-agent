@@ -70,14 +70,22 @@ class ArcExecutionEngine(ExecutionAdapter):
         now = self._now()
         if quote.expires_at <= now or (now - quote.quoted_at).total_seconds() > self.settings.max_quote_age_s:
             failed.append("QUOTE_STALE")
+        diag = quote.diagnostics or {}
         if quote.price_impact_pct > req.max_slippage_pct:
-            failed.append("PRICE_IMPACT_EXCEEDS_SLIPPAGE")
+            failed.append(f"PRICE_IMPACT_EXCEEDS_SLIPPAGE(impact={quote.price_impact_pct:.4f}% > max={req.max_slippage_pct:.2f}%"
+                          f", api_raw={diag.get('price_impact_raw')}, unit={diag.get('impact_unit')})")
         if req.reference_price:
             dev = abs(quote.price / req.reference_price - 1) * 100
             if dev > self.settings.max_quote_deviation_pct:
-                failed.append("QUOTE_DEVIATES_FROM_MARKET")
-        if quote.pool_liquidity_usdc is None or quote.pool_liquidity_usdc < auth.policy.min_liquidity_usdc:
-            failed.append("QUOTE_LIQUIDITY_BELOW_POLICY_MIN")
+                failed.append(f"QUOTE_DEVIATES_FROM_MARKET(quote={quote.price:.8g} vs market={req.reference_price:.8g}"
+                              f" = {dev:.2f}% > {self.settings.max_quote_deviation_pct:.2f}%, amount_in={quote.amount_in:.6g}"
+                              f", expected_out={quote.expected_out:.8g}, route={diag.get('route')})")
+        # Liquidity floor protects ENTRIES. The DEX quote carries no pool liquidity, so fall back to the liquidity the
+        # decision was made on. It is never applied to SELLs: a protective exit must not be blocked by a thin pool.
+        if req.side == Side.BUY:
+            liq = quote.pool_liquidity_usdc if quote.pool_liquidity_usdc is not None else req.reference_liquidity_usdc
+            if liq is None or liq < auth.policy.min_liquidity_usdc:
+                failed.append(f"QUOTE_LIQUIDITY_BELOW_POLICY_MIN(liquidity={liq}, min={auth.policy.min_liquidity_usdc})")
         allow = {r.lower() for r in auth.policy.allowed_routers} & {r.lower() for r in self.chain.router_allowlist()}
         if quote.router_address.lower() not in allow:
             failed.append("ROUTER_NOT_ALLOWLISTED")

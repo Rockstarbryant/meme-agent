@@ -188,6 +188,12 @@ class RunnerSettings(BaseSettings):
     bitquery_endpoint: str = Field("https://streaming.bitquery.io/graphql", validation_alias=_alias("BITQUERY_ENDPOINT"))
     uniswap_api_key: SecretStr | None = Field(None, validation_alias=_alias("UNISWAP_API_KEY"))
     uniswap_api_url: str = Field("https://trade-api.gateway.uniswap.org/v1", validation_alias=_alias("UNISWAP_API_URL"))
+    # Unit of the Uniswap Trading API "priceImpact" field. "percent": 0.03 means 0.03%. "fraction": 0.0003 means 0.03%.
+    uniswap_impact_unit: Literal["percent", "fraction"] = Field("percent", validation_alias=_alias("UNISWAP_IMPACT_UNIT"))
+    # Live pre-flight: reject when the quoted execution price differs from the market price by more than this.
+    max_quote_deviation_pct: float = Field(3.0, validation_alias=_alias("MAX_QUOTE_DEVIATION_PCT"))
+    # After a live order is rejected by the safety pre-flight, do not re-quote the same token for this long.
+    live_reject_cooldown_s: float = Field(600.0, validation_alias=_alias("LIVE_REJECT_COOLDOWN_S"))
 
     # ------------------------------------------------------------------ live trading gates
     circle_allow_contract_execute: bool = Field(False, validation_alias=_alias("CIRCLE_ALLOW_CONTRACT_EXECUTE"))
