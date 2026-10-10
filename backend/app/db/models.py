@@ -19,6 +19,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     mode: Mapped[str] = mapped_column(String(8), default="PAPER")  # LIVE is never the default
     premium_scanner: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(default=now)
 
 
@@ -313,6 +314,28 @@ class AuditLog(Base):
     user_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     actor: Mapped[str] = mapped_column(String(64))
     action: Mapped[str] = mapped_column(String(64), index=True)
+    detail: Mapped[dict] = mapped_column(default=dict)
+
+
+class OpsAuditLog(Base):
+    """Operational audit trail (providers up/down, which AI answered, venue quotes, live-safety rejections).
+    Admin-only. See app/observability/audit.py."""
+    __tablename__ = "ops_audit_log"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    at: Mapped[datetime] = mapped_column(index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    severity: Mapped[str] = mapped_column(String(8), index=True)
+    component: Mapped[str] = mapped_column(String(64), default="")
+    provider: Mapped[str] = mapped_column(String(64), default="", index=True)
+    model: Mapped[str] = mapped_column(String(96), default="")
+    operation: Mapped[str] = mapped_column(String(48), default="")
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    token_key: Mapped[str] = mapped_column(String(96), default="", index=True)
+    user_id: Mapped[str] = mapped_column(String(32), default="", index=True)
+    decision_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    repeat: Mapped[int] = mapped_column(Integer, default=1)
     detail: Mapped[dict] = mapped_column(default=dict)
 
 

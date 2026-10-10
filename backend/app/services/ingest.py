@@ -21,7 +21,7 @@ from app.services.hub import EventHub
 
 log = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 262_144
-NOT_STORED = {E.POSITION_UPDATED, E.TOKEN_ACTIVITY_UPDATED, E.MARKET_SNAPSHOT, E.PORTFOLIO_SNAPSHOT}
+NOT_STORED = {E.POSITION_UPDATED, E.TOKEN_ACTIVITY_UPDATED, E.MARKET_SNAPSHOT, E.PORTFOLIO_SNAPSHOT, E.OPS_AUDIT}
 # Only user-relevant events go to the live UI stream (the rest are stored, not pushed): a runner burst must not flood browsers.
 STREAMED = {E.DECISION_RECORDED, E.BUY_APPROVED, E.BUY_REJECTED, E.ORDER_SUBMITTED, E.ORDER_FILLED, E.ORDER_FAILED, E.POSITION_OPENED,
             E.POSITION_UPDATED, E.POSITION_CLOSED, E.TAKE_PROFIT_TRIGGERED, E.STOP_LOSS_TRIGGERED, E.TRAILING_STOP_TRIGGERED,
@@ -41,7 +41,12 @@ async def _handle(db: AsyncSession, user_id: str, ev: RunnerEvent) -> bool:
         if await db.get(M.EventRow, ev.id) is not None:
             return False
         db.add(M.EventRow(id=ev.id, user_id=user_id, type=t.value, at=ev.at, correlation_id=ev.correlation_id, payload=p))
-    if t == E.DECISION_RECORDED:
+    if t == E.OPS_AUDIT:
+        from app.services.audit_store import rows_from_runner_payload
+        for row in rows_from_runner_payload(user_id, p):
+            if await db.get(M.OpsAuditLog, row.id) is None:
+                db.add(row)
+    elif t == E.DECISION_RECORDED:
         await repo.save_decision(db, user_id, p["decision"])
     elif t == E.MARKET_SNAPSHOT:
         m = p["market"]

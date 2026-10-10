@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { ActionBadge, DataLabel } from "@/components/badges";
 import { ErrorState, Loading, Stat } from "@/components/states";
-import { PriceChart } from "@/components/price-chart";
+import { TokenChart } from "@/components/features/token-chart";
 import { HoldersCard, MarketWindowsCard } from "@/components/market-windows";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,20 @@ const tri = (v: unknown) => (v === true ? "yes" : v === false ? "no" : "unknown"
 const n = (m: Record<string, unknown>, k: string) => (typeof m[k] === "number" ? (m[k] as number) : null);
 const winVol = (m: Record<string, unknown>, w: string) =>
   ((m.windows as Record<string, { volume_usd?: number | null }> | undefined)?.[w]?.volume_usd ?? null);
+
+/** Which provider supplied which figure (field-level provenance recorded by the market-data registry and enrichment). */
+function DataSources({ sources, answeredBy }: { sources: Record<string, string>; answeredBy: string[] }) {
+  const by: Record<string, string[]> = {};
+  for (const [field, prov] of Object.entries(sources)) (by[prov] ??= []).push(field.replace("windows.", "").replaceAll("_", " "));
+  const entries = Object.entries(by);
+  if (entries.length === 0) return answeredBy.length ? <p className="text-xs text-muted-foreground">Data from: {answeredBy.join(", ")}</p> : null;
+  return (
+    <details className="text-xs text-muted-foreground">
+      <summary className="cursor-pointer">Data from: {entries.map(([p]) => p).join(", ")}</summary>
+      <ul className="mt-1 space-y-0.5 pl-4">{entries.map(([p, f]) => <li key={p}><span className="text-foreground">{p}</span>: {f.slice(0, 14).join(", ")}{f.length > 14 ? ` +${f.length - 14} more` : ""}</li>)}</ul>
+    </details>
+  );
+}
 
 export function TokenDetail({ tokenKey }: { tokenKey: string }) {
   const res = useApi<TD>(`/tokens/${encodeURIComponent(tokenKey)}`, { refreshOn: ["DECISION_RECORDED"] });
@@ -37,11 +51,12 @@ export function TokenDetail({ tokenKey }: { tokenKey: string }) {
         <span>Launchpad: {launchpad ?? "unknown"}{launchpadDetected ? ` (detected, ${(m.launchpad_evidence as string) ?? "on-chain"})` : ""}</span>
         <span>Scanned: {ago((m.scanned_at as string) ?? (m.enriched_at as string) ?? null)}</span>
       </div>
+      <DataSources sources={(m.field_sources as Record<string, string> | undefined) ?? {}} answeredBy={(m.data_sources as string[] | undefined) ?? []} />
       {gaps.length > 0 && <p className="text-xs text-muted-foreground">Not enriched: {gaps.join("; ")}</p>}
       <Card elevated><CardContent className="space-y-5 pt-5 sm:pt-6"><div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <Stat label="Price" value={price(n(m, "price"))} /><Stat label="Market cap" value={compact(n(m, "market_cap"))} /><Stat label="Liquidity" value={compact(n(m, "liquidity"))} />
         <Stat label="Volume 5m / 1h / 24h" value={`${compact(n(m, "volume_5m"))} / ${compact(winVol(m, "1h"))} / ${compact(winVol(m, "24h"))}`} /></div>
-        <PriceChart points={t.price_series} /></CardContent></Card>
+        <TokenChart tokenKey={t.token_key} fallbackPoints={t.price_series} /></CardContent></Card>
       {t.evaluated === false && <Alert>{t.note ?? "This token has not been evaluated by your agent yet."}</Alert>}
       <MarketWindowsCard market={m} />
       <HoldersCard market={m} />

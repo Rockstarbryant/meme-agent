@@ -25,13 +25,14 @@ class Credentials(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
-def _user_out(u: M.User) -> dict:
-    return {"id": u.id, "email": u.email, "mode": u.mode, "created_at": u.created_at}
+def _user_out(u: M.User, settings=None) -> dict:
+    admin = bool(getattr(u, "is_admin", False)) or (settings is not None and u.email.lower() in settings.admin_email_set)
+    return {"id": u.id, "email": u.email, "mode": u.mode, "created_at": u.created_at, "is_admin": admin}
 
 
 def _token_out(c, u: M.User) -> dict:
     tok, ttl = make_token(u.id, c.jwt_key, c.settings.access_token_minutes)
-    return {"access_token": tok, "token_type": "bearer", "expires_in": ttl, "user": _user_out(u)}
+    return {"access_token": tok, "token_type": "bearer", "expires_in": ttl, "user": _user_out(u, c.settings)}
 
 
 @router.post("/auth/register", tags=["auth"], status_code=201)
@@ -76,8 +77,8 @@ async def logout(request: Request, user: M.User = Depends(current_user)):
 
 
 @router.get("/auth/me", tags=["auth"])
-async def me(user: M.User = Depends(current_user)):
-    return _user_out(user)
+async def me(request: Request, user: M.User = Depends(current_user)):
+    return _user_out(user, C(request).settings)
 
 
 @router.get("/health/live", tags=["system"])

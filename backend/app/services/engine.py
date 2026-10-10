@@ -190,12 +190,23 @@ class TradingEngine:
             return None
         _AI_EXIT_LAST[pos.id] = now
         cfg = self.exit_manager_for(pos.strategy_id).cfg
+        from app.observability.audit import AuditKind, AuditStatus, audit_scope, record_event
         try:
-            outcome = await asyncio.wait_for(self.ai_exit.analyze(pos, m, cfg, now), self.ai_exit_timeout_s)
+            with audit_scope(user_id=self.scope if self.scope != "local" else "", token_key=m.key, decision_id=f"exit:{pos.id}"):
+                outcome = await asyncio.wait_for(self.ai_exit.analyze(pos, m, cfg, now), self.ai_exit_timeout_s)
         except Exception as exc:  # noqa: BLE001 - includes timeout
             log.warning("AI exit review failed for %s: %s: %s", pos.id, type(exc).__name__, exc)
+            record_event(AuditKind.AI_AGENT, AuditStatus.FAILED, operation="exit_review", component="engine.ai_exit",
+                         error=f"{type(exc).__name__}: {exc}", token_key=m.key, decision_id=f"exit:{pos.id}",
+                         user_id=self.scope if self.scope != "local" else "")
             return None
         d = outcome.decision
+        record_event(AuditKind.AI_AGENT, AuditStatus.OK if outcome.status == "OK" else AuditStatus.FAILED,
+                     provider=outcome.provider, model=outcome.model, operation="exit_review", component="engine.ai_exit",
+                     error="" if outcome.status == "OK" else f"{outcome.status}: {outcome.error}", token_key=m.key,
+                     decision_id=f"exit:{pos.id}", user_id=self.scope if self.scope != "local" else "",
+                     detail={"action": getattr(d, "action", None), "confidence": getattr(d, "confidence", None),
+                             "gain_pct": round(pos.gain_pct, 2)})
         if outcome.status != "OK" or d is None:
             log.warning("AI exit review %s for %s: %s", outcome.status, pos.id, outcome.error)
             return None

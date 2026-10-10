@@ -91,3 +91,14 @@ async def current_runner(request: Request, db: AsyncSession = Depends(get_db)) -
         raise HTTPException(401, "user disabled")
     await limit(request, "runner", 900, 60, extra=row.id)
     return row
+
+
+def is_admin(user: M.User, settings: Settings) -> bool:
+    return bool(getattr(user, "is_admin", False)) or user.email.lower() in settings.admin_email_set
+
+
+async def require_admin(request: Request, user: M.User = Depends(current_user)) -> M.User:
+    """Admin-only surface (operational audit log). 404, not 403, for everyone else so the surface is not advertised."""
+    if not is_admin(user, C(request).settings):
+        raise HTTPException(404, "not found")
+    return user

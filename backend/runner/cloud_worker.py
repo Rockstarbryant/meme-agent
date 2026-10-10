@@ -483,6 +483,24 @@ class CloudWorker:
 
         self._pipeline = GlobalPipeline(self.s, redis=redis, session_factory=session_factory)
         await self._pipeline.start()
+        audit_task = None
+        if session_factory is not None:
+            # Operational audit trail: this worker has database access, so persist directly (all tenants + system records).
+            from app.observability.audit import RECORDER
+            from app.services import audit_store
+            RECORDER.add_sink(audit_store.make_db_sink(session_factory))
+
+            async def _audit_loop() -> None:
+                while True:
+                    await asyncio.sleep(3.0)
+                    try:
+                        await RECORDER.flush()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        log.debug("audit flush failed", exc_info=True)
+
+            audit_task = asyncio.create_task(_audit_loop(), name="audit-flush")
         stop = asyncio.Event()
         disc_task = asyncio.create_task(self._pipeline.discovery.scheduler_loop(stop), name="global-discovery")
         mon_task = asyncio.create_task(self._pipeline.monitoring.scheduler_loop(stop), name="global-monitoring")
@@ -542,6 +560,8 @@ class CloudWorker:
                 task.cancel()
             disc_task.cancel()
             mon_task.cancel()
+            if audit_task is not None:
+                audit_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await disc_task
                 await mon_task

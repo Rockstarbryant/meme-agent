@@ -26,6 +26,7 @@ from app.enrichment.mev import estimate_mev_exposure
 from app.enrichment.probes import ContractProbe, OnchainProbe
 from app.integrations.blockscout import BlockscoutClient
 from app.integrations.etherscan import EtherscanV2Client
+from app.observability.audit import AuditKind, AuditStatus, record_event
 
 log = logging.getLogger("enrichment.service")
 
@@ -82,9 +83,16 @@ class EnrichmentService:
         etherscan: EtherscanV2Client | None = None,
         rpc: EvmRpcClient | None = None,
         config: EnrichmentConfig | None = None,
+        codex: Any = None,
+        goldrush: Any = None,
+        extra_holder_order: tuple[str, ...] = ("codex", "goldrush"),
     ) -> None:
         self.blockscout = blockscout
         self.etherscan = etherscan
+        self.codex = codex           # app.integrations.codex.CodexClient | None
+        self.goldrush = goldrush     # app.integrations.goldrush.GoldRushClient | None
+        self.extra_holder_order = tuple(extra_holder_order)
+        self._paid_off: dict[str, float] = {}   # capability -> monotonic time until which we do not ask again
         self.probe = OnchainProbe(rpc) if rpc is not None else None
         self.cfg = config or EnrichmentConfig()
         self._holders = _TTLCache(self.cfg.holders_ttl_s)
@@ -99,6 +107,10 @@ class EnrichmentService:
             out.append("blockscout")
         if self.etherscan is not None:
             out.append("etherscan")
+        if self.codex is not None:
+            out.append("codex")
+        if self.goldrush is not None:
+            out.append("goldrush")
         if self.probe is not None:
             out.append("arc_rpc_probe")
         return out
@@ -135,6 +147,8 @@ class EnrichmentService:
                 result["name"] = info.get("name")
             except DataUnavailable as exc:
                 gaps.append(f"token info: blockscout unavailable ({exc})")
+                record_event(AuditKind.ENRICHMENT_PROVIDER, AuditStatus.FAILED, provider="blockscout", operation="token_info",
+                             component="enrichment.holders", error=str(exc), token_key=f"arc:{token.lower()}")
         rows: list[dict] | None = None
         complete = False
         if self.blockscout is not None:
@@ -145,6 +159,8 @@ class EnrichmentService:
                     result["source"] = "blockscout"
             except DataUnavailable as exc:
                 gaps.append(f"holders: blockscout unavailable ({exc})")
+                record_event(AuditKind.ENRICHMENT_PROVIDER, AuditStatus.FAILED, provider="blockscout", operation="holders",
+                             component="enrichment.holders", error=str(exc), token_key=f"arc:{token.lower()}")
         if not rows and self.etherscan is not None:
             try:
                 es_rows = await self.etherscan.token_holder_list(token, limit=20)
@@ -154,11 +170,30 @@ class EnrichmentService:
                     result["source"] = "etherscan"
             except DataUnavailable as exc:
                 gaps.append(f"holders: etherscan unavailable ({exc})")
+                record_event(AuditKind.ENRICHMENT_PROVIDER, AuditStatus.FAILED, provider="etherscan", operation="holders",
+                             component="enrichment.holders", error=str(exc), token_key=f"arc:{token.lower()}")
             if result["holder_count"] is None:
                 try:
                     result["holder_count"] = await self.etherscan.token_holder_count(token)
                 except DataUnavailable as exc:
                     gaps.append(f"holder_count: etherscan unavailable ({exc})")
+        # --- extra fallbacks (Codex, GoldRush): only when the explorers produced no holder list --------------------
+        codex_top10: float | None = None
+        for src in self.extra_holder_order:
+            if rows and result["holder_count"] is not None and info.get("total_supply"):
+                break
+            r2 = await self._extra_holders(src, token, need_rows=not rows, gaps=gaps)
+            if r2 is None:
+                continue
+            if not rows and r2.get("rows"):
+                rows, complete = r2["rows"], False
+                result["source"] = src
+            if result["holder_count"] is None and r2.get("holder_count") is not None:
+                result["holder_count"] = r2["holder_count"]
+            if not info.get("total_supply") and r2.get("total_supply"):
+                info = {**info, "total_supply": r2["total_supply"]}
+            if r2.get("top10") is not None and codex_top10 is None:
+                codex_top10 = r2["top10"]
         supply = info.get("total_supply")
         if rows and supply and supply > 0:
             try:
@@ -199,6 +234,9 @@ class EnrichmentService:
                 gaps.append("holders: malformed holder response")
         elif rows and not supply:
             gaps.append("holders: total supply unknown, concentration not computed")
+        if result["top10"] is None and codex_top10 is not None:
+            result["top10"], result["source"] = codex_top10, result["source"] or "codex"
+            result["basis"] = "codex top10HoldersPercent (provider-computed)"
         if result["top10"] is None and not gaps:
             gaps.append("holders: no provider returned a holder list")
         self._holders._d[key] = _CacheEntry((result, gaps), time.monotonic())
@@ -206,6 +244,56 @@ class EnrichmentService:
         if deep:
             self._holders._d[key].at = time.monotonic() - self._holders.ttl_s + self.cfg.deep_holders_ttl_s
         return result, gaps
+
+    async def _extra_holders(self, src: str, token: str, *, need_rows: bool, gaps: list[str]) -> dict[str, Any] | None:
+        """Holder data from Codex or GoldRush. Every attempt (success or failure) lands in the audit trail."""
+        client = self.codex if src == "codex" else self.goldrush if src == "goldrush" else None
+        if client is None:
+            return None
+        cap = f"{src}:holders"
+        if time.monotonic() < self._paid_off.get(cap, 0.0):
+            return None
+        t0 = time.monotonic()
+        tk = f"arc:{token.lower()}"
+        try:
+            out: dict[str, Any] = {}
+            if src == "codex":
+                from app.integrations.codex import CodexPlanRequired
+                try:
+                    page = await client.holders(token)
+                    items = page.get("items") or []
+                    out["holder_count"] = page.get("count")
+                    out["top10"] = page.get("top10HoldersPercent")
+                    out["rows"] = [{"address": {"hash": i.get("walletAddress")}, "value": i.get("balance")} for i in items]
+                except CodexPlanRequired:
+                    # Free plan: the list is not available, but the standalone concentration query is.
+                    self._paid_off[cap] = time.monotonic() + 3600.0
+                    out["top10"] = await client.top10_holders_percent(token)
+                    gaps.append("holders: codex holder list needs a paid plan; used top-10 concentration only")
+                if out.get("holder_count") is None:
+                    stats = await client.token_stats(token)
+                    out["holder_count"] = (stats or {}).get("holders")
+            else:
+                page = await client.token_holders(token, page_size=100)
+                rows = page["items"]
+                out["holder_count"] = (page["pagination"] or {}).get("total_count")
+                for r in rows:
+                    if r.get("total_supply") not in (None, ""):
+                        try:
+                            out["total_supply"] = int(str(r["total_supply"]))
+                        except ValueError:
+                            pass
+                        break
+                out["rows"] = [{"address": {"hash": r.get("address")}, "value": r.get("balance")} for r in rows]
+            record_event(AuditKind.ENRICHMENT_PROVIDER, AuditStatus.OK, provider=src, operation="holders", component="enrichment.holders",
+                         latency_ms=(time.monotonic() - t0) * 1000, token_key=tk,
+                         detail={"rows": len(out.get("rows") or []), "holder_count": out.get("holder_count"), "used_as_fallback": need_rows})
+            return out
+        except DataUnavailable as exc:
+            gaps.append(f"holders: {src} unavailable ({exc})")
+            record_event(AuditKind.ENRICHMENT_PROVIDER, AuditStatus.FAILED, provider=src, operation="holders",
+                         component="enrichment.holders", latency_ms=(time.monotonic() - t0) * 1000, error=str(exc), token_key=tk)
+            return None
 
     async def _token_info_cached(self, token: str) -> dict[str, Any]:
         """name / symbol / total supply are static (6h); the holder COUNT has its own short TTL because holder
@@ -369,8 +457,12 @@ class EnrichmentService:
                 m.holders_sampled = h.get("sampled")
                 m.holder_basis = h.get("basis")
                 checks_run.append(f"holders:{h.get('source')}")
+                for f in ("top5_holder_pct", "top10_holder_pct", "top20_holder_pct"):
+                    m.field_sources[f] = str(h.get("source") or "unknown")
             if h.get("holder_count") is not None:
-                m.holder_count = m.holder_count if m.holder_count is not None else h["holder_count"]
+                if m.holder_count is None:
+                    m.holder_count = h["holder_count"]
+                    m.field_sources["holder_count"] = str(h.get("source") or "enrichment")
             if h.get("name") and not m.token_name:
                 m.token_name = h["name"]
         except Exception as exc:  # noqa: BLE001

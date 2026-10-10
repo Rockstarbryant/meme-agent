@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -203,6 +203,40 @@ async def token_detail(
     ).scalars().all()
     history = [{"at": s.at.isoformat(), "data": s.data} for s in reversed(list(snaps))]
     return {"token": card.model_dump(mode="json"), "history": history}
+
+
+@router.get("/tokens/{chain}/{address}/candles")
+async def token_candles(
+    chain: str,
+    address: str,
+    request: Request,
+    tf: str = Query("15m", pattern="^(1m|5m|15m|1h|4h|1d)$"),
+    limit: int = Query(200, ge=20, le=500),
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """OHLCV candles for the token page. ``provider`` says who produced them (codex | geckoterminal | snapshots)."""
+    from app.services.charts import ChartService
+    row = (await db.execute(select(M.LaunchpadTokenRow).where(
+        M.LaunchpadTokenRow.chain == chain, M.LaunchpadTokenRow.token_address == address.lower()))).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "token not in global registry")
+    snaps = (await db.execute(select(M.MarketSnapshot).where(M.MarketSnapshot.token_key == f"{chain}:{address.lower()}")
+                              .order_by(M.MarketSnapshot.at.desc()).limit(500))).scalars().all()
+    history = [{"at": s.at.isoformat(), "data": s.data} for s in reversed(list(snaps))]
+    last = (row.last_snapshot or {}) if isinstance(row.last_snapshot, dict) else {}
+    pool = last.get("pool_address") or last.get("pool_id") or (history[-1]["data"].get("pool_address") if history else None) \
+        or (history[-1]["data"].get("pool_id") if history else None)
+    svc = getattr(request.app.state, "chart_service", None)
+    if svc is None:
+        from app.integrations.codex import CodexClient
+        from app.api.deps import C
+        st = C(request).settings
+        key = st.codex_api_key.get_secret_value() if st.codex_api_key else ""
+        svc = ChartService(st, codex_client=CodexClient(key, url=st.codex_url) if key else None)
+        request.app.state.chart_service = svc
+    out = await svc.candles(address.lower(), pool, tf, limit, history)
+    return {**out, "token": address.lower(), "pool": pool}
 
 
 @router.get("/status")

@@ -148,6 +148,10 @@ class MarketState(BaseModel):
     enrichment_gaps: list[str] = Field(default_factory=list)
 
     data_sources: list[str] = Field(default_factory=list)
+    # Field-level provenance: which provider (or enrichment source) supplied each populated field, e.g.
+    # {"price": "codex", "liquidity": "dexpaprika", "holder_count": "goldrush", "windows.1h": "geckoterminal"}.
+    # ``data_sources`` says who answered; this says who answered WHAT. Display / audit only; never used for decisions.
+    field_sources: dict[str, str] = Field(default_factory=dict)
     is_demo: bool = False  # DEMO DATA must never be mistaken for live data
 
     @property

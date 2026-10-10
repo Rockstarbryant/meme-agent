@@ -26,6 +26,10 @@ class LimitsIn(RiskLimits):
             raise ValueError("require 0 < max_trade <= max_position <= max_total_exposure")
         if self.max_slippage_pct <= 0 or self.max_slippage_pct > 20:
             raise ValueError("max_slippage_pct must be in (0, 20]")
+        if not (0 < self.max_price_impact_pct <= 50):
+            raise ValueError("max_price_impact_pct must be in (0, 50]")
+        if not (0 < self.max_total_cost_pct <= 50):
+            raise ValueError("max_total_cost_pct must be in (0, 50]")
         return self
 
 

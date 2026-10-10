@@ -1,4 +1,4 @@
-import { Activity, Bot, Briefcase, LayoutDashboard, Radar, Search, Settings, SlidersHorizontal, Wallet, type LucideIcon } from "lucide-react";
+import { Activity, Bot, ScrollText, Briefcase, LayoutDashboard, Radar, Search, Settings, SlidersHorizontal, Wallet, type LucideIcon } from "lucide-react";
 
 export interface NavItem { href: string; label: string; icon: LucideIcon }
 export interface NavGroup { label: string; items: NavItem[] }
@@ -21,6 +21,9 @@ export const NAV_GROUPS: NavGroup[] = [
     { href: "/settings", label: "Settings", icon: Settings },
   ] },
 ];
+
+/** Shown only to admins (users.is_admin or ADMIN_EMAILS on the server). The server also enforces it (404 for everyone else). */
+export const ADMIN_GROUP: NavGroup = { label: "Admin", items: [{ href: "/admin/audit", label: "Audit log", icon: ScrollText }] };
 
 /** Mobile bottom bar: the four screens used all day, plus "More" for the rest (nine tabs did not fit a phone). */
 export const MOBILE_PRIMARY: NavItem[] = [

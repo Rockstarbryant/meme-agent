@@ -9,8 +9,31 @@ from typing import Callable, Iterable
 from app.chains.base import MarketDataProvider
 from app.core.errors import DataUnavailable
 from app.domain.market import MarketState
+from app.observability.audit import RECORDER, AuditKind, AuditRecorder, AuditStatus, record_event
 
 log = logging.getLogger("market_data")
+
+# Housekeeping fields that are not "data a provider supplied" (excluded from field-level provenance).
+_NOT_PROVENANCE = frozenset({"chain", "token_address", "timestamp", "data_sources", "field_sources", "is_demo", "scanned_at",
+                             "enriched_at", "enrichment_gaps", "buy_sell_basis", "contract", "windows", "holder_basis"})
+
+
+def filled_fields(state: MarketState) -> list[str]:
+    """Names of the fields a provider actually populated (windows are listed per window: ``windows.1h``)."""
+    out: list[str] = []
+    for k, v in state.model_dump().items():
+        if k in _NOT_PROVENANCE:
+            continue
+        if v is None or v == [] or v == {} or v is False:
+            continue
+        out.append(k)
+    for w, ws in (state.windows or {}).items():
+        if any(x is not None for x in ws.model_dump(exclude={"basis"}).values()):
+            out.append(f"windows.{w}")
+    for ck, cv in state.contract.model_dump(exclude={"checks_run", "verification_source", "sell_check_method"}).items():
+        if cv is not None:
+            out.append(f"contract.{ck}")
+    return out
 
 # Fields the risk engine / strategy actually gate decisions on (see
 # app/risk/engine.py and app/strategies/traction_momentum.py). Once every
@@ -73,7 +96,9 @@ class MarketDataRegistry(MarketDataProvider):
         essential: Iterable[str] = (),
         initial_health: dict[str, dict] | None = None,
         on_health_change: Callable[[dict[str, dict]], None] | None = None,
+        audit: AuditRecorder | None = None,
     ) -> None:
+        self.audit = audit or RECORDER
         self.providers = list(providers)
         self.failure_threshold = max(1, failure_threshold)
         self.cooldown_s = max(1.0, cooldown_s)
@@ -91,6 +116,14 @@ class MarketDataRegistry(MarketDataProvider):
         self._on_health_change = on_health_change
         self.last_discovery_sources: list[str] = []
         self.last_state_sources: dict[str, list[str]] = {}
+
+    def _audit(self, provider: str, operation: str, status: AuditStatus, *, latency_ms: float | None = None, error: str = "",
+               token: str = "", detail: dict | None = None) -> None:
+        h = self.health.get(provider)
+        record_event(AuditKind.MARKET_PROVIDER, status, provider=provider, operation=operation, component="market_registry",
+                     latency_ms=latency_ms, error=error, token_key=f"arc:{token.lower()}" if token else "",
+                     detail={**(detail or {}), **({"consecutive_failures": h.failures} if h and h.failures else {})},
+                     recorder=self.audit)
 
     def _threshold(self, name: str) -> int:
         return self.failure_threshold if (not self._essential or name in self._essential) else 1
@@ -152,11 +185,16 @@ class MarketDataRegistry(MarketDataProvider):
         errors: list[str] = []
         for name, provider in self.providers:
             if not self._available(name):
+                self._audit(name, "discover_tokens", AuditStatus.SKIPPED, error="circuit open (cooling down after failures)",
+                            detail={"cooldown_remaining_s": round(max(0.0, self.health[name].opened_until - time.monotonic()), 1)})
                 continue
+            t0 = time.monotonic()
             try:
                 tokens = await provider.discover_tokens()
                 self._ok(name)
                 sources.append(name)
+                self._audit(name, "discover_tokens", AuditStatus.OK, latency_ms=(time.monotonic() - t0) * 1000,
+                            detail={"tokens": len(tokens)})
                 for token in tokens:
                     t = token.lower()
                     if t not in seen:
@@ -165,9 +203,12 @@ class MarketDataRegistry(MarketDataProvider):
             except DataUnavailable as exc:
                 self._fail(name, exc)
                 errors.append(f"{name}: {exc}")
+                self._audit(name, "discover_tokens", AuditStatus.FAILED, latency_ms=(time.monotonic() - t0) * 1000, error=str(exc))
             except Exception as exc:  # provider isolation
                 self._fail(name, exc)
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                self._audit(name, "discover_tokens", AuditStatus.FAILED, latency_ms=(time.monotonic() - t0) * 1000,
+                            error=f"{type(exc).__name__}: {exc}")
         self.last_discovery_sources = sources
         if not found and errors:
             raise DataUnavailable("all market-data providers unavailable; " + " | ".join(errors)[:1000])
@@ -229,6 +270,7 @@ class MarketDataRegistry(MarketDataProvider):
         merged: MarketState | None = None
         sources: list[str] = []
         errors: list[str] = []
+        field_sources: dict[str, str] = {}
         for name, provider in self.providers:
             if merged is not None and _is_complete(merged):
                 # Every field the strategy/risk engine needs is already filled by
@@ -238,9 +280,14 @@ class MarketDataRegistry(MarketDataProvider):
                 # their own circuit breaker on an unrelated quota issue.
                 break
             if not self._available(name):
+                self._audit(name, "get_market_state", AuditStatus.SKIPPED, token=token_address,
+                            error="circuit open (cooling down after failures)",
+                            detail={"cooldown_remaining_s": round(max(0.0, self.health[name].opened_until - time.monotonic()), 1)})
                 continue
+            t0 = time.monotonic()
             try:
                 state = await provider.get_market_state(token_address)
+                latency = (time.monotonic() - t0) * 1000
                 self._ok(name)
                 sources.append(name)
                 if not state.data_sources:
@@ -248,16 +295,39 @@ class MarketDataRegistry(MarketDataProvider):
                     state = state.model_copy(update={"data_sources": [name]})
                 # Derive per-provider so a real USD split from a later provider can still override an estimate.
                 state.derive_buy_sell()
+                got = filled_fields(state)
+                for f in got:
+                    # Earlier providers keep priority for a field they already filled (see _merge).
+                    if f not in field_sources:
+                        field_sources[f] = name
+                if merged is not None and (state.buy_sell_basis == "usd"):
+                    for f in self._VOLUME_SPLIT_FIELDS:
+                        if f in got:
+                            field_sources[f] = name
                 merged = state if merged is None else self._merge(merged, state)
+                self._audit(name, "get_market_state", AuditStatus.OK, latency_ms=latency, token=token_address,
+                            detail={"fields_supplied": len(got)})
             except DataUnavailable as exc:
                 self._fail(name, exc)
                 errors.append(f"{name}: {exc}")
+                self._audit(name, "get_market_state", AuditStatus.FAILED, latency_ms=(time.monotonic() - t0) * 1000,
+                            token=token_address, error=str(exc))
             except Exception as exc:
                 self._fail(name, exc)
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                self._audit(name, "get_market_state", AuditStatus.FAILED, latency_ms=(time.monotonic() - t0) * 1000,
+                            token=token_address, error=f"{type(exc).__name__}: {exc}")
         if merged is None:
+            self._audit("*", "get_market_state", AuditStatus.FAILED, token=token_address,
+                        error="all market-data providers failed", detail={"errors": errors[:6]})
             raise DataUnavailable("all market-data providers failed for " + token_address + ("; " + " | ".join(errors)[:800] if errors else ""))
+        if errors:
+            # Someone failed but the chain still produced a state: say which provider was bypassed.
+            self._audit("*", "get_market_state", AuditStatus.DEGRADED, token=token_address,
+                        error="answered via fallback after provider failure(s)",
+                        detail={"answered_by": sources, "failed": errors[:6]})
         self.last_state_sources[token_address.lower()] = sources
+        merged.field_sources = {**merged.field_sources, **field_sources}
         merged.derive_buy_sell()
         merged.scanned_at = datetime.now(timezone.utc)
         return merged

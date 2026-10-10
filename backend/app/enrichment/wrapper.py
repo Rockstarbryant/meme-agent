@@ -105,9 +105,30 @@ def build_enrichment_service(settings: Any, *, rpc: EvmRpcClient | None) -> Enri
         except Exception:
             log.exception("etherscan client init failed")
 
-    if blockscout is None and etherscan is None and rpc is None:
+    if blockscout is None and etherscan is None and rpc is None and codex is None and goldrush is None:
         log.warning("enrichment enabled but no explorer key and no RPC client available; enrichment is a no-op")
         return None
+
+    codex = goldrush = None
+    ck = getattr(settings, "codex_api_key", None)
+    if ck:
+        try:
+            from app.integrations.codex import CodexClient
+            codex = CodexClient(ck.get_secret_value(), url=getattr(settings, "codex_url", "https://graph.codex.io/graphql"),
+                                timeout_s=float(getattr(settings, "market_data_timeout_s", 8.0)))
+        except Exception:
+            log.exception("codex enrichment client init failed")
+    gk = getattr(settings, "goldrush_api_key", None)
+    if gk:
+        try:
+            from app.integrations.goldrush import GoldRushClient
+            goldrush = GoldRushClient(gk.get_secret_value(), base_url=getattr(settings, "goldrush_base_url", "https://api.covalenthq.com/v1"),
+                                      chain=getattr(settings, "goldrush_chain", "arc-mainnet"),
+                                      timeout_s=float(getattr(settings, "market_data_timeout_s", 8.0)))
+        except Exception:
+            log.exception("goldrush enrichment client init failed")
+    order = tuple(x.strip().lower() for x in str(getattr(settings, "enrichment_holder_sources", "codex,goldrush")).split(",")
+                  if x.strip().lower() in ("codex", "goldrush")) or ("codex", "goldrush")
 
     cfg = EnrichmentConfig(
         enabled=True,
@@ -121,4 +142,5 @@ def build_enrichment_service(settings: Any, *, rpc: EvmRpcClient | None) -> Enri
         sell_probe_enabled=bool(getattr(settings, "enrichment_sell_probe_enabled", False)),
         trade_usdc_for_mev=float(getattr(settings, "risk_max_trade_usdc", 25.0) or 25.0),
     )
-    return EnrichmentService(blockscout=blockscout, etherscan=etherscan, rpc=rpc, config=cfg)
+    return EnrichmentService(blockscout=blockscout, etherscan=etherscan, rpc=rpc, config=cfg, codex=codex, goldrush=goldrush,
+                             extra_holder_order=order)

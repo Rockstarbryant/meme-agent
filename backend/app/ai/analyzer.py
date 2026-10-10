@@ -38,7 +38,7 @@ How to decide
 
 _ACTIONS = {"BUY", "WATCH", "REJECT", "HOLD", "SELL"}
 _JSON_KEYS = {"action", "confidence", "reasoning_summary", "positive_signals", "negative_signals", "risk_flags",
-              "strategy_score", "recommended_position_percent", "recommended_order_usdc"}
+              "strategy_score", "recommended_position_percent", "recommended_order_usdc", "venue"}
 
 
 def _r(x, sig: int = 4):
@@ -179,6 +179,8 @@ def _normalise(raw: dict) -> dict:
         if k == "recommended_order_usdc":
             v = max(0.0, v or 0.0)       # a negative / junk dollar amount means "not given"
         d[k] = v
+    v = d.get("venue")
+    d["venue"] = str(v).strip().lower()[:32] if isinstance(v, str) and v.strip() and v.strip().lower() not in ("none", "null", "n/a") else None
     if isinstance(d.get("reasoning_summary"), str):
         d["reasoning_summary"] = d["reasoning_summary"][:1500]
     elif "reasoning_summary" not in d:
@@ -203,7 +205,7 @@ class AIAnalyzer:
         self.cache_ttl_s = max(0.0, cache_ttl_s)
 
     async def analyze(self, m: MarketState, s: StrategySignal, r: RiskAssessment,
-                      sizing: dict | None = None) -> AIOutcome:
+                      sizing: dict | None = None, ctx=None) -> AIOutcome:
         """Never raises: outages/garbage become UNAVAILABLE/INVALID and simply block new entries."""
         if self.provider is None:
             return AIOutcome(status="DISABLED", prompt_version=PROMPT_VERSION)
@@ -221,7 +223,7 @@ class AIAnalyzer:
         except Exception as exc:  # noqa: BLE001
             return AIOutcome(status="UNAVAILABLE", error=type(exc).__name__, **base)
         raw = done.text
-        base = {**base, "provider": done.provider, "model": done.model}   # whoever in the chain actually answered
+        base = {**base, "provider": done.provider, "model": done.model, "attempts": list(done.attempts)}   # whoever answered
         try:
             out = AIOutcome(status="OK", decision=parse_decision(raw), raw=raw[:4000], **base)
         except ValidationError as exc:

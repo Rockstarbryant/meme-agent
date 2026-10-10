@@ -13,7 +13,9 @@ from app.domain.trade import ApprovedTrade, ExecutionResult, Quote, TradeRequest
 from app.events.bus import IdempotencyStore
 from app.execution.base import ExecutionAdapter
 from app.portfolio.state import PortfolioState
+from app.observability.audit import AuditKind, AuditStatus, record_event
 from app.risk.approval import TradeApprover
+from app.venues.cost import cost_breakdown
 from app.wallets.base import PolicyValidator, WalletProvider
 
 
@@ -22,6 +24,9 @@ class LiveSettings(BaseModel):
     confirm_timeout_s: float = 20.0  # Arc: sub-second finality; no receipt after this = TIMEOUT (reconcile, never assume success)
     max_quote_age_s: float = 15.0
     max_quote_deviation_pct: float = 3.0
+    # True: the pool fee of the route is part of the EXPECTED price, so only the excess over it counts as "deviation from
+    # market". False restores the old behaviour (fees counted as deviation).
+    fee_aware_deviation: bool = True
     tx_deadline_s: int = 120
 
 
@@ -32,6 +37,7 @@ class ArcExecutionEngine(ExecutionAdapter):
                  portfolio: PortfolioState, idempotency: IdempotencyStore, settings: LiveSettings):
         self.chain, self.wallet, self.approver = chain, wallet, approver
         self.portfolio, self.idem, self.settings = portfolio, idempotency, settings
+        self.audit_user_id = ""
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -71,15 +77,25 @@ class ArcExecutionEngine(ExecutionAdapter):
         if quote.expires_at <= now or (now - quote.quoted_at).total_seconds() > self.settings.max_quote_age_s:
             failed.append("QUOTE_STALE")
         diag = quote.diagnostics or {}
-        if quote.price_impact_pct > req.max_slippage_pct:
-            failed.append(f"PRICE_IMPACT_EXCEEDS_SLIPPAGE(impact={quote.price_impact_pct:.4f}% > max={req.max_slippage_pct:.2f}%"
-                          f", api_raw={diag.get('price_impact_raw')}, unit={diag.get('impact_unit')})")
+        impact_cap = req.max_price_impact_pct if req.max_price_impact_pct is not None else req.max_slippage_pct
+        if quote.price_impact_pct > impact_cap:
+            code = "PRICE_IMPACT_EXCEEDS_LIMIT" if req.max_price_impact_pct is not None else "PRICE_IMPACT_EXCEEDS_SLIPPAGE"
+            failed.append(f"{code}(impact={quote.price_impact_pct:.4f}% > max={impact_cap:.2f}%"
+                          f", api_raw={diag.get('price_impact_raw')}, unit={diag.get('impact_unit')}, venue={quote.venue or 'n/a'})")
         if req.reference_price:
-            dev = abs(quote.price / req.reference_price - 1) * 100
+            b = cost_breakdown(quote, req.reference_price, req.side)
+            raw_dev = abs(quote.price / req.reference_price - 1) * 100
+            fee_aware = self.settings.fee_aware_deviation and quote.fee_pct is not None
+            dev = b["deviation_ex_fee_pct"] if fee_aware else raw_dev
             if dev > self.settings.max_quote_deviation_pct:
                 failed.append(f"QUOTE_DEVIATES_FROM_MARKET(quote={quote.price:.8g} vs market={req.reference_price:.8g}"
-                              f" = {dev:.2f}% > {self.settings.max_quote_deviation_pct:.2f}%, amount_in={quote.amount_in:.6g}"
-                              f", expected_out={quote.expected_out:.8g}, route={diag.get('route')})")
+                              f" = {raw_dev:.2f}% raw, {dev:.2f}% after the {quote.fee_pct if quote.fee_pct is not None else 'unknown'}% pool fee"
+                              f" > {self.settings.max_quote_deviation_pct:.2f}%, amount_in={quote.amount_in:.6g}"
+                              f", expected_out={quote.expected_out:.8g}, route={diag.get('route')}, venue={quote.venue or 'n/a'})")
+            if req.side == Side.BUY and req.max_total_cost_pct is not None and b["total_cost_pct"] is not None \
+                    and b["total_cost_pct"] > req.max_total_cost_pct:
+                failed.append(f"TOTAL_COST_EXCEEDS_LIMIT(cost={b['total_cost_pct']:.2f}% > max={req.max_total_cost_pct:.2f}%"
+                              f", fee={quote.fee_pct if quote.fee_pct is not None else 'unknown'}%, venue={quote.venue or 'n/a'})")
         # Liquidity floor protects ENTRIES. The DEX quote carries no pool liquidity, so fall back to the liquidity the
         # decision was made on. It is never applied to SELLs: a protective exit must not be blocked by a thin pool.
         if req.side == Side.BUY:
@@ -98,6 +114,11 @@ class ArcExecutionEngine(ExecutionAdapter):
         try:
             quote, _ = await self._preflight(approved)
         except (LiveSafetyError, ApprovalError, PolicyViolationError, IntegrationNotVerified) as exc:
+            record_event(AuditKind.EXECUTION, AuditStatus.FAILED, provider=req.venue or "", operation="preflight",
+                         component="execution.live", error=f"{type(exc).__name__}: {exc}", token_key=f"arc:{req.token_address.lower()}",
+                         decision_id=req.decision_id, user_id=self.audit_user_id,
+                         detail={"side": req.side.value, "amount_usdc": req.amount_usdc,
+                                 "failed_checks": getattr(exc, "failed_checks", None)})
             return self._res(req, OrderStatus.REJECTED, error=f"{type(exc).__name__}: {exc}")
         deadline = self._now() + timedelta(seconds=self.settings.tx_deadline_s)
         try:

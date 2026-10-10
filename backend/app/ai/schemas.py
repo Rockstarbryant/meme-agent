@@ -24,6 +24,9 @@ class AIDecision(BaseModel):
     # Dollar size the model wants, inside the min/max band it is shown in the prompt. 0 = not given (legacy replies,
     # models that ignore it): the pipeline then falls back to recommended_position_percent. Always clamped in code.
     recommended_order_usdc: float = Field(default=0.0, ge=0.0, le=1_000_000.0)
+    # Venue the agent prefers ("uniswap", "kyberswap", ...). Advisory: code re-quotes and only honours it when that venue
+    # passes the user's limits at the final order size; otherwise the best passing venue is used, or the buy is skipped.
+    venue: str | None = Field(default=None, max_length=32)
 
 
 class AIOutcome(BaseModel):
@@ -34,3 +37,7 @@ class AIOutcome(BaseModel):
     prompt_version: str = ""
     raw: str = ""
     error: str = ""
+    # Agentic analyst only: what it looked at (tool name + short numeric summary) and the venue quotes it saw.
+    tool_trace: list[dict] = Field(default_factory=list)
+    venue_quotes: list[dict] = Field(default_factory=list)
+    attempts: list[str] = Field(default_factory=list)   # AI providers that failed before this answer

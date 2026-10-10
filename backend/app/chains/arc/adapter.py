@@ -28,6 +28,8 @@ class ArcAdapter(ChainAdapter):
         if dex is not None and hasattr(dex, "name"):
             from app.chains.arc.deployments import ARC_UNIVERSAL_ROUTER
             self._routers.add(ARC_UNIVERSAL_ROUTER.lower())
+        if dex is not None and hasattr(dex, "router_allowlist"):
+            self._routers |= {r.lower() for r in dex.router_allowlist()}
 
     @property
     def live_trading_verified(self) -> bool:

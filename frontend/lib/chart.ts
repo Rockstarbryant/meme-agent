@@ -62,3 +62,37 @@ export function changePct(base: number | null | undefined, now: number | null | 
   if (base == null || now == null || !Number.isFinite(base) || !Number.isFinite(now) || base === 0) return null;
   return ((now - base) / Math.abs(base)) * 100;
 }
+
+/* ------------------------------------------------------------------ candles / time axis */
+export type Tf = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
+export const TF_SECONDS: Record<Tf, number> = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
+
+/** Axis label for a unix-seconds timestamp: time of day for intraday spans, date for longer ones. */
+export function candleAxisLabel(tSec: number, spanSec: number, locale?: string): string {
+  const d = new Date(tSec * 1000);
+  if (spanSec <= 36 * 3600) return d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (spanSec <= 14 * 86400) return `${d.toLocaleDateString(locale, { month: "short", day: "numeric" })} ${d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+  return d.toLocaleDateString(locale, { month: "short", day: "numeric" });
+}
+
+/** Full timestamp for the crosshair tooltip. */
+export const candleFullTime = (tSec: number, locale?: string) =>
+  new Date(tSec * 1000).toLocaleString(locale, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+
+/** Evenly spaced x-axis tick indices (always includes first and last candle). */
+export function xTickIndices(n: number, count = 5): number[] {
+  if (n <= 0) return [];
+  if (n <= count) return Array.from({ length: n }, (_, i) => i);
+  return Array.from({ length: count }, (_, i) => Math.round((i * (n - 1)) / (count - 1)));
+}
+
+/** Price with enough significant digits for sub-cent meme tokens (0.00055409 stays readable, 1.2345 stays short). */
+export function fmtPrice(v: number): string {
+  if (!Number.isFinite(v)) return "—";
+  const a = Math.abs(v);
+  if (a >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (a >= 1) return v.toFixed(4);
+  if (a === 0) return "0";
+  const digits = Math.min(10, 3 - Math.floor(Math.log10(a)) + 1);
+  return v.toFixed(digits);
+}

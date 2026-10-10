@@ -37,6 +37,7 @@ class EventType(str, Enum):
     MARKET_SNAPSHOT = "MARKET_SNAPSHOT"
     PORTFOLIO_SNAPSHOT = "PORTFOLIO_SNAPSHOT"
     AGENT_ERROR = "AGENT_ERROR"
+    OPS_AUDIT = "OPS_AUDIT"          # batch of operational audit records (admin-only trail), see app/observability
 
 
 class Event(BaseModel):

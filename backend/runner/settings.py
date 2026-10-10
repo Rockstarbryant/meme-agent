@@ -72,7 +72,7 @@ class RunnerSettings(BaseSettings):
     # arc_rpc and uniswap_v4_rpc still exist but now point at Goldsky instead
     # of Alchemy when you set ARC_RUNNER_ARC_RPC_URL to the Goldsky endpoint.
     market_data_providers: str = Field(
-        "geckoterminal,dexpaprika,goldsky,dexscreener",
+        "geckoterminal,dexpaprika,goldsky,codex,dexscreener,goldrush",
         validation_alias=_alias("MARKET_DATA_PROVIDERS"),
     )
     market_data_essential_providers: str = Field(
@@ -127,6 +127,43 @@ class RunnerSettings(BaseSettings):
     established_require_momentum: bool = Field(True, validation_alias=_alias("ESTABLISHED_REQUIRE_MOMENTUM"))
     established_momentum_min_buy_sell_ratio: float = Field(1.2, validation_alias=_alias("ESTABLISHED_MOMENTUM_MIN_BUY_SELL_RATIO"))
 
+
+    # ------------------------------------------------------------------ codex (codex.io GraphQL, Arc = network 5042)
+    # Free key: https://dashboard.codex.io. Used as a fallback/enrichment provider; discovery is off by default to save quota.
+    codex_api_key: SecretStr | None = Field(None, validation_alias=_alias("CODEX_API_KEY"))
+    codex_url: str = Field("https://graph.codex.io/graphql", validation_alias=_alias("CODEX_URL"))
+    codex_cache_s: float = Field(60.0, validation_alias=_alias("CODEX_CACHE_S"))
+    codex_min_interval_s: float = Field(0.2, validation_alias=_alias("CODEX_MIN_INTERVAL_S"))
+    codex_discovery_enabled: bool = Field(False, validation_alias=_alias("CODEX_DISCOVERY_ENABLED"))
+    # "fraction": Codex returns 0.05 for +5% (as documented); "percent": it returns 5.
+    codex_change_unit: Literal["fraction", "percent"] = Field("fraction", validation_alias=_alias("CODEX_CHANGE_UNIT"))
+
+    # ------------------------------------------------------------------ goldrush (GoldRush / Covalent REST, chain arc-mainnet)
+    goldrush_api_key: SecretStr | None = Field(None, validation_alias=_alias("GOLDRUSH_API_KEY"))
+    goldrush_base_url: str = Field("https://api.covalenthq.com/v1", validation_alias=_alias("GOLDRUSH_BASE_URL"))
+    goldrush_chain: str = Field("arc-mainnet", validation_alias=_alias("GOLDRUSH_CHAIN"))
+    goldrush_cache_s: float = Field(300.0, validation_alias=_alias("GOLDRUSH_CACHE_S"))
+
+    # ------------------------------------------------------------------ enrichment holder-source order
+    # Order of the EXTRA holder fallbacks, tried after Blockscout then Etherscan returned nothing (codex, goldrush).
+    enrichment_holder_sources: str = Field("codex,goldrush", validation_alias=_alias("ENRICHMENT_HOLDER_SOURCES"))
+
+    # ------------------------------------------------------------------ venues / agentic AI
+    # Venues the agent may quote. "uniswap" = Trading API (V2/V3/V4). "kyberswap" = KyberSwap aggregator (supports Arc).
+    venues_enabled: str = Field("uniswap,kyberswap", validation_alias=_alias("VENUES_ENABLED"))
+    kyberswap_base_url: str = Field("https://aggregator-api.kyberswap.com", validation_alias=_alias("KYBERSWAP_BASE_URL"))
+    kyberswap_chain_slug: str = Field("arc", validation_alias=_alias("KYBERSWAP_CHAIN_SLUG"))
+    kyberswap_client_id: str = Field("arc-autonomous-trading-agent", validation_alias=_alias("KYBERSWAP_CLIENT_ID"))
+    # EXECUTION through KyberSwap stays OFF until you list the router address you verified on-chain (eth_getCode + explorer),
+    # comma separated. Quotes (read-only) always work. Also add it to the wallet policy's allowed routers.
+    kyberswap_router_allowlist: str = Field("", validation_alias=_alias("KYBERSWAP_ROUTER_ALLOWLIST"))
+    # "off" = old single-shot analyst; "tools" = analyst may call read-only tools and choose the venue.
+    ai_agent_mode: Literal["off", "tools"] = Field("tools", validation_alias=_alias("AI_AGENT_MODE"))
+    ai_agent_max_steps: int = Field(5, validation_alias=_alias("AI_AGENT_MAX_STEPS"))
+    # Quote-vs-market check is made FEE-AWARE: the pool fee is part of the expected price, only the excess is "deviation".
+    quote_deviation_fee_aware: bool = Field(True, validation_alias=_alias("QUOTE_DEVIATION_FEE_AWARE"))
+    # Hard ceiling on (pool fees + price impact) as a share of the order, regardless of what the AI recommends.
+    max_total_cost_pct: float = Field(8.0, validation_alias=_alias("MAX_TOTAL_COST_PCT"))
 
     # ------------------------------------------------------------------ goldsky
     # When set, ARC_RUNNER_ARC_RPC_URL is expected to point at Goldsky and the

@@ -32,6 +32,11 @@ class TradeRequest(BaseModel):
     strategy_version: int = 0
     position_id: str | None = None
     reason: str = ""
+    # Execution policy chosen upstream. ``venue`` is the venue the agent picked (None = router decides); the two caps are the
+    # user's limits for pool fees + price impact. None keeps the legacy behaviour (impact vs max_slippage_pct, no cost cap).
+    venue: str | None = None
+    max_price_impact_pct: float | None = None
+    max_total_cost_pct: float | None = None
 
 
 class ApprovedTrade(BaseModel):
@@ -55,6 +60,8 @@ class Quote(BaseModel):
     fee_usdc: float
     router_address: str
     pool_liquidity_usdc: float | None = None
+    venue: str = ""                      # which venue produced this quote ("uniswap", "kyberswap", ...)
+    fee_pct: float | None = None         # combined pool fee of the route, percent (None = unknown)
     diagnostics: dict[str, Any] = Field(default_factory=dict)   # raw numbers behind the quote, for rejection messages
     quoted_at: datetime
     expires_at: datetime

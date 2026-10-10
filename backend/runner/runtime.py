@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Callable
 
+from app.ai.agent import AIAgentAnalyzer
 from app.ai.analyzer import AIAnalyzer
 from app.ai.exit_analyzer import AIExitAnalyzer
 from app.ai.provider import build_provider
@@ -103,6 +104,7 @@ class RunnerRuntime:
         self._market_registry = None
         self._rpc = None
         self._uniswap = None
+        self.venue_router = None
         self._enrichment = None
         if chain is _UNSET:
             rpc = self._make_rpc(settings)
@@ -113,9 +115,10 @@ class RunnerRuntime:
                     settings.uniswap_api_key.get_secret_value(), rpc, wallet_addr, settings.uniswap_api_url,
                     impact_unit=getattr(settings, "uniswap_impact_unit", "percent"),
                 )
+            self.venue_router = self._build_venue_router(settings, rpc, wallet_addr)
             self.chain = ArcAdapter(
                 rpc, settings.network.chain_id, settings.network.explorer_url,
-                dex=self._uniswap, live_trading_verified=settings.live_trading_verified,
+                dex=self.venue_router or self._uniswap, live_trading_verified=settings.live_trading_verified,
             )
         else:
             self.chain = chain
@@ -235,25 +238,21 @@ class RunnerRuntime:
                 established_min_age_hours=settings.established_min_age_hours,
             )
 
-        # --- Goldsky-backed on-chain providers -----------------------------
-        # "goldsky" means use arc_rpc + uniswap_v4_rpc against the Goldsky
-        # client selected by _make_rpc — logical alias, not a separate provider.
-        goldsky_onchain = "goldsky" in wanted
-        if goldsky_onchain or "arc_rpc" in wanted:
+        # --- Codex / GoldRush / Goldsky (own named providers, own health + audit trail) ----------------
+        from app.market_data.factory import build_extra_market_providers
+        extra, notes = build_extra_market_providers(settings, wanted)
+        for n in notes:
+            log.warning("market data: %s", n)
+        built.update(extra)
+        # Legacy names still work when asked for explicitly.
+        if "arc_rpc" in wanted:
             built["arc_rpc"] = ArcRpcMarketData(
-                rpc,
-                max_tokens=settings.market_data_max_tokens,
-                scan_blocks=settings.rpc_launch_scan_blocks,
-                cache_s=settings.market_data_cache_s,
-            )
-        if goldsky_onchain or "uniswap_v4_rpc" in wanted:
+                rpc, max_tokens=settings.market_data_max_tokens, scan_blocks=settings.rpc_launch_scan_blocks,
+                cache_s=settings.market_data_cache_s)
+        if "uniswap_v4_rpc" in wanted:
             built["uniswap_v4_rpc"] = ArcUniswapV4RpcMarketData(
-                rpc,
-                max_tokens=settings.market_data_max_tokens,
-                scan_blocks=settings.uniswap_v4_scan_blocks,
-                swap_scan_blocks=settings.uniswap_v4_swap_scan_blocks,
-                cache_s=settings.market_data_cache_s,
-            )
+                rpc, max_tokens=settings.market_data_max_tokens, scan_blocks=settings.uniswap_v4_scan_blocks,
+                swap_scan_blocks=settings.uniswap_v4_swap_scan_blocks, cache_s=settings.market_data_cache_s)
 
         # --- DexScreener enrichment ----------------------------------------
         if "dexscreener" in wanted:
@@ -276,9 +275,6 @@ class RunnerRuntime:
             )
 
         for name in wanted:
-            if name == "goldsky":
-                # expanded above into arc_rpc / uniswap_v4_rpc
-                continue
             if name in built:
                 providers.append((name, built.pop(name)))
         for name, prov in built.items():
@@ -509,6 +505,26 @@ class RunnerRuntime:
         self.mode_eff = mode
         self._portfolio_key = key
 
+    def _build_venue_router(self, settings, rpc, wallet_addr: str):
+        """Venues the agent may quote/trade on. Uniswap Trading API (needs its key) and KyberSwap (keyless; execution stays
+        off until its router address is allowlisted). Returns None when no venue can be built."""
+        from app.venues.kyber import KyberSwapVenue
+        from app.venues.router import VenueRouter
+        from app.venues.base import VenuePolicy
+        wanted = [x.strip().lower() for x in str(getattr(settings, "venues_enabled", "uniswap")).split(",") if x.strip()]
+        venues = {}
+        if "uniswap" in wanted and self._uniswap is not None:
+            venues["uniswap"] = self._uniswap
+        if "kyberswap" in wanted and wallet_addr:
+            venues["kyberswap"] = KyberSwapVenue(
+                rpc, wallet_addr, base_url=settings.kyberswap_base_url, chain_slug=settings.kyberswap_chain_slug,
+                client_id=settings.kyberswap_client_id,
+                router_allowlist={a.strip().lower() for a in str(settings.kyberswap_router_allowlist).split(",") if a.strip()})
+        if not venues:
+            return None
+        return VenueRouter(venues, policy=VenuePolicy(max_total_cost_pct=float(getattr(settings, "max_total_cost_pct", 5.0)),
+                                                      max_deviation_pct=float(getattr(settings, "max_quote_deviation_pct", 3.0))))
+
     def _assemble(self, b: ConfigBundle) -> None:
         assert self.portfolio is not None and self.mode_eff is not None
         from app.risk.per_user_policy import PlatformCeilings, UserPolicyContext, effective_limits
@@ -532,21 +548,47 @@ class RunnerRuntime:
         strategy_obj, cfg = self._build_strategy(b)
         self.strategy_version = cfg.version
         self.strategy_id = getattr(cfg, "strategy_id", None) or getattr(strategy_obj, "strategy_id", None)
+        if getattr(self.s, "ai_agent_mode", "off") == "tools":
+            analyzer = AIAgentAnalyzer(self.llm, max_steps=int(getattr(self.s, "ai_agent_max_steps", 5)))
+        else:
+            analyzer = AIAnalyzer(self.llm, cache_ttl_s=float(getattr(self.s, "ai_cache_ttl_s", 0.0) or 0.0))
         pipeline = DecisionPipeline(
             strategy_obj, RiskEngine(), limits, self.approver,
-            AIAnalyzer(self.llm, cache_ttl_s=float(getattr(self.s, "ai_cache_ttl_s", 0.0) or 0.0)),
+            analyzer,
             AIMode.ENABLED if self.llm else AIMode.DISABLED,
             min_order_usdc=float(getattr(self.s, "min_order_usdc", 1.0) or 1.0),
             entry_window_seconds=getattr(cfg, "entry_window_seconds", 300), wallet_policy=policy,
         )
+        pipeline.audit_user_id = b.user_id or ""
+        portfolio, wallet, mode_eff = self.portfolio, self.wallet, self.mode_eff
+
+        async def _wallet_state() -> dict:
+            bal = None
+            if mode_eff == TradingMode.LIVE and wallet is not None:
+                try:
+                    bal = round(float(await wallet.get_usdc_balance()), 4)
+                except Exception:  # noqa: BLE001
+                    bal = None
+            return {"mode": mode_eff.value, "usdc_available": bal if bal is not None else round(portfolio.cash_usdc, 4),
+                    "open_positions": portfolio.open_count(), "total_exposure_usdc": round(portfolio.total_exposure(), 4),
+                    "portfolio_value_usdc": round(portfolio.total_value(), 4)}
+
+        async def _refresh(m):
+            return await self.market_data.get_market_state(m.token_address)
+
+        pipeline.wallet_state_fn, pipeline.refresh_market_fn = _wallet_state, _refresh
+        if self.mode_eff == TradingMode.LIVE and self.venue_router is not None:
+            pipeline.venue_router = self.venue_router
         if self.mode_eff == TradingMode.PAPER:
             executor = PaperExecutionEngine(self.portfolio, self.market_data, self.approver, clock=self.clock)
         else:
             executor = ArcExecutionEngine(
                 self.chain, self.wallet, self.approver, self.portfolio, self.idem,
                 LiveSettings(live_trading_enabled=self.s.live_enabled,
-                             max_quote_deviation_pct=float(getattr(self.s, "max_quote_deviation_pct", 3.0))),
+                             max_quote_deviation_pct=float(getattr(self.s, "max_quote_deviation_pct", 3.0)),
+                             fee_aware_deviation=bool(getattr(self.s, "quote_deviation_fee_aware", True))),
             )
+            executor.audit_user_id = b.user_id or ""
         self.controls = ControlState(**b.controls)
         self.effective_limits = limits
         self.engine = TradingEngine(
@@ -819,7 +861,27 @@ class RunnerRuntime:
         return "DONE", f"withdrawal submitted: {tx_hash}"
 
     # ------------------------------------------------------------ events
+    async def flush_audit(self) -> int:
+        """Ship buffered operational-audit records to the control plane as OPS_AUDIT events (rides the normal outbox).
+
+        Skipped when the process owns a direct database sink (cloud worker with DB access) - that sink persists them.
+        In a shared worker, only records scoped to THIS tenant are taken; unscoped (system) records stay for the sink."""
+        from app.observability.audit import RECORDER
+        if RECORDER.has_sinks():
+            return 0
+        uid = self.bundle.user_id if self.bundle is not None else None
+        batch = RECORDER.drain_where(lambda r: (uid is None) or r.user_id == uid, 100)
+        if not batch:
+            return 0
+        try:
+            await self.bus.publish(E.OPS_AUDIT, correlation_id="", records=[r.model_dump(mode="json") for r in batch])
+        except Exception:  # noqa: BLE001 - audit must never break the trading loop
+            log.debug("audit publish failed", exc_info=True)
+            return 0
+        return len(batch)
+
     async def upload_once(self, max_batches: int = 20) -> int:
+        await self.flush_audit()
         total = 0
         for _ in range(max_batches):
             rows = self.store.outbox_pending(100)

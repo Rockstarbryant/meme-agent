@@ -16,15 +16,19 @@ const FIELDS: { key: keyof RiskLimits; label: string; step?: string }[] = [
   { key: "max_daily_loss_usdc", label: "Maximum daily loss (USDC)" }, { key: "max_total_exposure_usdc", label: "Maximum total exposure (USDC)" },
   { key: "max_open_positions", label: "Maximum open positions", step: "1" }, { key: "max_slippage_pct", label: "Maximum slippage (%)", step: "0.1" },
   { key: "min_liquidity_usdc", label: "Minimum liquidity (USDC)" },
+  { key: "max_price_impact_pct", label: "Maximum price impact (%)", step: "0.1" },
+  { key: "max_total_cost_pct", label: "Maximum total cost: pool fees + impact (%)", step: "0.1" },
 ];
-type Editable = Pick<RiskLimits, "max_trade_usdc" | "max_position_usdc" | "max_daily_loss_usdc" | "max_total_exposure_usdc" | "max_open_positions" | "max_slippage_pct" | "min_liquidity_usdc">;
+type Editable = Pick<RiskLimits, "max_trade_usdc" | "max_position_usdc" | "max_daily_loss_usdc" | "max_total_exposure_usdc" | "max_open_positions" | "max_slippage_pct" | "min_liquidity_usdc" | "max_price_impact_pct" | "max_total_cost_pct">;
 
 export function validateLimits(l: Editable): string | null {
-  const nums = [l.max_trade_usdc, l.max_position_usdc, l.max_daily_loss_usdc, l.max_total_exposure_usdc, l.max_open_positions, l.max_slippage_pct, l.min_liquidity_usdc];
+  const nums = [l.max_trade_usdc, l.max_position_usdc, l.max_daily_loss_usdc, l.max_total_exposure_usdc, l.max_open_positions, l.max_slippage_pct, l.min_liquidity_usdc, l.max_price_impact_pct, l.max_total_cost_pct];
   if (nums.some((v) => !Number.isFinite(v) || v <= 0)) return "Every value must be a number greater than zero.";
   if (l.max_trade_usdc > l.max_position_usdc) return "Maximum trade cannot exceed maximum position.";
   if (l.max_position_usdc > l.max_total_exposure_usdc) return "Maximum position cannot exceed maximum total exposure.";
   if (l.max_slippage_pct > 20) return "Maximum slippage cannot exceed 20%.";
+  if (l.max_price_impact_pct > 50 || l.max_total_cost_pct > 50) return "Price impact and total cost cannot exceed 50%.";
+  if (l.max_price_impact_pct > l.max_total_cost_pct) return "Maximum price impact cannot exceed maximum total cost.";
   if (!Number.isInteger(l.max_open_positions)) return "Maximum open positions must be a whole number.";
   return null;
 }
@@ -66,7 +70,7 @@ export function RiskLimitsForm() {
         {error && <ErrorState error={error} />}
         {saved && <Alert variant="success">Risk limits saved. The agent restarted in STOPPED state; open positions remain protected.</Alert>}
         <Button disabled={!!problem || busy || Object.keys(edits).length === 0} onClick={() => (live ? setConfirm(true) : void save())}>Save risk limits</Button>
-        <p className="text-xs text-muted-foreground">The AI can never change these. Effective limits are the stricter of these and your wallet policy (max trade now {res.data.effective_limits.max_trade_usdc} USDC).</p>
+        <p className="text-xs text-muted-foreground">The AI reads these (it can never change them): it only buys where a real quote fits your price-impact and total-cost limits. Effective limits are the stricter of these and your wallet policy (max trade now {res.data.effective_limits.max_trade_usdc} USDC).</p>
         <ConfirmDialog open={confirm} onOpenChange={setConfirm} busy={busy} destructive title="Change LIVE risk limits?" confirmLabel="Save limits"
           description="You are in LIVE mode. Changing limits affects real funds and restarts the agent in STOPPED state." onConfirm={save} />
       </CardContent>

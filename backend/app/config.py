@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     trust_proxy: bool = False  # honour X-Forwarded-For (set true behind Render/Vercel proxies)
     paper_starting_usdc: float = 1000.0
 
+    # Comma separated e-mail addresses that get the admin-only audit log (/admin/*), in addition to users.is_admin.
+    admin_emails: str = ""
+    ops_audit_retention_days: float = Field(14.0, ge=1, le=365)
+    # Chart data for the token page (control plane reads market charts itself; the key is optional, GeckoTerminal is keyless).
+    codex_api_key: SecretStr | None = None
+    codex_url: str = "https://graph.codex.io/graphql"
+    geckoterminal_base_url: str = "https://api.geckoterminal.com/api/v2"
+    geckoterminal_network: str = "arc"
+
     paper_trading_enabled: bool = True
     # Opportunities / decisions / market snapshots older than this are hidden and deleted (positions keep their decision).
     retention_hours: float = 24.0
@@ -94,6 +103,10 @@ class Settings(BaseSettings):
             if len(self.secret_key.get_secret_value()) < 32 or len(self.jwt_secret.get_secret_value()) < 32:
                 raise ValueError("SECRET_KEY and JWT_SECRET must be >= 32 chars in production")
         return self
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
 
     @property
     def cors_origin_list(self) -> list[str]:

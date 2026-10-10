@@ -7,6 +7,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.ai.agent import AIAgentAnalyzer, ToolContext
 from app.ai.analyzer import AIAnalyzer
 from app.ai.schemas import AIOutcome
 from app.core.clock import utcnow
@@ -17,6 +18,7 @@ from app.portfolio.controls import ControlState
 from app.portfolio.state import PortfolioState
 from app.risk.approval import TradeApprover
 from app.risk.engine import RiskAssessment, RiskContext, RiskEngine, RiskLimits, TradeIntent, max_entry_amount
+from app.observability.audit import audit_scope
 from app.strategies.base import Strategy, StrategySignal
 from app.wallets.base import WalletPolicy
 
@@ -70,16 +72,23 @@ class DecisionPipeline:
         self.strategy, self.risk, self.limits, self.approver = strategy, risk, limits, approver
         self.analyzer, self.ai_mode, self.min_ai_conf = analyzer, ai_mode, min_ai_confidence
         self.min_order, self.window, self.policy = min_order_usdc, entry_window_seconds, wallet_policy
+        # Set by the runtime after construction (keeps the constructor signature stable):
+        self.venue_router = None            # app.venues.VenueRouter | None  (LIVE only)
+        self.audit_user_id = ""             # tenant for the operational audit trail
+        self.wallet_state_fn = None         # async () -> dict  (balance / exposure for the agent's get_wallet_state tool)
+        self.refresh_market_fn = None       # async (MarketState) -> MarketState  (agent's get_market_data refresh=true)
 
     def _request(self, m: MarketState, amount: float, mode: TradingMode, now: datetime, decision_id: str,
-                 slippage: float) -> TradeRequest:
+                 slippage: float, limits: RiskLimits | None = None, venue: str | None = None) -> TradeRequest:
         bucket = int(now.timestamp() // self.window)
         raw = f"{mode.value}|{m.key}|{self.strategy.strategy_id}|{self.strategy.version}|{bucket}"
         return TradeRequest(idempotency_key=hashlib.sha256(raw.encode()).hexdigest()[:32], mode=mode, chain=m.chain,
                             token_address=m.token_address, side=Side.BUY, amount_usdc=amount, max_slippage_pct=slippage,
                             reference_price=m.price, reference_liquidity_usdc=m.liquidity, launchpad=m.launchpad, pool_address=m.pool_address,
                             decision_id=decision_id, strategy_id=self.strategy.strategy_id,
-                            strategy_version=self.strategy.version, reason="traction_momentum_entry")
+                            strategy_version=self.strategy.version, reason="traction_momentum_entry", venue=venue,
+                            max_price_impact_pct=limits.max_price_impact_pct if limits else None,
+                            max_total_cost_pct=getattr(limits, "max_total_cost_pct", None) if limits else None)
 
     def _assess(self, m, amount, mode, portfolio, controls, now, limits) -> RiskAssessment:
         intent = TradeIntent(Side.BUY, amount, limits.max_slippage_pct, mode, self.strategy.strategy_id)
@@ -87,6 +96,13 @@ class DecisionPipeline:
 
     async def evaluate(self, m: MarketState, portfolio: PortfolioState, controls: ControlState,
                        mode: TradingMode, now: datetime | None = None) -> DecisionRecord:
+        decision_id = uuid.uuid4().hex
+        # Everything recorded below (provider calls, AI attempts, tool calls, venue quotes) carries this decision + token.
+        with audit_scope(user_id=self.audit_user_id, token_key=m.key, decision_id=decision_id):
+            return await self._evaluate(m, portfolio, controls, mode, now, decision_id)
+
+    async def _evaluate(self, m: MarketState, portfolio: PortfolioState, controls: ControlState,
+                        mode: TradingMode, now: datetime | None, decision_id: str) -> DecisionRecord:
         now = now or utcnow()
         limits = tighten_limits(self.limits, self.policy)
         signal = self.strategy.score(m, now)                                   # feature/strategy stage
@@ -99,7 +115,7 @@ class DecisionPipeline:
             if not market.get("scanned_at"):
                 ts = market.get("timestamp")
                 market["scanned_at"] = ts if isinstance(ts, str) else (now.isoformat() if now else None)
-            return DecisionRecord(created_at=now, mode=mode, token_key=m.key, strategy_id=self.strategy.strategy_id,
+            return DecisionRecord(id=decision_id, created_at=now, mode=mode, token_key=m.key, strategy_id=self.strategy.strategy_id,
                                   strategy_version=self.strategy.version, strategy_config=self.strategy.config_snapshot(),
                                   risk_limits=limits.model_dump(mode="json"), controls=controls.snapshot(),
                                   wallet_policy=self.policy.model_dump(mode="json") if self.policy else None,
@@ -140,8 +156,16 @@ class DecisionPipeline:
             if amount < self.min_order:   # nothing the AI says can fit: say so precisely instead of asking it
                 return rec(Action.WATCH, f"MAX_ENTRY_BELOW_MINIMUM_ORDER: max {amount:.2f} < min {self.min_order:.2f} USDC",
                            amount=amount)
-            ai_out = await self.analyzer.analyze(m, signal, pre, {"min_order_usdc": self.min_order,
-                                                                   "max_order_usdc": amount})
+            sizing = {"min_order_usdc": self.min_order, "max_order_usdc": amount}
+            if isinstance(self.analyzer, AIAgentAnalyzer):
+                tctx = ToolContext(market=m, signal=signal, risk=pre, sizing=sizing, limits=limits, mode=mode.value,
+                                   decision_id=decision_id, wallet_policy=self.policy,
+                                   router=self.venue_router if mode == TradingMode.LIVE else None,
+                                   refresh_market=(lambda: self.refresh_market_fn(m)) if self.refresh_market_fn else None,
+                                   wallet_state=self.wallet_state_fn)
+                ai_out = await self.analyzer.analyze(m, signal, pre, sizing, ctx=tctx)
+            else:
+                ai_out = await self.analyzer.analyze(m, signal, pre, sizing)
             if ai_out.status != "OK" or ai_out.decision is None:
                 return rec(
                     Action.WATCH,
@@ -183,14 +207,34 @@ class DecisionPipeline:
         if final.decision == RiskDecision.REJECT:
             return rec(Action.REJECT, f"RISK_VETO_AFTER_AI: {final.summary()}", ai=ai_out, final_risk=final,
                        amount=final_amount)
-        decision_id = uuid.uuid4().hex
-        req = self._request(m, final_amount, mode, now, decision_id, limits.max_slippage_pct)
+        # WHERE to trade: LIVE re-quotes every venue at the FINAL size and only goes ahead on one that fits the user's limits.
+        venue_note, chosen_venue = "", None
+        if mode == TradingMode.LIVE and self.venue_router is not None:
+            probe = self._request(m, final_amount, mode, now, decision_id, limits.max_slippage_pct, limits)
+            results = await self.venue_router.quote_all(probe)
+            pick = self.venue_router.best(results)
+            ai_venue = ai_out.decision.venue if (ai_out and ai_out.decision) else None
+            mine = next((r for r in results if r.venue == ai_venue), None) if ai_venue else None
+            if mine is not None and mine.passes_policy and mine.executable:
+                pick = mine
+            if ai_out is not None:
+                ai_out.venue_quotes = [r.agent_view() for r in results]
+            if pick is None:
+                why = "; ".join(f"{r.venue}: " + ("; ".join(r.policy_failures) or r.not_executable_reason or r.error or "no quote")
+                                for r in results)[:700]
+                return rec(Action.WATCH, f"NO_VENUE_WITHIN_POLICY: {why}", ai=ai_out, final_risk=final, amount=final_amount)
+            chosen_venue = pick.venue
+            venue_note = (f" via {pick.venue} (fee {pick.fee_pct if pick.fee_pct is not None else 'n/a'}%, impact "
+                          f"{pick.price_impact_pct if pick.price_impact_pct is not None else 'n/a'}%, cost "
+                          f"{pick.total_cost_pct if pick.total_cost_pct is not None else 'n/a'}%)")
+            if ai_venue and ai_venue != chosen_venue:
+                venue_note += f"; AI preferred {ai_venue} but it did not fit the limits"
+        req = self._request(m, final_amount, mode, now, decision_id, limits.max_slippage_pct, limits, chosen_venue)
         approved = self.approver.approve(req, final)
         out = rec(Action.BUY, (("approved: watch-band upgraded by AI, risk approved" if watch_band else
-                            "approved: qualified signal, AI agreement, risk approved") + size_note) if ai_out
+                            "approved: qualified signal, AI agreement, risk approved") + size_note + venue_note) if ai_out
                   else "approved: qualified signal and risk approved (AI disabled, PAPER only)",
                   ai=ai_out, final_risk=final, amount=final_amount, approved_trade=approved)
-        out.id = decision_id
         return out
 
     async def evaluate_manual_override(self, m: MarketState, portfolio: PortfolioState, controls: ControlState,

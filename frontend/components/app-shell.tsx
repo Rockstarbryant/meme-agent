@@ -8,7 +8,7 @@ import { StatusBanner } from "@/components/status-banner";
 import { Button } from "@/components/ui/button";
 import { Loading } from "@/components/states";
 import { useAuth } from "@/lib/auth";
-import { MOBILE_MORE, MOBILE_PRIMARY, NAV_GROUPS, isActive } from "@/lib/nav";
+import { ADMIN_GROUP, MOBILE_MORE, MOBILE_PRIMARY, NAV_GROUPS, isActive } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -23,7 +23,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => { if (ready && !user) router.replace("/login"); }, [ready, user, router]);
   if (!ready || !user) return <Loading label="Checking session…" />;
 
-  const moreActive = MOBILE_MORE.some((i) => isActive(path, i.href));
+  const groups = user.is_admin ? [...NAV_GROUPS, ADMIN_GROUP] : NAV_GROUPS;
+  const moreItems = user.is_admin ? [...MOBILE_MORE, ...ADMIN_GROUP.items] : MOBILE_MORE;
+  const moreActive = moreItems.some((i) => isActive(path, i.href));
   return (
     <div className="min-h-screen md:flex">
       <NotificationWatcher />
@@ -33,7 +35,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <span className="mt-3 flex items-center gap-2"><span aria-hidden className="h-px w-6 bg-accent" /><span className="font-mono text-[11px] tracking-[0.12em] text-muted-foreground">autonomous trading</span></span>
         </Link>
         <nav aria-label="Main" className="flex-1 space-y-7">
-          {NAV_GROUPS.map((g) => (
+          {groups.map((g) => (
             <div key={g.label}>
               <p className="small-caps mb-2 px-2 text-muted-foreground">{g.label}</p>
               <div className="space-y-0.5">
@@ -68,7 +70,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="mb-3 flex items-center justify-between px-1"><p className="font-serif text-lg">More</p>
             <button type="button" aria-label="Close menu" className="grid h-11 w-11 place-items-center rounded-md transition-colors hover:bg-muted" onClick={() => setMore(false)}><X className="h-4 w-4" /></button></div>
           <div className="grid grid-cols-3 gap-2">
-            {MOBILE_MORE.map(({ href, label, icon: Icon }) => (
+            {moreItems.map(({ href, label, icon: Icon }) => (
               <Link key={href} href={href} aria-current={isActive(path, href) ? "page" : undefined}
                 className={cn("flex min-h-[72px] flex-col items-center justify-center gap-1.5 rounded-md border p-3 text-xs tracking-[0.03em] transition-colors duration-200", isActive(path, href) ? "border-accent bg-accent/10 font-semibold" : "hover:border-border-hover hover:bg-muted")}>
                 <Icon className="h-5 w-5" aria-hidden />{label}

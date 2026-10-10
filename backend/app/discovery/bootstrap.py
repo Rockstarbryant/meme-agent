@@ -143,6 +143,16 @@ def build_global_market_data(settings: Any):
         except Exception:
             log.exception("bitquery provider init failed")
 
+    # Codex / GoldRush / Goldsky (shared factory with the local runner)
+    try:
+        from app.market_data.factory import build_extra_market_providers
+        extra, notes = build_extra_market_providers(settings, wanted)
+        for n in notes:
+            log.warning("market data: %s", n)
+        built.update(extra)
+    except Exception:
+        log.exception("codex/goldrush/goldsky provider init failed")
+
     # Preserve configured priority order from MARKET_DATA_PROVIDERS
     for name in wanted:
         if name in built:
@@ -172,7 +182,7 @@ def build_global_market_data(settings: Any):
 _EXTRA_SNAPSHOT_FIELDS = (
     "token_name", "windows", "holder_growth", "liquidity_growth", "market_cap_growth", "top_5pct_holders_pct", "top_20pct_holders_pct",
     "top_30pct_holders_pct", "holders_sampled", "volume_1m", "buys_1m", "sells_1m", "unique_sellers_1m",
-    "unique_buyers_15m", "unique_sellers_15m", "price_change_1m", "recent_high", "volatility_pct", "pool_id",
+    "unique_buyers_15m", "unique_sellers_15m", "price_change_1m", "recent_high", "volatility_pct", "pool_id", "field_sources",
 )
 
 

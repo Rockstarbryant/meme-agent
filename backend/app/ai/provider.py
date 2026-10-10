@@ -9,6 +9,8 @@ from typing import Callable
 
 import httpx
 
+from app.observability.audit import AuditKind, AuditStatus, record_event
+
 log = logging.getLogger(__name__)
 
 
@@ -35,7 +37,16 @@ class LLMProvider(ABC):
 
     async def complete_ex(self, system: str, user: str, validate: Callable[[str], object] | None = None) -> Completion:
         """Default: a single provider. ``validate`` (raises on bad output) is only used by FallbackProvider."""
-        return Completion(text=await self.complete(system, user), provider=self.name, model=self.model)
+        t0 = time.monotonic()
+        try:
+            text = await self.complete(system, user)
+        except Exception as exc:
+            record_event(AuditKind.AI_PROVIDER, AuditStatus.FAILED, provider=self.name, model=self.model, operation="complete",
+                         component="ai.single", latency_ms=(time.monotonic() - t0) * 1000, error=str(exc))
+            raise
+        record_event(AuditKind.AI_PROVIDER, AuditStatus.OK, provider=self.name, model=self.model, operation="complete",
+                     component="ai.single", latency_ms=(time.monotonic() - t0) * 1000)
+        return Completion(text=text, provider=self.name, model=self.model)
 
     def chain_info(self) -> list[dict]:
         return [{"provider": self.name, "model": self.model}]
@@ -259,16 +270,21 @@ class FallbackProvider(LLMProvider):
         attempts: list[str] = []
         invalid: Completion | None = None
         for p in order:
+            t0 = time.monotonic()
             try:
                 text = await p.complete(system, user)
             except AIProviderError as exc:
                 self._note(p, False)
                 attempts.append(f"{p.name}: {exc}")
+                record_event(AuditKind.AI_PROVIDER, AuditStatus.FAILED, provider=p.name, model=p.model, operation="complete",
+                             component="ai.fallback", latency_ms=(time.monotonic() - t0) * 1000, error=str(exc))
                 log.warning("AI provider %s failed (%s); trying next", p.name, str(exc)[:160])
                 continue
             except Exception as exc:  # noqa: BLE001 - one provider's bug must not take the chain down
                 self._note(p, False)
                 attempts.append(f"{p.name}: {type(exc).__name__}")
+                record_event(AuditKind.AI_PROVIDER, AuditStatus.FAILED, provider=p.name, model=p.model, operation="complete",
+                             component="ai.fallback", latency_ms=(time.monotonic() - t0) * 1000, error=type(exc).__name__)
                 continue
             if validate is not None:
                 try:
@@ -276,9 +292,15 @@ class FallbackProvider(LLMProvider):
                 except Exception as exc:  # noqa: BLE001
                     self._note(p, False)
                     attempts.append(f"{p.name}: unusable output ({type(exc).__name__})")
+                    record_event(AuditKind.AI_PROVIDER, AuditStatus.FAILED, provider=p.name, model=p.model, operation="complete",
+                                 component="ai.fallback", latency_ms=(time.monotonic() - t0) * 1000,
+                                 error=f"unusable output ({type(exc).__name__}: {str(exc)[:120]})")
                     invalid = Completion(text=text, provider=p.name, model=p.model, valid=False, attempts=attempts)
                     continue
             self._note(p, True)
+            record_event(AuditKind.AI_PROVIDER, AuditStatus.OK, provider=p.name, model=p.model, operation="complete",
+                         component="ai.fallback", latency_ms=(time.monotonic() - t0) * 1000,
+                         detail={"failed_before": attempts[:5]} if attempts else {})
             return Completion(text=text, provider=p.name, model=p.model, attempts=attempts)
         if invalid is not None:
             invalid.attempts = attempts

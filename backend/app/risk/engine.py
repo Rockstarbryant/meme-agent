@@ -29,6 +29,8 @@ class RiskLimits(BaseModel):
     min_liquidity_usdc: float = 10_000.0
     max_trade_liquidity_ratio: float = 0.01
     max_price_impact_pct: float = 2.0
+    # Ceiling on (pool fees + price impact) as a share of the order, enforced on the real quote before a live order.
+    max_total_cost_pct: float = 5.0
     cooldown_seconds: int = 300
     max_data_age_seconds: float = 30.0
     min_token_age_seconds: float = 180.0

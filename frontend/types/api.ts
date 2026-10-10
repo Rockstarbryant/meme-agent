@@ -1,7 +1,7 @@
 export type Mode = "PAPER" | "LIVE";
 export type Action = "BUY" | "WATCH" | "REJECT" | "HOLD" | "SELL";
 
-export interface User { id: string; email: string; mode: Mode; created_at: string }
+export interface User { id: string; email: string; mode: Mode; created_at: string; is_admin?: boolean }
 export interface AuthResponse { access_token: string; token_type: string; expires_in: number; user: User }
 
 export interface RiskLimits {
@@ -9,6 +9,7 @@ export interface RiskLimits {
   max_open_positions: number; max_slippage_pct: number; min_liquidity_usdc: number;
   max_chain_exposure_usdc: number; max_launchpad_exposure_usdc: number; max_trade_liquidity_ratio: number;
   cooldown_seconds: number; allowed_chains: string[]; allowed_launchpads: string[];
+  max_price_impact_pct: number; max_total_cost_pct: number;
 }
 
 export type AgentState = "RUNNING" | "PAUSED" | "STOPPED" | "OFFLINE" | "STARTING" | "LIVE_BLOCKED";
@@ -154,4 +155,25 @@ export interface GroupStat { key: string; count: number; wins: number; pnl_usdc:
 export interface PerformanceStats {
   closed: number; wins: number; losses: number; win_rate_pct: number | null; profit_factor: number | null; avg_win_usdc: number | null; avg_loss_usdc: number | null;
   best_usdc: number | null; worst_usdc: number | null; avg_hold_seconds: number | null; total_realized_usdc: number; by_strategy: GroupStat[]; by_exit_reason: GroupStat[];
+}
+
+/* ---- candles (token page chart) ---- */
+export type Timeframe = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
+export interface Candle { t: number; o: number; h: number; l: number; c: number; v: number }
+export interface CandleResponse {
+  tf: Timeframe; provider: "codex" | "geckoterminal" | "snapshots" | string; candles: Candle[];
+  failed: { provider: string; error: string }[]; has_volume: boolean; token: string; pool: string | null;
+}
+
+/* ---- admin audit ---- */
+export type AuditKind = "MARKET_PROVIDER" | "ENRICHMENT_PROVIDER" | "AI_PROVIDER" | "AI_AGENT" | "VENUE_QUOTE" | "EXECUTION" | "CHART_PROVIDER" | "SYSTEM";
+export interface AuditRow {
+  id: string; at: string; kind: AuditKind; status: "OK" | "FAILED" | "SKIPPED" | "DEGRADED" | "RECOVERED"; severity: "INFO" | "WARN" | "ERROR";
+  component: string; provider: string; model: string; operation: string; latency_ms: number | null; error: string; token_key: string;
+  user_id: string; decision_id: string; repeat: number; detail: Record<string, unknown>;
+}
+export interface AuditList { items: AuditRow[]; next_before: string | null }
+export interface ProviderBoardRow {
+  kind: AuditKind; provider: string; state: "DOWN" | "DEGRADED" | "OK"; ok: number; failed: number; skipped: number; degraded: number;
+  last_ok_at: string | null; last_failure_at: string | null; avg_latency_ms: number | null;
 }

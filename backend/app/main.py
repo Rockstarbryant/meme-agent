@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import select
 
-from app.api import routes_agent, routes_auth_system, routes_config, routes_platform, routes_runner, routes_stream, routes_trading, routes_wallet, routes_discovery
+from app.api import routes_admin, routes_agent, routes_auth_system, routes_config, routes_platform, routes_runner, routes_stream, routes_trading, routes_wallet, routes_discovery
 from app.api.deps import Container
 from app.chains.arc.adapter import ArcAdapter
 from app.chains.evm import EvmRpcClient
@@ -63,8 +63,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.c = Container(settings, engine, sf, redis, chain, hub, RateLimiter(redis), jwt_key)
         await seed(sf, settings)
         retention_task = asyncio.create_task(retention_loop(sf, settings.retention_hours), name="retention")
+        # Operational audit trail: this process's own records (chart providers, ...) go straight to the database.
+        from app.observability.audit import RECORDER
+        from app.services import audit_store
+        RECORDER.add_sink(audit_store.make_db_sink(sf))
+
+        async def _audit_flush() -> None:
+            n = 0
+            while True:
+                await asyncio.sleep(3.0)
+                try:
+                    await RECORDER.flush()
+                    n += 1
+                    if n % 1200 == 0:       # about hourly
+                        await audit_store.prune(sf, settings.ops_audit_retention_days)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("audit flush failed")
+
+        audit_task = asyncio.create_task(_audit_flush(), name="audit-flush")
         yield
+        audit_task.cancel()
         retention_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await audit_task
         with contextlib.suppress(asyncio.CancelledError):
             await retention_task
         await redis.aclose()
@@ -102,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ("routes_stream", routes_stream, "router"),
         ("routes_platform", routes_platform, "router"),
         ("routes_discovery", routes_discovery, "router"),
+        ("routes_admin", routes_admin, "router"),
     ]
     for mod_name, mod, attr in route_modules:
         r = getattr(mod, attr, None)
