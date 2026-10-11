@@ -71,11 +71,15 @@ class VenueRouter:
                 fails.append(f"QUOTE_DEVIATES {b['deviation_ex_fee_pct']:.2f}% after the {q.fee_pct}% pool fee > {pol.max_deviation_pct:.2f}%")
         elif b["total_cost_pct"] is not None and b["total_cost_pct"] < -pol.max_deviation_pct:
             fails.append(f"QUOTE_FAR_BELOW_MARKET {abs(b['total_cost_pct']):.2f}% (stale reference price or manipulated pool)")
+        diag = q.diagnostics or {}
+        sell_tax = diag.get("sell_tax_pct")
+        if isinstance(sell_tax, (int, float)) and sell_tax > pol.max_sell_tax_pct:
+            fails.append(f"SELL_TAX {sell_tax:.2f}% > {pol.max_sell_tax_pct:.2f}% (cost to exit this token)")
         v = self.venues.get(venue)
         ok_exec, why = v.executable() if v else (False, "unknown venue")
         return VenueResult(venue=venue, ok=True, latency_ms=latency_ms, amount_in_usdc=request.amount_usdc, expected_out=q.expected_out,
                            price=q.price, fee_pct=q.fee_pct, price_impact_pct=q.price_impact_pct, total_cost_pct=b["total_cost_pct"],
-                           unexplained_cost_pct=b["unexplained_cost_pct"], route=(q.diagnostics or {}).get("route"),
+                           unexplained_cost_pct=b["unexplained_cost_pct"], sell_tax_pct=sell_tax if isinstance(sell_tax, (int, float)) else None, route=(q.diagnostics or {}).get("route"),
                            router_address=q.router_address, executable=ok_exec, not_executable_reason=why,
                            passes_policy=not fails, policy_failures=fails, quote=q)
 

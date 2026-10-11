@@ -30,7 +30,7 @@ export function TokenChart({ tokenKey, fallbackPoints, entryPrice = null }: {
       </div>
       {res.loading && !d ? <Loading label="Loading candles…" /> : d && d.candles.length >= 2
         ? <CandleChart candles={d.candles} entryPrice={entryPrice} showVolume={d.has_volume} />
-        : (<div><p className="text-xs text-muted-foreground">No candles from any chart provider{d?.failed.length ? ` (${d.failed.map((f) => `${f.provider}: ${f.error}`).join("; ")})` : ""}. Showing the agent&apos;s own price samples.</p>
+        : (<div><p className="text-xs text-muted-foreground">No candles from any chart provider{d && d.failed.length + (d.skipped?.length ?? 0) ? ` (${[...d.failed, ...(d.skipped ?? [])].map((f) => `${f.provider}: ${f.error}`).join("; ")})` : ""}. Showing the agent&apos;s own price samples.</p>
             <PriceChart points={fallbackPoints} /></div>)}
     </div>
   );

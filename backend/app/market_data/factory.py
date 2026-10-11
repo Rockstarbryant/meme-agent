@@ -40,6 +40,22 @@ def build_extra_market_providers(settings: Any, wanted: list[str]) -> tuple[dict
                 discovery_min_liquidity=float(getattr(settings, "candidate_min_liquidity_usdc", 5_000.0)),
                 max_tokens=max_tokens, change_unit=str(getattr(settings, "codex_change_unit", "fraction")))
 
+    if "okx" in wanted:
+        k, sec, pw = _secret(settings, "okx_api_key"), _secret(settings, "okx_secret_key"), _secret(settings, "okx_passphrase")
+        if not (k and sec and pw):
+            notes.append("okx requested but ARC_RUNNER_OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE are not all set")
+        else:
+            from app.chains.arc.okx_market_data import OkxArcMarketData
+            from app.integrations.okx import OkxClient
+            client = OkxClient(k, sec, pw, project_id=str(getattr(settings, "okx_project_id", "")),
+                               base_url=getattr(settings, "okx_base_url", "https://web3.okx.com"), timeout_s=timeout)
+            built["okx"] = OkxArcMarketData(
+                client, chain_index=str(getattr(settings, "okx_chain_index", "5042")),
+                max_tokens=int(getattr(settings, "okx_discovery_limit", 40)),
+                min_liquidity=float(getattr(settings, "candidate_min_liquidity_usdc", 5_000.0)),
+                min_holders=int(getattr(settings, "okx_min_holders", 25)), min_txs=int(getattr(settings, "okx_min_txs", 10)),
+                cache_s=float(getattr(settings, "market_data_cache_s", 60.0)) * 2, hot_tokens=bool(getattr(settings, "okx_hot_tokens", False)))
+
     if "goldrush" in wanted:
         key = _secret(settings, "goldrush_api_key")
         if not key:

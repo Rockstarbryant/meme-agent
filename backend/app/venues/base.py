@@ -16,6 +16,7 @@ class VenuePolicy(BaseModel):
     max_price_impact_pct: float = 2.0
     max_total_cost_pct: float = 5.0        # pool fees + impact, vs the reference (market) price
     max_unexplained_pct: float = 3.0       # cost that neither the fee schedule nor reported impact explains
+    max_sell_tax_pct: float = 10.0         # token sell tax reported by the venue (0x reports it); a high one is a honeypot-style exit cost
     max_deviation_pct: float = 3.0         # |quote - market| after removing the pool fee (same meaning as the live pre-flight)
     require_executable: bool = True
 
@@ -33,6 +34,7 @@ class VenueResult(BaseModel):
     price_impact_pct: float | None = None
     total_cost_pct: float | None = None
     unexplained_cost_pct: float | None = None
+    sell_tax_pct: float | None = None
     route: str | None = None
     router_address: str | None = None
     executable: bool = False

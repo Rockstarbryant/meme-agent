@@ -44,7 +44,7 @@ TOOL_PROTOCOL = """
 TOOLS (optional). You may look things up before deciding. To call a tool reply with ONE JSON object and nothing else:
   {"tool": "<name>", "args": {...}}
 You will get the result and may call another tool. When you are ready, reply with the final decision JSON described above
-(no "tool" key) and ADD the key "venue": the venue you want to buy on ("uniswap", "kyberswap", ...) or null.
+(no "tool" key) and ADD the key "venue": the venue you want to buy on ("uniswap", "zerox", "kyberswap", ...) or null.
 Tools:
   get_market_data   args: {"refresh": true|false}   latest merged market state; "sources" says which provider supplied which field.
   get_trading_policy args: {}                        user's limits (max price impact %, max total cost %, slippage), wallet policy, sizing band, mode.

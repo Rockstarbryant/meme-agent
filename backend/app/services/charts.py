@@ -66,6 +66,20 @@ async def gecko_candles(http: httpx.AsyncClient, base: str, network: str, pool: 
     return sorted(out, key=lambda x: x["t"])
 
 
+async def gecko_top_pool(http: httpx.AsyncClient, base: str, network: str, token: str) -> str | None:
+    """Most liquid pool of a token on GeckoTerminal (keyless). Used when the token's own snapshot has no pool address yet."""
+    try:
+        r = await http.get(f"{base.rstrip('/')}/networks/{network}/tokens/{token}/pools", params={"page": 1},
+                           headers={"accept": "application/json;version=20230302"})
+        if r.status_code >= 400:
+            return None
+        rows = r.json().get("data") or []
+        addr = ((rows[0] or {}).get("attributes") or {}).get("address") if rows else None
+        return str(addr) if addr else None
+    except (httpx.HTTPError, ValueError, AttributeError, IndexError):
+        return None
+
+
 def snapshot_candles(history: list[dict], tf: str) -> list[dict]:
     """Candles from our own snapshots (price at snapshot time). Coarse: used only when no external provider answered."""
     step = TIMEFRAMES[tf]["s"]
@@ -93,10 +107,17 @@ class ChartService:
             raise ValueError("unsupported timeframe")
         limit = max(20, min(int(limit), 500))
         failures: list[dict] = []
+        skipped: list[dict] = []     # providers not tried (not configured / nothing to ask): informative, not a failure
         tk = f"arc:{token.lower()}"
         attempts: list[tuple[str, Any]] = []
         if self.codex is not None:
             attempts.append(("codex", lambda: codex_candles(self.codex, token, tf, limit)))
+        else:
+            skipped.append({"provider": "codex", "error": "not configured (set CODEX_API_KEY on the API server)"})
+        if not pool:
+            pool = await gecko_top_pool(self.http, self.s.geckoterminal_base_url, self.s.geckoterminal_network, token)
+        if not pool:
+            skipped.append({"provider": "geckoterminal", "error": "no pool found for this token yet"})
         if pool:
             attempts.append(("geckoterminal", lambda: gecko_candles(self.http, self.s.geckoterminal_base_url,
                                                                     self.s.geckoterminal_network, pool, tf, limit)))
@@ -112,12 +133,12 @@ class ChartService:
             record_event(AuditKind.CHART_PROVIDER, AuditStatus.OK if not failures else AuditStatus.DEGRADED, provider=name,
                          operation=f"candles:{tf}", component="charts", latency_ms=(time.monotonic() - t0) * 1000, token_key=tk,
                          detail={"candles": len(out), "failed_before": [f["provider"] for f in failures]})
-            return {"tf": tf, "provider": name, "candles": out[-limit:], "failed": failures, "has_volume": any(c["v"] > 0 for c in out)}
+            return {"tf": tf, "provider": name, "candles": out[-limit:], "failed": failures, "skipped": skipped, "has_volume": any(c["v"] > 0 for c in out), "pool": pool}
         snap = snapshot_candles(history, tf)
         record_event(AuditKind.CHART_PROVIDER, AuditStatus.DEGRADED, provider="snapshots", operation=f"candles:{tf}",
                      component="charts", token_key=tk, error="no external chart provider answered; using own snapshots",
                      detail={"candles": len(snap), "failed": [f["provider"] for f in failures]})
-        return {"tf": tf, "provider": "snapshots", "candles": snap[-limit:], "failed": failures, "has_volume": False}
+        return {"tf": tf, "provider": "snapshots", "candles": snap[-limit:], "failed": failures, "skipped": skipped, "has_volume": False, "pool": pool}
 
     async def aclose(self) -> None:
         await self.http.aclose()

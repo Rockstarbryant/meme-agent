@@ -162,7 +162,7 @@ export type Timeframe = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 export interface Candle { t: number; o: number; h: number; l: number; c: number; v: number }
 export interface CandleResponse {
   tf: Timeframe; provider: "codex" | "geckoterminal" | "snapshots" | string; candles: Candle[];
-  failed: { provider: string; error: string }[]; has_volume: boolean; token: string; pool: string | null;
+  failed: { provider: string; error: string }[]; skipped?: { provider: string; error: string }[]; has_volume: boolean; token: string; pool: string | null;
 }
 
 /* ---- admin audit ---- */

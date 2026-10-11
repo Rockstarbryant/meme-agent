@@ -72,7 +72,7 @@ class RunnerSettings(BaseSettings):
     # arc_rpc and uniswap_v4_rpc still exist but now point at Goldsky instead
     # of Alchemy when you set ARC_RUNNER_ARC_RPC_URL to the Goldsky endpoint.
     market_data_providers: str = Field(
-        "geckoterminal,dexpaprika,goldsky,codex,dexscreener,goldrush",
+        "geckoterminal,dexpaprika,goldsky,codex,okx,dexscreener,goldrush",
         validation_alias=_alias("MARKET_DATA_PROVIDERS"),
     )
     market_data_essential_providers: str = Field(
@@ -138,6 +138,19 @@ class RunnerSettings(BaseSettings):
     # "fraction": Codex returns 0.05 for +5% (as documented); "percent": it returns 5.
     codex_change_unit: Literal["fraction", "percent"] = Field("fraction", validation_alias=_alias("CODEX_CHANGE_UNIT"))
 
+    # ------------------------------------------------------------------ okx (OKX Onchain OS / Web3 Market API): trending tokens
+    # Credentials from https://web3.okx.com/onchainos/dev-portal . The secret key and passphrase are env-only and never shown or logged.
+    okx_api_key: SecretStr | None = Field(None, validation_alias=_alias("OKX_API_KEY"))
+    okx_secret_key: SecretStr | None = Field(None, validation_alias=_alias("OKX_SECRET_KEY"))
+    okx_passphrase: SecretStr | None = Field(None, validation_alias=_alias("OKX_PASSPHRASE"))
+    okx_project_id: str = Field("", validation_alias=_alias("OKX_PROJECT_ID"))
+    okx_base_url: str = Field("https://web3.okx.com", validation_alias=_alias("OKX_BASE_URL"))
+    okx_chain_index: str = Field("5042", validation_alias=_alias("OKX_CHAIN_INDEX"))
+    okx_discovery_limit: int = Field(40, validation_alias=_alias("OKX_DISCOVERY_LIMIT"))
+    okx_min_holders: int = Field(25, validation_alias=_alias("OKX_MIN_HOLDERS"))
+    okx_min_txs: int = Field(10, validation_alias=_alias("OKX_MIN_TXS"))
+    okx_hot_tokens: bool = Field(False, validation_alias=_alias("OKX_HOT_TOKENS"))
+
     # ------------------------------------------------------------------ goldrush (GoldRush / Covalent REST, chain arc-mainnet)
     goldrush_api_key: SecretStr | None = Field(None, validation_alias=_alias("GOLDRUSH_API_KEY"))
     goldrush_base_url: str = Field("https://api.covalenthq.com/v1", validation_alias=_alias("GOLDRUSH_BASE_URL"))
@@ -150,13 +163,18 @@ class RunnerSettings(BaseSettings):
 
     # ------------------------------------------------------------------ venues / agentic AI
     # Venues the agent may quote. "uniswap" = Trading API (V2/V3/V4). "kyberswap" = KyberSwap aggregator (supports Arc).
-    venues_enabled: str = Field("uniswap,kyberswap", validation_alias=_alias("VENUES_ENABLED"))
+    venues_enabled: str = Field("uniswap,zerox,kyberswap", validation_alias=_alias("VENUES_ENABLED"))
     kyberswap_base_url: str = Field("https://aggregator-api.kyberswap.com", validation_alias=_alias("KYBERSWAP_BASE_URL"))
     kyberswap_chain_slug: str = Field("arc", validation_alias=_alias("KYBERSWAP_CHAIN_SLUG"))
     kyberswap_client_id: str = Field("arc-autonomous-trading-agent", validation_alias=_alias("KYBERSWAP_CLIENT_ID"))
     # EXECUTION through KyberSwap stays OFF until you list the router address you verified on-chain (eth_getCode + explorer),
     # comma separated. Quotes (read-only) always work. Also add it to the wallet policy's allowed routers.
     kyberswap_router_allowlist: str = Field("", validation_alias=_alias("KYBERSWAP_ROUTER_ALLOWLIST"))
+    # 0x Swap API v2 (Arc 5042 is supported). Key: https://dashboard.0x.org. EXECUTION needs the AllowanceHolder address you verified on-chain
+    # for Arc (comma separated); without it 0x is quote-only. Also add it to the wallet policy's allowed routers.
+    zerox_api_key: SecretStr | None = Field(None, validation_alias=_alias("ZEROEX_API_KEY"))
+    zerox_base_url: str = Field("https://api.0x.org", validation_alias=_alias("ZEROEX_BASE_URL"))
+    zerox_allowance_holder: str = Field("", validation_alias=_alias("ZEROEX_ALLOWANCE_HOLDER"))
     # "off" = old single-shot analyst; "tools" = analyst may call read-only tools and choose the venue.
     ai_agent_mode: Literal["off", "tools"] = Field("tools", validation_alias=_alias("AI_AGENT_MODE"))
     ai_agent_max_steps: int = Field(5, validation_alias=_alias("AI_AGENT_MAX_STEPS"))

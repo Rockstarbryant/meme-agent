@@ -236,7 +236,7 @@ async def token_candles(
         svc = ChartService(st, codex_client=CodexClient(key, url=st.codex_url) if key else None)
         request.app.state.chart_service = svc
     out = await svc.candles(address.lower(), pool, tf, limit, history)
-    return {**out, "token": address.lower(), "pool": pool}
+    return {"token": address.lower(), **{**out, "pool": out.get("pool") or pool}}
 
 
 @router.get("/status")

@@ -520,6 +520,15 @@ class RunnerRuntime:
                 rpc, wallet_addr, base_url=settings.kyberswap_base_url, chain_slug=settings.kyberswap_chain_slug,
                 client_id=settings.kyberswap_client_id,
                 router_allowlist={a.strip().lower() for a in str(settings.kyberswap_router_allowlist).split(",") if a.strip()})
+        zk = getattr(settings, "zerox_api_key", None)
+        if "zerox" in wanted and wallet_addr:
+            if zk is None or not zk.get_secret_value():
+                log.warning("venue zerox requested but ARC_RUNNER_ZEROEX_API_KEY is not set")
+            else:
+                from app.venues.zerox import ZeroExVenue
+                venues["zerox"] = ZeroExVenue(
+                    rpc, wallet_addr, zk.get_secret_value(), base_url=settings.zerox_base_url,
+                    allowance_holder_allowlist={a.strip().lower() for a in str(settings.zerox_allowance_holder).split(",") if a.strip()})
         if not venues:
             return None
         return VenueRouter(venues, policy=VenuePolicy(max_total_cost_pct=float(getattr(settings, "max_total_cost_pct", 5.0)),
