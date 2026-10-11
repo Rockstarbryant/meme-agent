@@ -87,6 +87,137 @@ class TradingEngine:
         _, res = await self._finalize(rec)
         return res
 
+    async def test_buy(self, m: MarketState, amount_usdc: float, *, dry_run: bool = False,
+                       now: datetime | None = None) -> ExecutionResult | None:
+        """LIVE diagnostic buy that completely bypasses strategy scoring and the risk-engine veto.
+
+        Constructs a signed ApprovedTrade with assessment_id="TEST_BUY", then either:
+        - dry_run=True: only quotes + simulates via the executor and returns a synthetic result, or
+        - dry_run=False: calls executor.buy() for a real on-chain order.
+
+        Always publishes ORDER_* events and records audit rows so the outcome (including every
+        LiveSafetyError reason) is visible in Activity / Orders / audit logs. Use a tiny amount.
+        """
+        import hashlib
+        import uuid
+        from app.core.types import RiskDecision
+        from app.domain.trade import ApprovedTrade
+        from app.observability.audit import AuditKind, AuditStatus, record_event
+
+        now = now or utcnow()
+        if self.mode != TradingMode.LIVE:
+            log.warning("test_buy called while mode=%s; refusing", self.mode.value)
+            return None
+        decision_id = "test-" + uuid.uuid4().hex[:16]
+        cid = decision_id
+        # Generous slippage for a diagnostic trade; preflight still enforces wallet policy max.
+        slippage = 5.0
+        bucket = int(now.timestamp() // 60)
+        raw = f"TEST_BUY|{self.mode.value}|{m.key}|{amount_usdc}|{bucket}"
+        idem = hashlib.sha256(raw.encode()).hexdigest()[:32]
+        req = TradeRequest(
+            idempotency_key=idem,
+            mode=self.mode,
+            chain=m.chain,
+            token_address=m.token_address,
+            side=Side.BUY,
+            amount_usdc=float(amount_usdc),
+            max_slippage_pct=slippage,
+            reference_price=m.price,
+            reference_liquidity_usdc=m.liquidity,
+            launchpad=m.launchpad,
+            pool_address=m.pool_address,
+            decision_id=decision_id,
+            strategy_id="test_buy",
+            strategy_version=0,
+            reason="LIVE_TEST_BUY: diagnostic order bypassing strategy+risk",
+        )
+        # Special approval path (same crypto as exits) so the executor accepts it without a real risk assessment.
+        approved = ApprovedTrade(
+            request=req,
+            assessment_id="TEST_BUY",
+            decision=RiskDecision.APPROVE,
+            signature=self.approver._sig(req, "TEST_BUY"),
+            approved_at=now,
+        )
+        uid = self.scope if self.scope != "local" else ""
+        record_event(
+            AuditKind.EXECUTION, AuditStatus.OK, operation="test_buy_start", component="engine.test_buy",
+            token_key=m.key, decision_id=cid, user_id=uid,
+            detail={"amount_usdc": amount_usdc, "dry_run": dry_run, "token": m.token_address},
+        )
+        await self.bus.publish(E.DECISION_RECORDED, cid, action="BUY", reason="LIVE_TEST_BUY",
+                               token=m.key, mode=self.mode.value,
+                               decision={"final_action": "BUY", "final_reason": "LIVE_TEST_BUY", "sized_amount_usdc": amount_usdc})
+        if dry_run:
+            try:
+                sim = await self.executor.simulate(req)
+                status = OrderStatus.REJECTED if not sim.get("ok") else OrderStatus.FILLED
+                err = None if sim.get("ok") else f"SIMULATION_FAILED: {sim.get('detail')}"
+                res = ExecutionResult(
+                    order_id=f"test-dry-{uuid.uuid4().hex[:12]}",
+                    idempotency_key=idem,
+                    mode=self.mode,
+                    status=status,
+                    simulated=True,
+                    side=Side.BUY,
+                    token_address=m.token_address,
+                    label="LIVE_TEST_DRY",
+                    at=now,
+                    error=err,
+                    notional_usdc=amount_usdc,
+                )
+                record_event(
+                    AuditKind.EXECUTION,
+                    AuditStatus.OK if sim.get("ok") else AuditStatus.FAILED,
+                    operation="test_buy_dry_run", component="engine.test_buy",
+                    error=err, token_key=m.key, decision_id=cid, user_id=uid,
+                    detail=sim,
+                )
+                await self.bus.publish(E.ORDER_FILLED if status == OrderStatus.FILLED else E.ORDER_FAILED, cid,
+                                       order=res.model_dump(mode="json"))
+                return res
+            except Exception as exc:  # noqa: BLE001
+                err = f"DRY_RUN_ERROR: {type(exc).__name__}: {exc}"
+                record_event(AuditKind.EXECUTION, AuditStatus.FAILED, operation="test_buy_dry_run",
+                             component="engine.test_buy", error=err, token_key=m.key, decision_id=cid, user_id=uid)
+                await self.bus.publish(E.ORDER_FAILED, cid, error=err)
+                return None
+
+        # Real execution path — same as _enter but always returns the result and never silently drops it.
+        key, pend = req.idempotency_key, f"{req.chain}:{req.token_address.lower()}"
+        if not await self.idem.claim(key):
+            msg = "DUPLICATE_ORDER: an earlier test buy for this token in the same window still holds the claim"
+            await self.bus.publish(E.ORDER_FAILED, cid, error=msg, key=key)
+            record_event(AuditKind.EXECUTION, AuditStatus.SKIPPED, operation="test_buy_duplicate",
+                         component="engine.test_buy", error=msg, token_key=pend, decision_id=cid, user_id=uid)
+            return None
+        self.portfolio.pending_tokens.add(pend)
+        try:
+            await self.bus.publish(E.BUY_APPROVED, cid, amount_usdc=req.amount_usdc, mode=self.mode.value)
+            await self.bus.publish(E.ORDER_SUBMITTED, cid, key=key, mode=self.mode.value)
+            res = await self.executor.buy(approved)
+        except Exception as exc:  # noqa: BLE001
+            await self.idem.release(key)
+            err = f"{type(exc).__name__}: {exc}"
+            await self.bus.publish(E.AGENT_ERROR, cid, error=err)
+            record_event(AuditKind.EXECUTION, AuditStatus.FAILED, operation="test_buy", component="engine.test_buy",
+                         error=err, token_key=pend, decision_id=cid, user_id=uid)
+            return None
+        finally:
+            self.portfolio.pending_tokens.discard(pend)
+        await self._after_order(res, cid, opened=True)
+        # Extra explicit audit so the exact status/error is never lost even if event bus listeners lag.
+        record_event(
+            AuditKind.EXECUTION,
+            AuditStatus.OK if res.status in _DONE else AuditStatus.FAILED,
+            operation="test_buy_result", component="engine.test_buy",
+            error=res.error, token_key=pend, decision_id=cid, user_id=uid,
+            detail={"status": res.status.value if hasattr(res.status, "value") else str(res.status),
+                    "tx_hash": res.tx_hash, "order_id": res.order_id, "amount_usdc": amount_usdc},
+        )
+        return res
+
     async def _finalize(self, rec: DecisionRecord) -> tuple[DecisionRecord, ExecutionResult | None]:
         cid = rec.id
         await self.bus.publish(E.STRATEGY_SIGNAL_CREATED, cid, score=rec.signal.score, qualified=rec.signal.qualified,

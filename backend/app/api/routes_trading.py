@@ -18,6 +18,16 @@ class BuyAnywayIn(BaseModel):
     amount_usdc: float | None = None
 
 
+class TestBuyIn(BaseModel):
+    """Live test buy: places a real order for a discovered token, bypassing strategy + risk veto.
+    Still subject to LIVE preflight (balance, wallet policy, quote, simulation). For diagnosing
+    silent LIVE execution failures only."""
+    token_address: str
+    amount_usdc: float
+    # Optional: if true, only run quote + simulate and return the result without submitting
+    dry_run: bool = False
+
+
 async def _queue_command(db: AsyncSession, user_id: str, type_: str, payload: dict) -> M.RunnerCommand:
     """Mirrors app.api.routes_agent._queue: idempotent, don't double-queue the same command."""
     existing = (await db.execute(select(M.RunnerCommand).where(
@@ -386,3 +396,43 @@ async def activity(limit: int = Query(100, le=500), type: str | None = None, mod
 async def audit_logs(limit: int = Query(100, le=500), user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(M.AuditLog).where(M.AuditLog.user_id == user.id).order_by(M.AuditLog.at.desc()).limit(limit))).scalars().all()
     return [{"at": r.at, "actor": r.actor, "action": r.action, "detail": r.detail} for r in rows]
+
+
+@router.post("/test-buy")
+async def test_buy(body: TestBuyIn, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Queue a LIVE test buy for an already-discovered token.
+
+    This deliberately bypasses strategy scoring and the risk-engine veto so you can verify
+    that wallet signing, quote, simulation, submission and fill reconciliation work end-to-end.
+    The live executor preflight (balance, policy max trade/position, quote freshness, slippage,
+    simulation) still runs and will surface the exact rejection reason if anything is wrong.
+
+    Only available when the user's mode is LIVE. Use a tiny amount ($1–$5) for safety.
+    """
+    if user.mode != "LIVE":
+        raise HTTPException(409, "test-buy is only available in LIVE mode; switch mode first")
+    token = (body.token_address or "").strip().lower()
+    if not token or not token.startswith("0x") or len(token) < 10:
+        raise HTTPException(422, "token_address must be a valid 0x address")
+    if body.amount_usdc is None or body.amount_usdc <= 0:
+        raise HTTPException(422, "amount_usdc must be a positive number (e.g. 1.0 or 2.0)")
+    if body.amount_usdc > 50:
+        raise HTTPException(422, "test-buy is capped at $50 for safety; use a smaller amount")
+    payload = {
+        "token_address": token,
+        "amount_usdc": float(body.amount_usdc),
+        "dry_run": bool(body.dry_run),
+    }
+    cmd = await _queue_command(db, user.id, "TEST_BUY", payload)
+    await repo.audit(db, user.id, user.email, "TEST_BUY_REQUESTED",
+                     token=f"arc:{token}", detail={"amount_usdc": body.amount_usdc, "dry_run": body.dry_run})
+    await db.commit()
+    return {
+        "queued": True,
+        "command_id": cmd.id,
+        "note": (
+            "Your runner will place a real LIVE buy (or dry-run quote+simulate) for this token, "
+            "bypassing strategy and risk veto. Watch Activity / Orders for the full result and any "
+            "LiveSafetyError / EXECUTION_ERROR details. If nothing appears, check runner logs."
+        ),
+    }

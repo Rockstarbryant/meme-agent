@@ -781,6 +781,8 @@ class RunnerRuntime:
                     status, detail = await self._handle_withdraw(cmd.payload)
                 elif cmd.type == "FORCE_BUY":
                     status, detail = await self._handle_force_buy(cmd.payload)
+                elif cmd.type == "TEST_BUY":
+                    status, detail = await self._handle_test_buy(cmd.payload)
                 elif cmd.type == "RETRY_AI":
                     status, detail = await self._handle_retry_ai(cmd.payload)
                 else:
@@ -823,6 +825,58 @@ class RunnerRuntime:
             return "DONE", ("risk veto: " + (why or "see Activity for the reason") + ". The risk engine still vetoed this trade after re-checking "
                             "current market data; no order was placed")[:480]
         return "DONE", f"order status={getattr(res.status, 'value', res.status)}"
+
+    async def _handle_test_buy(self, payload: dict) -> tuple[str, str]:
+        """Diagnostic LIVE buy that bypasses strategy + risk veto entirely.
+
+        Used to verify that quote → simulate → sign → submit → fill works when
+        paper trading succeeds but normal LIVE path appears to fail silently.
+        Still subject to the live executor preflight (balance, wallet policy,
+        quote age/deviation, simulation). Every outcome is recorded with a full
+        error string so nothing is silent.
+        """
+        if self.engine is None or self.portfolio is None:
+            return "FAILED", "no active engine (LIVE blocked or not configured)"
+        if self.mode != TradingMode.LIVE:
+            return "FAILED", f"test-buy requires LIVE mode (current mode={getattr(self.mode, 'value', self.mode)})"
+        token_address = str(payload.get("token_address") or "").strip().lower()
+        if not token_address:
+            return "FAILED", "token_address missing from command payload"
+        try:
+            amount = float(payload.get("amount_usdc"))
+        except (TypeError, ValueError):
+            return "FAILED", "amount_usdc must be a number"
+        if amount <= 0:
+            return "FAILED", "amount_usdc must be positive"
+        dry_run = bool(payload.get("dry_run", False))
+        try:
+            m = await self.market_data.get_market_state(token_address)
+        except DataUnavailable as e:
+            return "FAILED", f"market data unavailable for {token_address}: {e}"
+        m = m.model_copy(update={"timestamp": self.clock()})
+        log = logging.getLogger("runner.test_buy")
+        log.info("TEST_BUY start token=%s amount=%.4f dry_run=%s", token_address, amount, dry_run)
+        try:
+            res = await self.engine.test_buy(m, amount, dry_run=dry_run, now=self.clock())
+        except Exception as e:  # noqa: BLE001
+            log.exception("TEST_BUY raised")
+            return "FAILED", f"test_buy exception: {type(e).__name__}: {e}"[:480]
+        if res is None:
+            return "DONE", ("test-buy produced no ExecutionResult (duplicate claim, mode mismatch, or "
+                            "unexpected early return). Check Activity / audit logs for TEST_BUY / "
+                            "LiveSafetyError details.")[:480]
+        status = getattr(res.status, "value", res.status)
+        err = (res.error or "")[:300]
+        tx = res.tx_hash or res.provider_tx_id or ""
+        detail = f"order status={status}"
+        if tx:
+            detail += f" tx={tx}"
+        if err:
+            detail += f" error={err}"
+        if dry_run:
+            detail = "DRY_RUN " + detail
+        log.info("TEST_BUY done %s", detail)
+        return "DONE", detail[:480]
 
     async def _handle_retry_ai(self, payload: dict) -> tuple[str, str]:
         """User pressed "Retry AI" on a scan whose AI step failed: fetch CURRENT data and evaluate the token again."""

@@ -41,6 +41,22 @@ export function interpretForceBuy(r: CommandResult): ForceBuyOutcome {
   return { kind: "failed", detail: d || "Unknown result from the runner." };
 }
 
+/** Interpret the runner's result text for a TEST_BUY command (diagnostic LIVE buy). */
+export function interpretTestBuy(r: CommandResult): ForceBuyOutcome {
+  if (r.timedOut && r.status === "PENDING") return { kind: "timeout" };
+  const d = r.detail ?? "";
+  if (r.status === "FAILED") return { kind: "failed", detail: d || "The runner could not run the test buy." };
+  const st = d.match(/order status=(\w+)/i)?.[1]?.toUpperCase();
+  if (st === "FILLED" || st === "PARTIALLY_FILLED") return { kind: "opened", detail: d.includes("DRY_RUN") ? "Dry-run simulation succeeded." : "Test buy filled." };
+  if (st === "SUBMITTED" || st === "PENDING_SIGNATURE") return { kind: "pending", detail: st === "PENDING_SIGNATURE" ? "Waiting for wallet signature." : "Test order submitted." };
+  if (st === "REJECTED" || st === "FAILED" || st === "TIMEOUT") {
+    const err = d.match(/error=(.+)$/i)?.[1]?.trim() || d;
+    return { kind: "failed", detail: err || `Order ${st.toLowerCase()}` };
+  }
+  if (st) return { kind: "failed", detail: `Order ${st.toLowerCase().replaceAll("_", " ")}. ${d}` };
+  return { kind: "failed", detail: d || "Unknown result from the runner." };
+}
+
 export type RetryOutcome = { kind: "done"; action: string; detail: string } | { kind: "failed"; detail: string } | { kind: "timeout" };
 export function interpretRetryAi(r: CommandResult): RetryOutcome {
   if (r.timedOut && r.status === "PENDING") return { kind: "timeout" };
