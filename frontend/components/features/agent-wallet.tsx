@@ -42,7 +42,10 @@ function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) 
 }
 
 const KIND_STYLE: Record<LedgerEntry["kind"], { label: string; variant: "success" | "warning" | "default" | "destructive" }> = {
-  BUY: { label: "Buy", variant: "default" }, SELL: { label: "Sell", variant: "success" }, WITHDRAWAL: { label: "Withdrawal", variant: "warning" }, EVENT: { label: "Event", variant: "default" },
+  BUY: { label: "Buy", variant: "success" },
+  SELL: { label: "Sell", variant: "destructive" },
+  WITHDRAWAL: { label: "Withdrawal", variant: "warning" },
+  EVENT: { label: "Event", variant: "default" },
 };
 
 export function LedgerList({ rows, mode }: { rows: LedgerEntry[]; mode?: HistoryMode }) {

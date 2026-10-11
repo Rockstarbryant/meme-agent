@@ -179,7 +179,7 @@ class ArcExecutionEngine(ExecutionAdapter):
         if req.side == Side.BUY:
             spent = fill.filled_quantity * fill.avg_price + fill.fee_usdc
             pos = self.portfolio.apply_buy(chain=req.chain, launchpad=req.launchpad, token=req.token_address,
-                                           symbol=None, qty=fill.filled_quantity, price=fill.avg_price, cost_usdc=spent,
+                                           symbol=req.token_symbol, qty=fill.filled_quantity, price=fill.avg_price, cost_usdc=spent,
                                            now=now, strategy_id=req.strategy_id, strategy_version=req.strategy_version,
                                            decision_id=req.decision_id)
             pid = pos.id

@@ -20,6 +20,7 @@ class TradeRequest(BaseModel):
     side: Side
     amount_usdc: float | None = None  # BUY notional
     quantity: float | None = None  # SELL token quantity
+    token_symbol: str | None = None  # display only; never used for execution
     max_slippage_pct: float
     reference_price: float | None = None
     # Pool liquidity (USDC) the decision was made on. The DEX quote does not report it, so the live pre-flight uses

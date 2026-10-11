@@ -305,10 +305,23 @@ async def wallet_ledger(request: Request, limit: int = 100, mode: str | None = N
     if ids:
         for did, sym in (await db.execute(select(M.Decision.id, M.Decision.symbol).where(M.Decision.id.in_(ids)))).all():
             names[did] = sym
+    # Fallback: resolve display name from open/closed positions by token address (covers test-buy decisions with no Decision.symbol).
+    token_addrs = {o.token_address.lower() for o in orders if o.token_address}
+    pos_names: dict[str, str] = {}
+    if token_addrs:
+        for addr, sym in (await db.execute(
+            select(M.Position.token_address, M.Position.symbol).where(
+                M.Position.user_id == user.id, M.Position.token_address.in_(list(token_addrs))
+            )
+        )).all():
+            if sym and addr:
+                pos_names[addr.lower()] = sym
     out: list[dict] = []
     for o in orders:
         notional = (o.filled_quantity or 0.0) * (o.avg_price or 0.0) if o.side == "SELL" else (o.requested_amount_usdc or 0.0)
-        out.append({"at": o.created_at, "kind": o.side, "title": f"{'Bought' if o.side == 'BUY' else 'Sold'} {names.get(o.decision_id) or o.token_address[:10]}",
+        label = (names.get(o.decision_id) or pos_names.get((o.token_address or "").lower())
+                 or (o.token_address[:10] if o.token_address else "token"))
+        out.append({"at": o.created_at, "kind": o.side, "title": f"{'Bought' if o.side == 'BUY' else 'Sold'} {label}",
                     "amount_usdc": -notional if o.side == "BUY" else notional, "status": o.status, "mode": o.mode, "simulated": o.simulated,
                     "tx_hash": o.tx_hash, "explorer_url": (None if o.simulated else link(o.tx_hash)), "detail": o.error, "token_address": o.token_address, "fee_usdc": o.fee_usdc})
     real = scope in ("LIVE", "ALL")     # withdrawals and wallet events only exist for real funds

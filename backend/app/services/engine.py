@@ -122,6 +122,7 @@ class TradingEngine:
             token_address=m.token_address,
             side=Side.BUY,
             amount_usdc=float(amount_usdc),
+            token_symbol=getattr(m, "symbol", None),
             max_slippage_pct=slippage,
             reference_price=m.price,
             reference_liquidity_usdc=m.liquidity,
