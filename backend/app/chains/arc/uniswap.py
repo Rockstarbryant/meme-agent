@@ -150,7 +150,8 @@ class UniswapArcAdapter:
                                    token_address=request.token_address, side=request.side,
                                    amount_usdc=request.amount_usdc or 0.0, min_out=quote.expected_out * (1 - request.max_slippage_pct / 100),
                                    slippage_pct=request.max_slippage_pct, deadline=deadline,
-                                   function_signature=sig, params=params)
+                                   function_signature=sig, params=params,
+                                   idempotency_key=request.idempotency_key)
 
     async def simulate(self, tx: UnsignedTransaction) -> SimulationResult:
         try:

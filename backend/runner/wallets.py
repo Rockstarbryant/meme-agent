@@ -479,7 +479,9 @@ class PrivyWalletProvider(WalletProvider):
                 "Privy execute",
                 "set ARC_RUNNER_PRIVY_ALLOW_EXECUTE=true only after reviewing policy and funding the wallet",
             )
-        idem = hashlib.sha256(f"{self.wallet_id}:{tx.idempotency_key}:{tx.to}:{tx.data}:{tx.value}".encode()).hexdigest()[:32]
+        # Prefer TradeRequest idempotency_key when the adapter stamped it on the tx; otherwise hash the call.
+        key_src = getattr(tx, "idempotency_key", None) or f"{tx.to}:{tx.data}:{tx.value}"
+        idem = hashlib.sha256(f"{self.wallet_id}:{key_src}".encode()).hexdigest()[:32]
         # Prefer full calldata path (Universal Router execute)
         body = await self.client.eth_send_transaction(
             self.wallet_id,

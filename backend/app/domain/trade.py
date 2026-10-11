@@ -86,6 +86,8 @@ class UnsignedTransaction(BaseModel):
     # Canonical call shape for providers that take an ABI call instead of raw calldata (e.g. Circle CLI `wallet execute`).
     function_signature: str | None = None   # e.g. "approve(address,uint256)"
     params: list[str] = Field(default_factory=list)
+    # Carried from TradeRequest so wallet providers (Privy) can form a stable privy-idempotency-key.
+    idempotency_key: str | None = None
 
 
 class ExecutionResult(BaseModel):

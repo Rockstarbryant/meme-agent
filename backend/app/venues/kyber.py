@@ -169,7 +169,8 @@ class KyberSwapVenue(Venue):
         return UnsignedTransaction(chain="arc", chain_id=5042, to=to, data=calldata, value=0, token_address=request.token_address,
                                    side=request.side, amount_usdc=request.amount_usdc or 0.0,
                                    min_out=quote.expected_out * (1 - request.max_slippage_pct / 100), slippage_pct=request.max_slippage_pct,
-                                   deadline=deadline, function_signature=None, params=[])
+                                   deadline=deadline, function_signature=None, params=[],
+                                   idempotency_key=request.idempotency_key)
 
     async def _post(self, path: str, payload: dict) -> dict:
         try:
