@@ -114,7 +114,7 @@ export function OpportunityCard({
           <Button size="sm" variant="outline" onClick={() => onBuyAnyway(o)}>Buy anyway</Button>
         )}
         {onTestBuy && (
-          <Button size="sm" variant="secondary" onClick={() => onTestBuy(o)} title="Admin-only: place a real LIVE test buy, bypassing strategy and risk">
+          <Button size="sm" variant="outline" onClick={() => onTestBuy(o)} title="Admin-only: place a real LIVE test buy, bypassing strategy and risk">
             Test buy
           </Button>
         )}
