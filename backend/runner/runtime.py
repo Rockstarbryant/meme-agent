@@ -836,9 +836,17 @@ class RunnerRuntime:
         error string so nothing is silent.
         """
         if self.engine is None or self.portfolio is None:
-            return "FAILED", "no active engine (LIVE blocked or not configured)"
-        if self.mode != TradingMode.LIVE:
-            return "FAILED", f"test-buy requires LIVE mode (current mode={getattr(self.mode, 'value', self.mode)})"
+            # Surface the LIVE readiness blockers so this is never silent.
+            reasons: list[str] = []
+            try:
+                live = await self.live_status(force=True)
+                reasons = list(live.reasons or [])
+            except Exception as e:  # noqa: BLE001
+                reasons = [f"live_status error: {type(e).__name__}: {e}"]
+            why = "; ".join(reasons) if reasons else "engine not built (LIVE blocked or not configured)"
+            return "FAILED", f"no active engine: {why}"[:480]
+        if self.mode_eff != TradingMode.LIVE:
+            return "FAILED", f"test-buy requires LIVE mode (current mode={getattr(self.mode_eff, 'value', self.mode_eff)})"
         token_address = str(payload.get("token_address") or "").strip().lower()
         if not token_address:
             return "FAILED", "token_address missing from command payload"
@@ -855,7 +863,7 @@ class RunnerRuntime:
             return "FAILED", f"market data unavailable for {token_address}: {e}"
         m = m.model_copy(update={"timestamp": self.clock()})
         log = logging.getLogger("runner.test_buy")
-        log.info("TEST_BUY start token=%s amount=%.4f dry_run=%s", token_address, amount, dry_run)
+        log.info("TEST_BUY start token=%s amount=%.4f dry_run=%s mode=%s", token_address, amount, dry_run, self.mode_eff)
         try:
             res = await self.engine.test_buy(m, amount, dry_run=dry_run, now=self.clock())
         except Exception as e:  # noqa: BLE001

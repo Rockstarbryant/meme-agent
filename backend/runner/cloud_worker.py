@@ -240,11 +240,15 @@ class CloudWorker:
             rt.apply_live_state(str(latest.get("desired_state") or bundle.desired_state), bool(latest.get("emergency_stop")))
             self._live[user_id] = rt   # from now on the heartbeat loop reports THIS runtime and applies live changes
 
+            # Always drain pending commands (TEST_BUY, FORCE_BUY, CLOSE_*, …) even when we skip the
+            # trade cycle. Otherwise admin diagnostic buys sit in the queue forever with no log line.
+            with contextlib.suppress(Exception):
+                await rt.drain_commands()
+
             if rt.engine is not None and rt.controls.global_pause and rt.portfolio is not None and rt.portfolio.open_count():
                 # Pause / Stop halt NEW entries only: open positions must keep their stop-loss / take-profit
                 # protection. (This branch used to return before monitoring, so paused accounts were unprotected.)
                 with contextlib.suppress(Exception):
-                    await rt.drain_commands()
                     await rt.monitor_once()
 
             if rt.engine is None or rt.controls.global_pause or rt.state == "LIVE_BLOCKED":

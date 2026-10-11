@@ -126,7 +126,9 @@ async def tool_get_trading_policy(ctx: ToolContext, args: dict) -> dict:
         "min_liquidity_usdc": getattr(L, "min_liquidity_usdc", None),
         "max_open_positions": getattr(L, "max_open_positions", None),
         "sizing": ctx.sizing or {},
-        "risk_flags": [{"code": f.code, "severity": str(getattr(f.severity, "value", f.severity))}
+        # RiskFlag fields are rule/category/severity/message (not "code")
+        "risk_flags": [{"code": f.rule, "severity": str(getattr(f.severity, "value", f.severity)),
+                        "message": getattr(f, "message", "")}
                        for f in (ctx.risk.flags or [])[:10]] if hasattr(ctx.risk, "flags") else [],
     }
     wp = ctx.wallet_policy
