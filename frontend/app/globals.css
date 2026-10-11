@@ -58,7 +58,12 @@
 * { border-color: hsl(var(--border)); }
 
 @layer base {
-  html { -webkit-text-size-adjust: 100%; scroll-padding-top: 6rem; }
+  html { -webkit-text-size-adjust: 100%; scroll-padding-top: 6rem; max-width: 100%; }
+  /* Mobile safety net: one over-wide element must never make the whole page scroll sideways.
+     `clip` (not `hidden`) keeps position: sticky working. Wrapping below is the real fix; this only guards the page. */
+  html, body { overflow-x: clip; }
+  /* Long unbroken values (comma lists, addresses, error codes) wrap instead of widening their card. */
+  main { overflow-wrap: anywhere; }
   body {
     @apply bg-background text-foreground antialiased;
     font-family: var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;

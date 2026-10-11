@@ -120,17 +120,35 @@ class ArcExecutionEngine(ExecutionAdapter):
                          detail={"side": req.side.value, "amount_usdc": req.amount_usdc,
                                  "failed_checks": getattr(exc, "failed_checks", None)})
             return self._res(req, OrderStatus.REJECTED, error=f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - e.g. the quote or wallet balance call failed: nothing was sent
+            return self._failed(req, "preflight", exc, OrderStatus.REJECTED)
         deadline = self._now() + timedelta(seconds=self.settings.tx_deadline_s)
+        step = "build"
         try:
             tx = await self.chain.build_swap_tx(quote, req, deadline)
+            step = "simulate"
             sim = await self.chain.simulate(tx)
             if not sim.ok:
+                record_event(AuditKind.EXECUTION, AuditStatus.FAILED, provider=quote.venue or req.venue or "", operation="simulate",
+                             component="execution.live", error=f"SIMULATION_FAILED: {sim.detail}", token_key=f"arc:{req.token_address.lower()}",
+                             decision_id=req.decision_id, user_id=self.audit_user_id)
                 return self._res(req, OrderStatus.REJECTED, error=f"SIMULATION_FAILED: {sim.detail}")
+            step = "claim"
             if not await self.idem.claim(f"live:{req.idempotency_key}"):
                 return self._res(req, OrderStatus.REJECTED, error="DUPLICATE_ORDER")
+            step = "submit"
             sub = await self.wallet.submit(tx, self._now(), expected_chain_id=self.chain.chain_id)
         except (PolicyViolationError, IntegrationNotVerified) as exc:
+            record_event(AuditKind.EXECUTION, AuditStatus.FAILED, provider=quote.venue or req.venue or "", operation=step,
+                         component="execution.live", error=f"{type(exc).__name__}: {exc}", token_key=f"arc:{req.token_address.lower()}",
+                         decision_id=req.decision_id, user_id=self.audit_user_id)
             return self._res(req, OrderStatus.REJECTED, error=f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - any other failure must still leave a visible order row, never a silent "approved, no order"
+            if step == "submit":
+                # The wallet provider may have accepted the transaction before the error: outcome unknown, never retried blindly.
+                return self._failed(req, step, exc, OrderStatus.TIMEOUT)
+            await self.idem.release(f"live:{req.idempotency_key}")
+            return self._failed(req, step, exc, OrderStatus.REJECTED)
         if sub.status == "PENDING_SIGNATURE":
             return self._res(req, OrderStatus.PENDING_SIGNATURE, signing_request_id=sub.signing_request_id,
                              requested_amount_usdc=req.amount_usdc)
@@ -147,6 +165,14 @@ class ArcExecutionEngine(ExecutionAdapter):
             return self._res(req, OrderStatus.FAILED, tx_hash=h, error="TX_REVERTED")
         fill = await self.chain.parse_fill(receipt, quote)  # verifies the ACTUAL outcome
         return self._finish(req, h, fill, quote)
+
+    def _failed(self, req: TradeRequest, step: str, exc: Exception, status: OrderStatus) -> ExecutionResult:
+        """An unexpected error during execution becomes a recorded order with its reason (and an audit row)."""
+        err = f"EXECUTION_ERROR[{step}] {type(exc).__name__}: {exc}"[:500]
+        record_event(AuditKind.EXECUTION, AuditStatus.FAILED, provider=req.venue or "", operation=step, component="execution.live",
+                     error=err, token_key=f"arc:{req.token_address.lower()}", decision_id=req.decision_id, user_id=self.audit_user_id,
+                     detail={"side": req.side.value, "amount_usdc": req.amount_usdc, "outcome": status.value})
+        return self._res(req, status, error=err)
 
     def _finish(self, req: TradeRequest, tx_hash: str, fill, quote: Quote) -> ExecutionResult:
         now = self._now()

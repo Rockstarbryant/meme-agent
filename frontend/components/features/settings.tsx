@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { breakable } from "@/lib/format";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
 import { SETTINGS_TABS, parseTab, type SettingsTab } from "@/lib/settings-tabs";
@@ -64,7 +65,7 @@ function General({ s }: { s: ServerSettings }) {
         {(pads.data?.launchpads ?? []).map((l) => (<div key={l.id} className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{l.name}</span>
           <span className="flex gap-1"><Badge variant={l.verified ? "success" : "warning"}>{l.verified ? "verified" : "unverified"}</Badge><Badge variant={l.enabled ? "success" : "default"}>{l.enabled ? "enabled" : "disabled"}</Badge></span></div>))}
         <p className="text-xs text-muted-foreground">{pads.data?.note}</p></CardContent></Card>
-      <Card><CardHeader><CardTitle>Market data</CardTitle></CardHeader><CardContent className="text-sm">{s.market_data}</CardContent></Card>
+      <Card><CardHeader><CardTitle>Market data</CardTitle></CardHeader><CardContent className="text-sm">{breakable(s.market_data)}</CardContent></Card>
     </div>
   );
 }

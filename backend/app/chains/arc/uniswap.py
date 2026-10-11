@@ -40,6 +40,7 @@ class UniswapArcAdapter:
     def __init__(self, api_key: str, rpc, wallet_address: str, base_url: str = "https://trade-api.gateway.uniswap.org/v1",
                  impact_unit: str = "percent"):
         self.impact_unit = impact_unit if impact_unit in ("percent", "fraction") else "percent"
+        self._quotes: dict[tuple[str, str], dict] = {}
         self.api_key, self.rpc, self.wallet_address, self.base_url = api_key, rpc, wallet_address, base_url.rstrip("/")
         self.http = httpx.AsyncClient(timeout=20.0, headers={
             "x-api-key": api_key,
@@ -116,14 +117,18 @@ class UniswapArcAdapter:
         # Keep Permit2 payload private to the adapter. If it exists, the Circle provider must
         # support the exact EIP-712 signing flow before a live transaction can be built.
         setattr(q, "_permit_data", None) if False else None
-        self._last_quote = body
+        # Keyed by token+side: several tokens are quoted concurrently (agent tools, venue router, other tenants), and a swap must
+        # ONLY ever be built from the quote of the token it is for.
+        self._quotes[(str(request.token_address).lower(), request.side.value)] = body
+        while len(self._quotes) > 200:
+            self._quotes.pop(next(iter(self._quotes)))
         return Quote(side=request.side, token_address=token, amount_in=amount_in_human, expected_out=expected_out,
                      price=price, price_impact_pct=impact, fee_usdc=0.0, router_address=router,
                      pool_liquidity_usdc=None, venue="uniswap", fee_pct=fee_pct, diagnostics=diag,
                      quoted_at=datetime.now(timezone.utc), expires_at=expires, source="uniswap-trading-api")
 
     async def build_swap_tx(self, quote: Quote, request: TradeRequest, deadline: datetime) -> UnsignedTransaction:
-        body = getattr(self, "_last_quote", None)
+        body = self._quotes.get((str(request.token_address).lower(), request.side.value))
         if not body or not body.get("quote"):
             raise DataUnavailable("no matching Uniswap quote is cached")
         # Permit2 is the supported Arc path. V2 does not silently downgrade to an unsafe

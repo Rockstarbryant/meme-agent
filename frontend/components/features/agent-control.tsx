@@ -13,7 +13,7 @@ import { useToast } from "@/components/toast";
 import { useApi } from "@/hooks/use-api";
 import { api, toApiError, type ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { ago, usd } from "@/lib/format";
+import { ago, breakable, usd } from "@/lib/format";
 import type { AgentStatus, WalletState } from "@/types/api";
 
 const LIVE_EVENTS = ["EMERGENCY_STOP_CHANGED", "POSITION_OPENED", "POSITION_CLOSED", "DECISION_RECORDED"];
@@ -104,11 +104,11 @@ export function AgentControl() {
           {s.state === "LIVE_BLOCKED" && <Alert variant="warning">LIVE was requested but your runner refused to trade LIVE (it never falls back to PAPER). See the reasons below.</Alert>}
           <p className="text-xs text-muted-foreground">Pause and Stop halt new entries only. Open positions stay protected by stop-loss, take-profit and trailing logic on your {cloud ? "cloud" : "local"} runner.</p>
           {error && !liveOpen && <ErrorState error={error} />}
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t pt-4 text-sm md:grid-cols-3">
+          <dl className="grid grid-cols-1 gap-x-4 gap-y-4 border-t pt-4 text-sm min-[420px]:grid-cols-2 md:grid-cols-3 [&>div]:min-w-0">
             <div><dt className="text-xs text-muted-foreground">Strategy in use</dt><dd>{s.strategy.id.replaceAll("_", " ")}{s.strategy.version ? ` v${s.strategy.version}` : ""}
               {(s.strategy.enabled ?? []).length > 1 && <span className="block text-xs text-muted-foreground">enabled: {s.strategy.enabled!.join(", ")}</span>}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Data source</dt><dd>{s.data_source}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Data status</dt><dd>{s.data_status}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Data source</dt><dd>{breakable(s.data_source)}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Data status</dt><dd>{breakable(s.data_status)}</dd></div>
             <div><dt className="text-xs text-muted-foreground">AI</dt><dd>{s.ai.mode}{s.ai.provider ? ` (${s.ai.provider} / ${s.ai.model})` : ""}{aiChain && <span className="block text-xs text-muted-foreground">fallback order: {aiChain}</span>}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Last activity</dt><dd>{ago(s.last_activity_at)}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Open positions</dt><dd>{s.open_positions}</dd></div>

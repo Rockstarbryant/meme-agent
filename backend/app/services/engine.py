@@ -110,12 +110,20 @@ class TradingEngine:
         assert approved is not None
         req, cid = approved.request, rec.id
         key, pend = req.idempotency_key, f"{req.chain}:{req.token_address.lower()}"
+        from app.observability.audit import AuditKind, AuditStatus, record_event
+        uid = self.scope if self.scope != "local" else ""
         until = _ENTRY_BLOCK_UNTIL.get(f"{self.scope}|{pend}")
         if until is not None and utcnow() < until:
-            await self.bus.publish(E.BUY_REJECTED, cid, reason=f"ENTRY_COOLDOWN_AFTER_LIVE_REJECTION until {until:%H:%M:%S}")
+            msg = f"ENTRY_COOLDOWN_AFTER_LIVE_REJECTION until {until:%H:%M:%S}"
+            await self.bus.publish(E.BUY_REJECTED, cid, reason=msg)
+            record_event(AuditKind.EXECUTION, AuditStatus.SKIPPED, operation="entry_cooldown", component="engine.enter", error=msg,
+                         token_key=pend, decision_id=cid, user_id=uid)
             return None
         if not await self.idem.claim(key):
             await self.bus.publish(E.ORDER_FAILED, cid, error="DUPLICATE_ORDER", key=key)
+            record_event(AuditKind.EXECUTION, AuditStatus.SKIPPED, operation="duplicate_order", component="engine.enter",
+                         error="DUPLICATE_ORDER: an earlier attempt for this token in the same entry window still holds the claim",
+                         token_key=pend, decision_id=cid, user_id=uid, detail={"key": key})
             return None
         self.portfolio.pending_tokens.add(pend)
         try:
@@ -125,6 +133,8 @@ class TradingEngine:
         except Exception as exc:  # noqa: BLE001
             await self.idem.release(key)
             await self.bus.publish(E.AGENT_ERROR, cid, error=f"{type(exc).__name__}: {exc}")
+            record_event(AuditKind.EXECUTION, AuditStatus.FAILED, operation="enter", component="engine.enter",
+                         error=f"{type(exc).__name__}: {exc}", token_key=pend, decision_id=cid, user_id=uid)
             return None
         finally:
             self.portfolio.pending_tokens.discard(pend)

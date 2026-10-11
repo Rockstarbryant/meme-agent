@@ -6,12 +6,26 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { HoldersCard, MarketWindowsCard } from "@/components/market-windows";
 import { AiCard } from "@/components/features/ai-card";
 import { useApi } from "@/hooks/use-api";
-import { compact, num, price, usd } from "@/lib/format";
+import { compact, num, price, usd, breakable } from "@/lib/format";
 import type { DecisionDetail as DD } from "@/types/api";
 
 const SEV = { VETO: "destructive", WARN: "warning", INFO: "default" } as const;
 
 /** "Why did the agent buy (or not buy) this token?" rebuilt from the audit trail. */
+type Ev = { at: string; type: string; payload: Record<string, unknown> };
+/** The human-readable reason carried by a failure-type event (rejected buy, failed order, agent error). */
+function eventReason(e: Ev): string | null {
+  if (!["BUY_REJECTED", "ORDER_FAILED", "AGENT_ERROR"].includes(e.type)) return null;
+  const p = e.payload ?? {};
+  const order = p.order as { error?: string | null; status?: string } | undefined;
+  const v = (p.reason ?? p.error ?? order?.error) as unknown;
+  return typeof v === "string" && v ? v : null;
+}
+function failureReason(events: Ev[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) { const r = eventReason(events[i]); if (r) return `${events[i].type.replaceAll("_", " ").toLowerCase()}: ${r}`; }
+  return null;
+}
+
 export function DecisionDetail({ decisionId }: { decisionId: string }) {
   const res = useApi<DD>(`/decisions/${decisionId}`);
   if (res.loading && !res.data) return <Loading />;
@@ -59,11 +73,13 @@ export function DecisionDetail({ decisionId }: { decisionId: string }) {
       <AiCard d={d} onRetried={() => res.reload()} />
       <Card><CardHeader><CardTitle>5. Sizing and execution</CardTitle></CardHeader><CardContent className="space-y-2 text-sm">
         <p>Approved size: {usd(d.sized_amount_usdc)}</p>
-        {d.execution.length === 0 && <p className="text-muted-foreground">No order was placed.</p>}
-        {d.execution.map((e) => <div key={e.order_id} className="flex flex-wrap items-center gap-2"><SimulatedLabel simulated={e.simulated} /><span>{e.status}</span><span>fill {price(e.avg_price)}</span><span>fee {usd(e.fee_usdc)}</span>
-          {e.tx_hash ? <code className="text-xs">{e.tx_hash}</code> : <span className="text-xs text-muted-foreground">no blockchain transaction</span>}</div>)}
+        {d.execution.length === 0 && <div className="space-y-1"><p className="text-muted-foreground">No order was placed.</p>
+          {failureReason(d.events) && <p className="rounded-md border border-l-[3px] border-l-destructive p-2.5 text-xs">Why: {breakable(failureReason(d.events)!)}</p>}</div>}
+        {d.execution.map((e) => <div key={e.order_id} className="space-y-1"><div className="flex flex-wrap items-center gap-2"><SimulatedLabel simulated={e.simulated} /><span>{e.status}</span><span>fill {price(e.avg_price)}</span><span>fee {usd(e.fee_usdc)}</span>
+          {e.tx_hash ? <code className="text-xs">{e.tx_hash}</code> : <span className="text-xs text-muted-foreground">no blockchain transaction</span>}</div>
+          {e.error && <p className="rounded-md border border-l-[3px] border-l-destructive p-2.5 text-xs">Reason: {breakable(e.error)}</p>}</div>)}
         {d.positions.map((p) => <p key={p.id}>Position {p.status}: P&L {usd(p.realized_pnl_usdc + p.unrealized_pnl_usdc)}{p.exit_reason ? ` · exit ${p.exit_reason}` : ""}</p>)}</CardContent></Card>
-      <Card><CardHeader><CardTitle>6. Timeline</CardTitle></CardHeader><CardContent><ol className="space-y-1 text-xs">{d.events.map((e, i) => <li key={i}><span className="text-muted-foreground">{new Date(e.at).toLocaleTimeString()}</span> {e.type}</li>)}</ol></CardContent></Card>
+      <Card><CardHeader><CardTitle>6. Timeline</CardTitle></CardHeader><CardContent><ol className="space-y-1 text-xs">{d.events.map((e, i) => { const why = eventReason(e); return <li key={i}><span className="text-muted-foreground">{new Date(e.at).toLocaleTimeString()}</span> {e.type}{why && <span className="block pl-2 text-destructive">{breakable(why)}</span>}</li>; })}</ol></CardContent></Card>
     </div>
   );
 }

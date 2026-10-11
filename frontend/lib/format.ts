@@ -31,3 +31,6 @@ export function ago(iso: string | null | undefined, now: number = Date.now()): s
 }
 export const pnlClass = (n: number | null | undefined) =>
   n == null || n === 0 ? "text-muted-foreground" : n > 0 ? "text-success" : "text-destructive";
+
+/** Lets a comma/pipe/slash separated value wrap at its separators (zero-width space after each) instead of overflowing on a phone. */
+export const breakable = (v: string | null | undefined) => (v ?? "").replace(/([,|/])(?=\S)/g, "$1\u200b");
