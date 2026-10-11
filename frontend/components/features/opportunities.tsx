@@ -7,9 +7,11 @@ import { useToast } from "@/components/toast";
 import { Empty, ErrorState, Loading } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { useApi } from "@/hooks/use-api";
+import { useAuth } from "@/lib/auth";
 import { api, toApiError, type ApiError } from "@/lib/api";
-import { interpretForceBuy, waitForCommand } from "@/lib/commands";
+import { interpretForceBuy, interpretTestBuy, waitForCommand } from "@/lib/commands";
 import { ago, compact, duration, num, plainPct, price, shortAddr } from "@/lib/format";
 import type { Action, Opportunity } from "@/types/api";
 
@@ -53,11 +55,26 @@ function matchesCategory(o: Opportunity, cat: Category): boolean {
   }
 }
 
+/** token_key is typically "arc:0x…"; test-buy API wants the bare 0x address. */
+function tokenAddressFromKey(tokenKey: string): string {
+  const parts = tokenKey.split(":");
+  const addr = (parts.length > 1 ? parts[parts.length - 1] : tokenKey).trim().toLowerCase();
+  return addr.startsWith("0x") ? addr : tokenKey;
+}
+
 const Cell = ({ label, value, title }: { label: string; value: React.ReactNode; title?: string }) => (
   <div title={title}><dt className="text-[11px] tracking-[0.03em] text-muted-foreground">{label}</dt><dd className="mt-0.5 text-sm tabular-nums">{value}</dd></div>
 );
 
-export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnyway?: (o: Opportunity) => void }) {
+export function OpportunityCard({
+  o,
+  onBuyAnyway,
+  onTestBuy,
+}: {
+  o: Opportunity;
+  onBuyAnyway?: (o: Opportunity) => void;
+  onTestBuy?: (o: Opportunity) => void;
+}) {
   const creator = o.creator_known ? (o.creator_sold_pct != null ? `sold ${plainPct(o.creator_sold_pct)}` : "known") : "unverified";
   const launchpad = o.launchpad ?? o.launchpad_detected;
   const launchpadTitle = !o.launchpad && o.launchpad_detected
@@ -92,21 +109,33 @@ export function OpportunityCard({ o, onBuyAnyway }: { o: Opportunity; onBuyAnywa
       {o.enrichment_gaps.length > 0 && (
         <p className="text-[11px] text-muted-foreground">Not enriched: {o.enrichment_gaps.slice(0, 3).join("; ")}{o.enrichment_gaps.length > 3 ? "…" : ""}</p>
       )}
-      {o.final_action === "WATCH" && onBuyAnyway && (
-        <Button size="sm" variant="outline" onClick={() => onBuyAnyway(o)}>Buy anyway</Button>
-      )}
+      <div className="flex flex-wrap gap-2">
+        {o.final_action === "WATCH" && onBuyAnyway && (
+          <Button size="sm" variant="outline" onClick={() => onBuyAnyway(o)}>Buy anyway</Button>
+        )}
+        {onTestBuy && (
+          <Button size="sm" variant="secondary" onClick={() => onTestBuy(o)} title="Admin-only: place a real LIVE test buy, bypassing strategy and risk">
+            Test buy
+          </Button>
+        )}
+      </div>
     </CardContent></Card>
   );
 }
 
 export function Opportunities() {
+  const { user } = useAuth();
   const res = useApi<Opportunity[]>("/opportunities?limit=100", { refreshOn: ["DECISION_RECORDED"] });
   const [filter, setFilter] = useState<Action | "ALL">("ALL");
   const [category, setCategory] = useState<Category>("ALL");
   const [target, setTarget] = useState<Opportunity | null>(null);
+  const [testTarget, setTestTarget] = useState<Opportunity | null>(null);
+  const [testAmount, setTestAmount] = useState("1");
+  const [testDryRun, setTestDryRun] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const { toast, suppressAuto } = useToast();
+  const isAdmin = Boolean(user?.is_admin);
   const rows = useMemo(() => {
     if (!res.data) return [];
     const filtered = res.data.filter((o) => (filter === "ALL" || o.final_action === filter) && matchesCategory(o, category));
@@ -116,6 +145,7 @@ export function Opportunities() {
   }, [res.data, filter, category]);
   if (res.loading && !res.data) return <Loading />;
   if (!res.data) return res.error ? <ErrorState error={res.error} onRetry={() => void res.reload()} /> : null;
+
   async function confirmBuy() {
     if (!target) return;
     const name = target.token_name ?? target.symbol ?? shortAddr(target.token_key);
@@ -140,6 +170,73 @@ export function Opportunities() {
     suppressAuto(4_000);
     void res.reload();
   }
+
+  async function confirmTestBuy() {
+    if (!testTarget) return;
+    const name = testTarget.token_name ?? testTarget.symbol ?? shortAddr(testTarget.token_key);
+    const amount = parseFloat(testAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError({ status: 422, message: "Enter a positive amount in USDC (e.g. 1 or 2)." } as ApiError);
+      return;
+    }
+    setBusy(true); setError(null);
+    let queued: { command_id: string } | null = null;
+    try {
+      queued = await api<{ command_id: string; note: string }>("/test-buy", {
+        method: "POST",
+        body: {
+          token_address: tokenAddressFromKey(testTarget.token_key),
+          amount_usdc: amount,
+          dry_run: testDryRun,
+        },
+      });
+    } catch (e) {
+      setError(toApiError(e));
+      setBusy(false);
+      return;
+    }
+    setTestTarget(null);
+    setBusy(false);
+    const id = `test-buy-${queued.command_id}`;
+    suppressAuto(120_000);
+    toast({
+      id,
+      kind: "loading",
+      title: testDryRun ? `Dry-run test for ${name}` : `Test buy queued for ${name}`,
+      description: testDryRun ? "Running quote + simulate…" : `Placing real $${amount} LIVE order (bypasses strategy & risk)…`,
+    });
+    const outcome = interpretTestBuy(await waitForCommand(queued.command_id));
+    switch (outcome.kind) {
+      case "opened":
+        toast({
+          id,
+          kind: "success",
+          title: testDryRun ? `Dry-run OK: ${name}` : `Test buy filled: ${name}`,
+          description: outcome.detail,
+          href: "/positions",
+          linkLabel: "View positions",
+        });
+        break;
+      case "pending":
+        toast({ id, kind: "info", title: `Test order submitted: ${name}`, description: outcome.detail, href: "/positions", linkLabel: "Positions" });
+        break;
+      case "failed":
+        toast({ id, kind: "error", title: `Test buy failed: ${name}`, description: outcome.detail });
+        break;
+      default:
+        toast({
+          id,
+          kind: "warning",
+          title: "Still waiting for your runner",
+          description: "The runner has not answered yet. Check the Agent page; the result will also appear in Activity.",
+          href: "/agent",
+          linkLabel: "Agent",
+        });
+    }
+    suppressAuto(4_000);
+    void res.reload();
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by action">
@@ -152,11 +249,61 @@ export function Opportunities() {
         ))}
       </div>
       {error && <ErrorState error={error} />}
-      {rows.length === 0 ? <Empty>No opportunities match. Start the agent from the Agent page; tokens appear here as they are evaluated.</Empty> : rows.map((o) => <OpportunityCard key={o.decision_id} o={o} onBuyAnyway={setTarget} />)}
+      {rows.length === 0 ? <Empty>No opportunities match. Start the agent from the Agent page; tokens appear here as they are evaluated.</Empty> : rows.map((o) => (
+        <OpportunityCard
+          key={o.decision_id}
+          o={o}
+          onBuyAnyway={setTarget}
+          onTestBuy={isAdmin ? setTestTarget : undefined}
+        />
+      ))}
       <ConfirmDialog open={target !== null} onOpenChange={(op) => { if (!op) setTarget(null); }} busy={busy} destructive
         title="Buy this token anyway?"
         description="Your strategy/AI did not qualify this token — this skips that opinion, but your Agent still re-checks live risk limits (liquidity, contract safety, exposure) right before buying, using fresh market data. It can still refuse the trade."
         confirmLabel="Buy anyway" onConfirm={confirmBuy} />
+      <ConfirmDialog
+        open={testTarget !== null}
+        onOpenChange={(op) => { if (!op) setTestTarget(null); }}
+        busy={busy}
+        destructive={!testDryRun}
+        title="Admin test buy"
+        description={
+          testDryRun
+            ? "Dry-run only: quote + simulate, no on-chain order. Still requires LIVE mode and a running runner."
+            : "Places a real LIVE order for this token. Bypasses strategy scoring and risk veto. Live preflight (balance, policy, quote, simulation) still applies. Use a tiny amount."
+        }
+        confirmLabel={testDryRun ? "Run dry-run" : "Place real test buy"}
+        onConfirm={confirmTestBuy}
+        extra={
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-sm text-muted-foreground" htmlFor="test-buy-amount">Amount (USDC)</label>
+              <Input
+                id="test-buy-amount"
+                type="number"
+                min={0.1}
+                max={50}
+                step={0.1}
+                value={testAmount}
+                onChange={(e) => setTestAmount(e.target.value)}
+                className="max-w-[140px]"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={testDryRun}
+                onChange={(e) => setTestDryRun(e.target.checked)}
+                className="rounded border"
+              />
+              Dry-run only (quote + simulate, no spend)
+            </label>
+            {user?.mode !== "LIVE" && (
+              <p className="text-xs text-destructive">Your account is not in LIVE mode. Switch to LIVE on the Agent page first.</p>
+            )}
+          </div>
+        }
+      />
     </div>
   );
 }

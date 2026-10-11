@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import C, current_user, get_db
+from app.api.deps import C, current_user, get_db, require_admin
 from app.db import models as M
 from app.db import repo
 
@@ -399,8 +399,8 @@ async def audit_logs(limit: int = Query(100, le=500), user: M.User = Depends(cur
 
 
 @router.post("/test-buy")
-async def test_buy(body: TestBuyIn, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    """Queue a LIVE test buy for an already-discovered token.
+async def test_buy(body: TestBuyIn, user: M.User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Queue a LIVE test buy for an already-discovered token. **Admin only.**
 
     This deliberately bypasses strategy scoring and the risk-engine veto so you can verify
     that wallet signing, quote, simulation, submission and fill reconciliation work end-to-end.
