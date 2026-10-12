@@ -125,25 +125,47 @@ class ArcExecutionEngine(ExecutionAdapter):
         deadline = self._now() + timedelta(seconds=self.settings.tx_deadline_s)
         step = "build"
         try:
-            try:
-                tx = await self.chain.build_swap_tx(quote, req, deadline)
-            except IntegrationNotVerified as build_exc:
-                # Uniswap proxy-approval flow (x-permit2-disabled): one-time approve(token → proxy).
-                msg = str(build_exc)
-                if "NEEDS_PROXY_APPROVE" not in msg and "NEEDS_PERMIT2_APPROVE" not in msg:
-                    raise
-                step = "approve_proxy"
-                # Message format: NEEDS_PROXY_APPROVE:0x…: … — extract spender when present.
-                spender = None
-                for part in msg.replace(" ", "").split(":"):
-                    if part.startswith("0x") and len(part) == 42:
-                        spender = part
-                        break
-                await self._approve_token_to_uniswap_proxy(req, spender=spender)
-                # Re-quote after approve so the cached Uniswap body is fresh, then rebuild.
-                quote, _ = await self._preflight(approved)
-                step = "build"
-                tx = await self.chain.build_swap_tx(quote, req, deadline)
+            import asyncio
+            import logging
+            log = logging.getLogger(__name__)
+            tx = None
+            last_build_err: Exception | None = None
+            # Up to 2 attempts: build → if missing proxy allowance, approve → re-quote → rebuild.
+            for attempt in range(2):
+                try:
+                    tx = await self.chain.build_swap_tx(quote, req, deadline)
+                    last_build_err = None
+                    break
+                except IntegrationNotVerified as build_exc:
+                    last_build_err = build_exc
+                    msg = str(build_exc)
+                    if "NEEDS_PROXY_APPROVE" not in msg and "NEEDS_PERMIT2_APPROVE" not in msg:
+                        raise
+                    if attempt >= 1:
+                        raise IntegrationNotVerified(
+                            "Uniswap proxy allowance",
+                            f"still missing after approve+retry: {msg}",
+                        ) from build_exc
+                    step = "approve_proxy"
+                    spender = None
+                    for part in msg.replace(" ", "").split(":"):
+                        if part.startswith("0x") and len(part) == 42:
+                            spender = part
+                            break
+                    log.info(
+                        "live: NEEDS_PROXY_APPROVE attempt=%s side=%s token=%s spender=%s",
+                        attempt, req.side.value, req.token_address, spender,
+                    )
+                    await self._approve_token_to_uniswap_proxy(req, spender=spender)
+                    # Let the RPC observe the new allowance before rebuild.
+                    await asyncio.sleep(1.5)
+                    quote, _ = await self._preflight(approved)
+                    step = "build"
+                    deadline = self._now() + timedelta(seconds=self.settings.tx_deadline_s)
+            if tx is None:
+                raise last_build_err or IntegrationNotVerified(
+                    "Uniswap swap", "build_swap_tx returned no transaction",
+                )
             step = "simulate"
             sim = await self.chain.simulate(tx)
             if not sim.ok:
