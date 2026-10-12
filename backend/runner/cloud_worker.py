@@ -200,6 +200,43 @@ class CloudWorker:
             max_per_cycle=int(self.s.eval_max_per_cycle),
         )
 
+    def _promote_held_tokens_hot(self, rt: "RunnerRuntime") -> None:
+        """Mark tokens with open positions as HOT so global monitoring refreshes them often.
+
+        Without this, a force-bought or thin token can sit on COLD (10+ min) and the token page
+        keeps showing "Scanned Nh ago" even while the position is open.
+        """
+        pipe = self._pipeline
+        if pipe is None or getattr(pipe, "registry", None) is None:
+            return
+        if rt.portfolio is None:
+            return
+        try:
+            from app.core.clock import utcnow
+            now = utcnow()
+            for pos in rt.portfolio.open_positions():
+                addr = (pos.token_address or "").lower()
+                if not addr:
+                    continue
+                chain = (getattr(pos, "chain", None) or "arc").lower()
+                tok = None
+                try:
+                    tok = pipe.registry.get(chain, addr)
+                except TypeError:
+                    # Older registry signatures accepted a single key.
+                    tok = pipe.registry.get(f"{chain}:{addr}") if hasattr(pipe.registry, "get") else None
+                if tok is None:
+                    continue
+                if getattr(tok, "priority", None) != "HOT":
+                    tok.priority = "HOT"
+                # Touch last_monitored only when we have a marked price this cycle — actual
+                # snapshot refresh is done by GlobalMonitoringService / monitor_positions.
+                if getattr(pos, "last_price", None) and pos.last_price > 0:
+                    tok.last_monitored_at = now
+                pipe.registry.upsert(tok)
+        except Exception:  # noqa: BLE001
+            log.exception("promote held tokens HOT failed")
+
     def _global_candidate_addresses(self, user_id: str) -> list[str]:
         """Pick which registry tokens to evaluate this cycle for one tenant.
 
@@ -248,6 +285,12 @@ class CloudWorker:
             if rt.engine is not None and rt.controls.global_pause and rt.portfolio is not None and rt.portfolio.open_count():
                 # Pause / Stop halt NEW entries only: open positions must keep their stop-loss / take-profit
                 # protection. (This branch used to return before monitoring, so paused accounts were unprotected.)
+                pipe = self._pipeline
+                if pipe is not None and getattr(pipe, "market_data", None) is not None:
+                    with contextlib.suppress(Exception):
+                        rt.use_shared_market_data(pipe.market_data)
+                with contextlib.suppress(Exception):
+                    self._promote_held_tokens_hot(rt)
                 with contextlib.suppress(Exception):
                     await rt.monitor_once()
 
@@ -277,6 +320,14 @@ class CloudWorker:
             evaluated = 0
             try:
                 await rt.drain_commands()
+                # Attach shared market-data BEFORE any position monitor so open positions
+                # are marked with live prices (not the empty per-tenant provider cache).
+                pipe = self._pipeline
+                if pipe is not None and getattr(pipe, "market_data", None) is not None:
+                    rt.use_shared_market_data(pipe.market_data)   # never closed by rt.aclose()
+                # Keep held tokens on the HOT monitoring track so global monitoring
+                # refreshes their snapshots (token page "Scanned") frequently.
+                self._promote_held_tokens_hot(rt)
                 await rt.monitor_once()
                 addrs = self._global_candidate_addresses(user_id)
                 if not addrs:
@@ -287,11 +338,6 @@ class CloudWorker:
                         len(list(self._pipeline.registry.all())) if self._pipeline is not None else 0,
                     )
                 else:
-                    # Share the global market-data stack (same cache as discovery/monitoring) for BOTH evaluation
-                    # and open-position monitoring; the per-cycle runtime's own providers have an empty cache.
-                    pipe = self._pipeline
-                    if pipe is not None and getattr(pipe, "market_data", None) is not None:
-                        rt.use_shared_market_data(pipe.market_data)   # never closed by rt.aclose()
                     # Persist the evaluation throttle across cycles (see _eval_at above).
                     rt._evaluated = self._eval_at.setdefault(user_id, {})
                     state_fn = None
@@ -304,6 +350,7 @@ class CloudWorker:
                     )
                 await rt.drain_commands()
                 await rt.monitor_once()
+                self._promote_held_tokens_hot(rt)
             finally:
                 pass
             await rt.heartbeat_once()

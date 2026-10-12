@@ -298,10 +298,18 @@ class TradingEngine:
             try:
                 m = await self.market_data.get_market_state(pos.token_address)
             except DataUnavailable as exc:
+                log.warning("monitor: price unavailable position=%s token=%s err=%s",
+                            pos.id, pos.token_address, exc)
                 await self.bus.publish(E.RISK_ALERT, pos.id, kind="PRICE_UNAVAILABLE", error=str(exc))
                 continue
             if m.price and m.price > 0:
+                prev = pos.last_price
                 self.portfolio.mark(pos.id, m.price, now)
+                if prev and abs(m.price - prev) / max(prev, 1e-18) > 0.001:
+                    log.info("monitor: marked position=%s token=%s price=%.8g (was %.8g)",
+                             pos.id, pos.token_address, m.price, prev)
+            else:
+                log.warning("monitor: zero/missing price position=%s token=%s", pos.id, pos.token_address)
             decisions = self.exit_manager_for(pos.strategy_id).evaluate(
                 pos, now, m, manual_close=pos.id in (manual_close or set()), emergency=emergency_close)
             for d in decisions:
