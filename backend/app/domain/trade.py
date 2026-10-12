@@ -89,6 +89,8 @@ class UnsignedTransaction(BaseModel):
     params: list[str] = Field(default_factory=list)
     # Carried from TradeRequest so wallet providers (Privy) can form a stable privy-idempotency-key.
     idempotency_key: str | None = None
+    # "erc20_approve" allows PolicyValidator to accept txs to a token contract (not only routers).
+    purpose: str | None = None
 
 
 class ExecutionResult(BaseModel):

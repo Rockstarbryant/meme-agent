@@ -125,7 +125,18 @@ class ArcExecutionEngine(ExecutionAdapter):
         deadline = self._now() + timedelta(seconds=self.settings.tx_deadline_s)
         step = "build"
         try:
-            tx = await self.chain.build_swap_tx(quote, req, deadline)
+            try:
+                tx = await self.chain.build_swap_tx(quote, req, deadline)
+            except IntegrationNotVerified as build_exc:
+                # SELL of an ERC-20 via Uniswap often needs a one-time approve(token → Permit2).
+                if "NEEDS_PERMIT2_APPROVE" not in str(build_exc) and "Permit2" not in str(build_exc):
+                    raise
+                step = "approve_permit2"
+                await self._approve_token_to_permit2(req)
+                # Re-quote after approve so the cached Uniswap body is fresh, then rebuild.
+                quote, _ = await self._preflight(approved)
+                step = "build"
+                tx = await self.chain.build_swap_tx(quote, req, deadline)
             step = "simulate"
             sim = await self.chain.simulate(tx)
             if not sim.ok:
@@ -165,6 +176,65 @@ class ArcExecutionEngine(ExecutionAdapter):
             return self._res(req, OrderStatus.FAILED, tx_hash=h, error="TX_REVERTED")
         fill = await self.chain.parse_fill(receipt, quote)  # verifies the ACTUAL outcome
         return self._finish(req, h, fill, quote)
+
+    async def _approve_token_to_permit2(self, req: TradeRequest) -> None:
+        """One-time ERC-20 approve(token → Uniswap Permit2) so sells can run without EIP-712 permit signing.
+
+        Privy only supports eth_sendTransaction; Uniswap Trading API often returns permitData for
+        sells. Approving max uint256 to Permit2 lets the subsequent /swap calldata pull tokens.
+        """
+        import logging
+        from datetime import datetime, timezone
+
+        from app.chains.arc.deployments import ARC_PERMIT2
+        from app.domain.trade import UnsignedTransaction
+
+        log = logging.getLogger(__name__)
+        token = req.token_address.lower()
+        # approve(address,uint256) — spender = Permit2, amount = max uint256
+        spender = ARC_PERMIT2.lower().removeprefix("0x").rjust(64, "0")
+        amount = "f" * 64  # type(uint256).max
+        data = "0x095ea7b3" + spender + amount
+        now = datetime.now(timezone.utc)
+        tx = UnsignedTransaction(
+            chain=req.chain or "arc",
+            chain_id=getattr(self.chain, "chain_id", 5042),
+            to=token,
+            data=data,
+            value=0,
+            token_address=token,
+            side=req.side,
+            amount_usdc=0.0,
+            min_out=0.0,
+            slippage_pct=req.max_slippage_pct,
+            deadline=now + timedelta(seconds=self.settings.tx_deadline_s),
+            built_by="deterministic-adapter",
+            function_signature="approve(address,uint256)",
+            params=[ARC_PERMIT2, str(2**256 - 1)],
+            idempotency_key=f"approve-permit2:{token}:{req.idempotency_key}"[:64],
+            purpose="erc20_approve",
+        )
+        log.info("submitting Permit2 approve for token=%s", token)
+        sub = await self.wallet.submit(tx, now, expected_chain_id=getattr(self.chain, "chain_id", 5042))
+        h = sub.tx_hash
+        if not h and sub.provider_tx_id:
+            h = await self.wallet.resolve_tx_hash(sub.provider_tx_id)
+        if not h:
+            raise IntegrationNotVerified(
+                "Permit2 approve",
+                f"approve submitted but no tx hash yet (provider_tx_id={sub.provider_tx_id})",
+            )
+        receipt = await self.chain.wait_for_receipt(h, self.settings.confirm_timeout_s)
+        if receipt is None:
+            raise IntegrationNotVerified("Permit2 approve", f"approve tx {h} not confirmed in time")
+        if getattr(receipt, "status", 1) != 1:
+            raise IntegrationNotVerified("Permit2 approve", f"approve tx {h} reverted")
+        log.info("Permit2 approve confirmed token=%s tx=%s", token, h)
+        record_event(
+            AuditKind.EXECUTION, AuditStatus.OK, provider=req.venue or "", operation="approve_permit2",
+            component="execution.live", token_key=f"arc:{token}", decision_id=req.decision_id,
+            user_id=self.audit_user_id, detail={"tx_hash": h, "spender": ARC_PERMIT2},
+        )
 
     def _failed(self, req: TradeRequest, step: str, exc: Exception, status: OrderStatus) -> ExecutionResult:
         """An unexpected error during execution becomes a recorded order with its reason (and an audit row)."""

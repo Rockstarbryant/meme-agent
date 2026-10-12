@@ -101,7 +101,10 @@ class PolicyValidator:
             v.append("CHAIN_NOT_IN_POLICY")
         if expected_chain_id is not None and tx.chain_id != expected_chain_id:
             v.append("CHAIN_ID_MISMATCH")
-        if tx.to.lower() not in {r.lower() for r in p.allowed_routers}:
+        # ERC-20 approve(token → Permit2/router) targets the token contract, not a DEX router.
+        is_approve = (getattr(tx, "purpose", None) == "erc20_approve"
+                      or (isinstance(tx.data, str) and tx.data.lower().startswith("0x095ea7b3")))
+        if tx.to.lower() not in {r.lower() for r in p.allowed_routers} and not is_approve:
             v.append("ROUTER_NOT_ALLOWLISTED")
         if tx.amount_usdc > p.max_trade_usdc + 1e-9:
             v.append("EXCEEDS_MAX_TRADE")

@@ -131,11 +131,46 @@ class UniswapArcAdapter:
         body = self._quotes.get((str(request.token_address).lower(), request.side.value))
         if not body or not body.get("quote"):
             raise DataUnavailable("no matching Uniswap quote is cached")
-        # Permit2 is the supported Arc path. V2 does not silently downgrade to an unsafe
-        # approval model. The Circle signing implementation is completed only after the
-        # installed CLI's typed-data command is verified on the user's runner.
+        # Uniswap often returns permitData so the swap can pull tokens via Permit2 in one flow.
+        # Privy executes plain eth_sendTransaction (no EIP-712 permit signing). If the wallet
+        # already approved the token to Permit2 on-chain, the /swap calldata works without a
+        # signed permit. If not, raise a clear signal so the live executor can submit approve() first.
         if body.get("permitData"):
-            raise IntegrationNotVerified("Uniswap Permit2 + Circle signing", "quote returned permitData; configure and verify Circle typed-data signing before live execution")
+            from app.chains.arc.deployments import ARC_PERMIT2
+            token = str(request.token_address).lower()
+            owner = self.wallet_address.lower().removeprefix("0x").rjust(64, "0")
+            spender = ARC_PERMIT2.lower().removeprefix("0x").rjust(64, "0")
+            try:
+                raw_allow = await self.rpc.call(
+                    "eth_call",
+                    [{"to": token, "data": "0xdd62ed3e" + owner + spender}, "latest"],
+                )
+                allowance = int(raw_allow, 16)
+            except Exception as exc:  # noqa: BLE001
+                raise IntegrationNotVerified(
+                    "Uniswap Permit2 allowance",
+                    f"could not read ERC-20 allowance to Permit2: {type(exc).__name__}: {exc}",
+                ) from exc
+            # Required raw input for this sell (or buy of non-USDC if ever used).
+            needed = 0
+            q = body.get("quote") or {}
+            for key in ("amountIn", "inputAmount", "amountInRaw"):
+                if q.get(key) is not None:
+                    try:
+                        needed = int(str(q[key]))
+                        break
+                    except ValueError:
+                        pass
+            if needed <= 0 and request.side == Side.SELL and request.quantity:
+                dec = await self.token_decimals(token)
+                needed = int(float(request.quantity) * (10 ** dec))
+            if allowance < max(needed, 1):
+                raise IntegrationNotVerified(
+                    "Uniswap Permit2 allowance",
+                    "NEEDS_PERMIT2_APPROVE: token is not approved to Permit2; "
+                    "live executor must submit approve(Permit2) before the sell",
+                )
+            # Allowance is sufficient — build swap without attaching a signed permit.
         swap = await self._post("swap", {"quote": body["quote"]})
         raw = swap.get("swap") or {}
         to = str(raw.get("to") or "").lower()
