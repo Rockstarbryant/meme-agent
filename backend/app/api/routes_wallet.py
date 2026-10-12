@@ -139,6 +139,10 @@ async def wallet_state(request: Request, user: M.User = Depends(current_user), d
         cap = {"capability": "AUTONOMOUS_DELEGATED", "label": "Autonomous cloud execution", "autonomous": True,
                "detail": "The shared worker can execute through your per-user Privy managed wallet, subject to the configured policy and LIVE gates."}
     available = pf.cash_usdc if pf else None
+    open_positions = (await db.execute(select(M.Position).where(
+        M.Position.user_id == user.id, M.Position.mode == user.mode, M.Position.status == "OPEN"
+    ))).scalars().all()
+    exposure_usdc = sum((p.quantity * (p.last_price or 0.0)) for p in open_positions)
     if user.mode == "LIVE":
         from app.portfolio.live_cash import spendable_usdc
         from app.services.live_balance import live_wallet_balance
@@ -146,10 +150,16 @@ async def wallet_state(request: Request, user: M.User = Depends(current_user), d
         if bal is None:
             bal = await live_wallet_balance(db, c.chain, user.id)
         if bal is not None:
-            expo = sum((p.quantity * p.last_price) for p in (await db.execute(select(M.Position).where(
-                M.Position.user_id == user.id, M.Position.mode == "LIVE", M.Position.status == "OPEN"))).scalars().all())
             alloc = pol.policy.get("allocated_capital_usdc") if pol else None
-            available = spendable_usdc(bal, alloc, expo)
+            available = spendable_usdc(bal, alloc, exposure_usdc)
+    # Portfolio value: for LIVE, USDC balance + marked open positions; for PAPER, cash + exposure.
+    usdc_bal = usdc.get("balance") if isinstance(usdc, dict) else None
+    if user.mode == "LIVE" and usdc_bal is not None:
+        total_value_usdc = float(usdc_bal) + float(exposure_usdc)
+    elif pf is not None:
+        total_value_usdc = float(pf.cash_usdc or 0.0) + float(exposure_usdc)
+    else:
+        total_value_usdc = (float(available) + float(exposure_usdc)) if available is not None else None
     return {
         "network": {"chain": "arc", "network": c.settings.arc_network, "chain_id": c.settings.arc_chain_id,
                     "explorer_url": c.settings.arc_explorer_url, "health": (await c.chain.health()).model_dump(),
@@ -164,6 +174,9 @@ async def wallet_state(request: Request, user: M.User = Depends(current_user), d
         "usdc": usdc,
         "allocated_capital_usdc": pol.policy["allocated_capital_usdc"] if pol else None,
         "available_trading_capital_usdc": available,
+        "exposure_usdc": round(float(exposure_usdc), 6),
+        "total_value_usdc": None if total_value_usdc is None else round(float(total_value_usdc), 6),
+        "open_positions_count": len(open_positions),
         "runner_wallet": None if runner is None else {"provider": rst.get("wallet_provider"), "online": control.is_online(runner), "live": rst.get("live")},
         "capital_label": "PAPER (virtual USDC)" if user.mode == "PAPER" else "LIVE",
         "mode": user.mode,
@@ -285,20 +298,35 @@ async def complete_signing(rid: str, body: SignedIn, user: M.User = Depends(curr
 
 
 @router.get("/ledger")
-async def wallet_ledger(request: Request, limit: int = 100, mode: str | None = None, user: M.User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def wallet_ledger(
+    request: Request,
+    limit: int = 100,
+    mode: str | None = None,
+    include_rejected: bool = False,
+    user: M.User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Transaction history, newest first, for ONE trading mode (default: the current one; ALL shows both).
 
     LIVE = real transactions (trades with on-chain hashes, withdrawals, wallet events). PAPER = simulated trades only:
-    virtual money has no withdrawals, no wallet events and no explorer links."""
+    virtual money has no withdrawals, no wallet events and no explorer links.
+
+    By default only successful / in-flight orders are shown (FILLED, PARTIALLY_FILLED, SUBMITTED,
+    PENDING_SIGNATURE, TIMEOUT). Pass include_rejected=true to also see REJECTED / FAILED attempts.
+    """
     limit = max(1, min(int(limit), 300))
     scope = (mode or user.mode or "PAPER").upper()
     if scope not in ("PAPER", "LIVE", "ALL"):
         raise HTTPException(422, "mode must be PAPER, LIVE or ALL")
     explorer = (C(request).settings.arc_explorer_url or "").rstrip("/")
     link = (lambda h: f"{explorer}/tx/{h}" if (explorer and h) else None)
-    oq = select(M.Order).where(M.Order.user_id == user.id).order_by(M.Order.created_at.desc()).limit(limit)
+    # Fetch a wider window when filtering rejected so the visible list can still fill `limit`.
+    fetch_n = limit if include_rejected else min(limit * 4, 500)
+    oq = select(M.Order).where(M.Order.user_id == user.id).order_by(M.Order.created_at.desc()).limit(fetch_n)
     if scope != "ALL":
         oq = oq.where(M.Order.mode == scope)
+    if not include_rejected:
+        oq = oq.where(M.Order.status.notin_(("REJECTED", "FAILED")))
     orders = (await db.execute(oq)).scalars().all()
     ids = {o.decision_id for o in orders if o.decision_id}
     names: dict[str, str | None] = {}

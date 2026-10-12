@@ -103,6 +103,11 @@ export interface WalletState {
   usdc: { balance: number | null; view: string; address: string; note: string };
   runner_wallet: { provider: string | null; online: boolean; live: LiveStatus | null } | null;
   allocated_capital_usdc: number | null; available_trading_capital_usdc: number | null; capital_label: string;
+  /** Marked USDC value of open positions. */
+  exposure_usdc?: number | null;
+  /** USDC balance (LIVE) or cash (PAPER) + open positions. */
+  total_value_usdc?: number | null;
+  open_positions_count?: number | null;
   mode: Mode; live_blockers: string[];
 }
 export interface SigningRequest {

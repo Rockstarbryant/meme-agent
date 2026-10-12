@@ -87,7 +87,11 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
   const portfolio = useApi<Portfolio>("/portfolio", { refreshOn: ["POSITION_OPENED", "POSITION_CLOSED"], intervalMs: 20000 });
   const [histMode, setHistMode] = useState<HistoryMode | null>(null);
   const shownMode: HistoryMode = histMode ?? (paper ? "PAPER" : "LIVE");
-  const ledger = useApi<LedgerEntry[]>(`/wallet/ledger?limit=100&mode=${shownMode}`, { refreshOn: ["POSITION_OPENED", "POSITION_CLOSED", "ORDER_FILLED"], intervalMs: 20000 });
+  const [showRejected, setShowRejected] = useState(false);
+  const ledger = useApi<LedgerEntry[]>(
+    `/wallet/ledger?limit=100&mode=${shownMode}&include_rejected=${showRejected ? "true" : "false"}`,
+    { refreshOn: ["POSITION_OPENED", "POSITION_CLOSED", "ORDER_FILLED"], intervalMs: 20000 },
+  );
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -136,10 +140,22 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
             ) : <p className="text-sm text-muted-foreground">Loading paper balance…</p>
           ) : (
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <Stat
+                label="Total value"
+                value={w.total_value_usdc == null ? "—" : usd(w.total_value_usdc)}
+                sub={w.open_positions_count ? `${w.open_positions_count} open position${w.open_positions_count === 1 ? "" : "s"}` : "USDC + open positions"}
+              />
               <Stat label="USDC balance" value={balance == null ? "—" : usd(balance)} sub={w.usdc.view} />
-              <Stat label="Allocated to the agent" value={w.allocated_capital_usdc == null ? "—" : usd(w.allocated_capital_usdc)} />
-              <Stat label="Available to trade" value={w.available_trading_capital_usdc == null ? "—" : usd(w.available_trading_capital_usdc)} sub={w.capital_label} />
-              <Stat label="Network" value={`Arc ${w.network.network}`} sub={w.network.health.ok ? "RPC reachable" : "RPC unavailable"} />
+              <Stat
+                label="In open positions"
+                value={w.exposure_usdc == null ? "—" : usd(w.exposure_usdc)}
+                sub="Marked to last price"
+              />
+              <Stat
+                label="Available to trade"
+                value={w.available_trading_capital_usdc == null ? "—" : usd(w.available_trading_capital_usdc)}
+                sub={w.allocated_capital_usdc != null ? `of ${usd(w.allocated_capital_usdc)} allocated` : w.capital_label}
+              />
             </div>
           )}
           {!paper && w.usdc.note && <p className="text-xs text-muted-foreground">{w.usdc.note}</p>}
@@ -191,7 +207,18 @@ export function AgentWalletOverview({ w, busy, onProvision, onChanged }: { w: Wa
         <CardHeader><div className="flex flex-wrap items-center gap-3"><div className="flex items-center gap-2"><History className="h-4 w-4 text-accent-ink" aria-hidden /><CardTitle>Transaction history</CardTitle></div>
           <ModeTabs value={shownMode} onChange={setHistMode} current={paper ? "PAPER" : "LIVE"} label="History mode" /></div></CardHeader>
         <CardContent className="space-y-3">
-          <p className="text-xs text-muted-foreground">{shownMode === "PAPER" ? "Paper history: simulated trades with virtual money. There are no blockchain transactions, withdrawals or deposits here." : "Live history: real trades with their on-chain transaction links, plus withdrawals and wallet events."}</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">{shownMode === "PAPER" ? "Paper history: simulated trades with virtual money. There are no blockchain transactions, withdrawals or deposits here." : "Live history: real trades with on-chain links, plus withdrawals and wallet events. Rejected attempts are hidden by default."}</p>
+            <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showRejected}
+                onChange={(e) => { setShowRejected(e.target.checked); void ledger.reload(); }}
+                className="rounded border"
+              />
+              Show rejected
+            </label>
+          </div>
           {ledger.error && !ledger.data ? <ErrorState error={ledger.error} onRetry={() => void ledger.reload()} /> : <LedgerList rows={ledger.data ?? []} mode={shownMode} />}
         </CardContent>
       </Card>
