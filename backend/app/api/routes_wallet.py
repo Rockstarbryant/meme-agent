@@ -447,9 +447,15 @@ async def provision_cloud_wallet(
     # Default conservative policy if none exists
     if await _policy(db, w.id) is None:
         from app.wallets.base import WalletPolicy
-        from app.chains.arc.deployments import ARC_UNIVERSAL_ROUTER, ARC_UNISWAP_PROXY
+        from app.chains.arc.deployments import (
+            ARC_UNIVERSAL_ROUTER, ARC_UNISWAP_PROXY, ARC_UNISWAP_PROXY_LEGACY,
+        )
 
-        routers: set[str] = {ARC_UNIVERSAL_ROUTER.lower(), ARC_UNISWAP_PROXY.lower()}
+        routers: set[str] = {
+            ARC_UNIVERSAL_ROUTER.lower(),
+            ARC_UNISWAP_PROXY.lower(),
+            ARC_UNISWAP_PROXY_LEGACY.lower(),
+        }
         pol = WalletPolicy(
             allocated_capital_usdc=100,
             max_trade_usdc=min(25.0, settings.risk_max_trade_usdc),

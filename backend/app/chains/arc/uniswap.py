@@ -8,7 +8,9 @@ from typing import Any
 import httpx
 from eth_abi import decode as abi_decode
 
-from app.chains.arc.deployments import ARC_UNIVERSAL_ROUTER, ARC_PERMIT2, ARC_UNISWAP_PROXY
+from app.chains.arc.deployments import (
+    ARC_UNIVERSAL_ROUTER, ARC_PERMIT2, ARC_UNISWAP_PROXY, ARC_UNISWAP_PROXY_LEGACY,
+)
 from app.chains.base import FillDetails, SimulationResult
 from app.core.errors import IntegrationNotVerified, DataUnavailable
 from app.core.types import Side
@@ -32,7 +34,11 @@ class UniswapArcAdapter:
     live_trading_verified = True
 
     def router_allowlist(self) -> set[str]:
-        return {ARC_UNIVERSAL_ROUTER.lower(), ARC_UNISWAP_PROXY.lower()}
+        return {
+            ARC_UNIVERSAL_ROUTER.lower(),
+            ARC_UNISWAP_PROXY.lower(),
+            ARC_UNISWAP_PROXY_LEGACY.lower(),
+        }
 
     def executable(self) -> tuple[bool, str]:
         return True, ""
@@ -135,22 +141,42 @@ class UniswapArcAdapter:
         body = self._quotes.get((str(request.token_address).lower(), request.side.value))
         if not body or not body.get("quote"):
             raise DataUnavailable("no matching Uniswap quote is cached")
-        # With x-permit2-disabled, permitData must be null; swaps go through ARC_UNISWAP_PROXY
-        # after a classic ERC-20 approve(token → proxy). If allowance is missing, signal the
-        # live executor to approve before retrying.
-        token = str(request.token_address).lower()
+        # With x-permit2-disabled, permitData must be null; swaps go through a Uniswap proxy
+        # after a classic ERC-20 approve(token → proxy). Arc currently returns the *legacy*
+        # proxy (0x02e5…); other chains use the CREATE2 proxy. Accept both.
+        if body.get("permitData"):
+            raise IntegrationNotVerified(
+                "Uniswap Permit2",
+                "quote still returned permitData despite x-permit2-disabled; check API headers",
+            )
+        swap = await self._post("swap", {"quote": body["quote"]})
+        raw = swap.get("swap") or {}
+        to = str(raw.get("to") or "").lower()
+        data = str(raw.get("data") or "")
+        allowed_targets = {
+            ARC_UNIVERSAL_ROUTER.lower(),
+            ARC_UNISWAP_PROXY.lower(),
+            ARC_UNISWAP_PROXY_LEGACY.lower(),
+        }
+        if to not in allowed_targets:
+            raise IntegrationNotVerified("Uniswap Arc router", f"unexpected swap target {to}")
+        # Ensure the input token is approved to the *actual* swap target (proxy or router).
+        token_in = str(request.token_address).lower()
+        if request.side == Side.BUY:
+            from app.chains.arc.network import USDC_ERC20_ADDRESS
+            token_in = USDC_ERC20_ADDRESS.lower()
         owner = self.wallet_address.lower().removeprefix("0x").rjust(64, "0")
-        proxy_spender = ARC_UNISWAP_PROXY.lower().removeprefix("0x").rjust(64, "0")
+        spender = to.removeprefix("0x").rjust(64, "0")
         try:
             raw_allow = await self.rpc.call(
                 "eth_call",
-                [{"to": token, "data": "0xdd62ed3e" + owner + proxy_spender}, "latest"],
+                [{"to": token_in, "data": "0xdd62ed3e" + owner + spender}, "latest"],
             )
             allowance = int(raw_allow, 16)
         except Exception as exc:  # noqa: BLE001
             raise IntegrationNotVerified(
                 "Uniswap proxy allowance",
-                f"could not read ERC-20 allowance to Uniswap proxy: {type(exc).__name__}: {exc}",
+                f"could not read ERC-20 allowance to {to}: {type(exc).__name__}: {exc}",
             ) from exc
         needed = 0
         q = body.get("quote") or {}
@@ -162,46 +188,16 @@ class UniswapArcAdapter:
                 except ValueError:
                     pass
         if needed <= 0 and request.side == Side.SELL and request.quantity:
-            dec = await self.token_decimals(token)
+            dec = await self.token_decimals(token_in)
             needed = int(float(request.quantity) * (10 ** dec))
-        if request.side == Side.BUY:
-            # BUY spends USDC; check USDC → proxy when we can. amount is in USDC units on request.
-            from app.chains.arc.network import USDC_ERC20_ADDRESS
-            usdc = USDC_ERC20_ADDRESS.lower()
-            try:
-                raw_usdc = await self.rpc.call(
-                    "eth_call",
-                    [{"to": usdc, "data": "0xdd62ed3e" + owner + proxy_spender}, "latest"],
-                )
-                usdc_allow = int(raw_usdc, 16)
-            except Exception:
-                usdc_allow = 0
-            buy_needed = int(float(request.amount_usdc or 0) * 1_000_000)  # USDC 6 decimals
-            if usdc_allow < max(buy_needed, 1):
-                raise IntegrationNotVerified(
-                    "Uniswap proxy allowance",
-                    "NEEDS_PROXY_APPROVE: USDC is not approved to Uniswap proxy; "
-                    "live executor must submit approve(proxy) before the buy",
-                )
-        elif allowance < max(needed, 1):
+        if needed <= 0 and request.side == Side.BUY:
+            needed = int(float(request.amount_usdc or 0) * 1_000_000)
+        if allowance < max(needed, 1):
             raise IntegrationNotVerified(
                 "Uniswap proxy allowance",
-                "NEEDS_PROXY_APPROVE: token is not approved to Uniswap proxy; "
-                "live executor must submit approve(proxy) before the sell",
+                f"NEEDS_PROXY_APPROVE:{to}: token {token_in} not approved to swap target; "
+                "live executor must submit approve before the trade",
             )
-        if body.get("permitData"):
-            # Should not happen with x-permit2-disabled; treat as hard misconfig.
-            raise IntegrationNotVerified(
-                "Uniswap Permit2",
-                "quote still returned permitData despite x-permit2-disabled; check API headers",
-            )
-        swap = await self._post("swap", {"quote": body["quote"]})
-        raw = swap.get("swap") or {}
-        to = str(raw.get("to") or "").lower()
-        data = str(raw.get("data") or "")
-        allowed_targets = {ARC_UNIVERSAL_ROUTER.lower(), ARC_UNISWAP_PROXY.lower()}
-        if to not in allowed_targets:
-            raise IntegrationNotVerified("Uniswap Arc router", f"unexpected swap target {to}")
         if not data.startswith("0x") or len(data) < 10:
             raise DataUnavailable("Uniswap /swap returned empty calldata")
         value = int(str(raw.get("value") or "0"), 0) if str(raw.get("value") or "0").startswith("0x") else int(raw.get("value") or 0)

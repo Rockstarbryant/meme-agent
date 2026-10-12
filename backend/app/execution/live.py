@@ -133,7 +133,13 @@ class ArcExecutionEngine(ExecutionAdapter):
                 if "NEEDS_PROXY_APPROVE" not in msg and "NEEDS_PERMIT2_APPROVE" not in msg:
                     raise
                 step = "approve_proxy"
-                await self._approve_token_to_uniswap_proxy(req)
+                # Message format: NEEDS_PROXY_APPROVE:0x…: … — extract spender when present.
+                spender = None
+                for part in msg.replace(" ", "").split(":"):
+                    if part.startswith("0x") and len(part) == 42:
+                        spender = part
+                        break
+                await self._approve_token_to_uniswap_proxy(req, spender=spender)
                 # Re-quote after approve so the cached Uniswap body is fresh, then rebuild.
                 quote, _ = await self._preflight(approved)
                 step = "build"
@@ -178,66 +184,74 @@ class ArcExecutionEngine(ExecutionAdapter):
         fill = await self.chain.parse_fill(receipt, quote)  # verifies the ACTUAL outcome
         return self._finish(req, h, fill, quote)
 
-    async def _approve_token_to_uniswap_proxy(self, req: TradeRequest) -> None:
-        """One-time ERC-20 approve(token → Uniswap Trading API proxy) for the no-Permit2 flow.
+    async def _approve_token_to_uniswap_proxy(self, req: TradeRequest, spender: str | None = None) -> None:
+        """One-time ERC-20 approve(token → Uniswap proxy) for the no-Permit2 flow.
 
         Privy only supports eth_sendTransaction (no EIP-712). With x-permit2-disabled the
-        Trading API routes swaps through ARC_UNISWAP_PROXY after a classic approve.
+        Trading API routes swaps through a proxy. Arc often returns the *legacy* proxy
+        (0x02e5…); other chains use the CREATE2 proxy. Approve the spender extracted from
+        NEEDS_PROXY_APPROVE:<addr>, otherwise both known proxies.
         For BUY we approve USDC; for SELL we approve the position token.
         """
         import logging
         from datetime import datetime, timezone
 
-        from app.chains.arc.deployments import ARC_UNISWAP_PROXY
+        from app.chains.arc.deployments import ARC_UNISWAP_PROXY, ARC_UNISWAP_PROXY_LEGACY
         from app.chains.arc.network import USDC_ERC20_ADDRESS
         from app.domain.trade import UnsignedTransaction
 
         log = logging.getLogger(__name__)
         token = (USDC_ERC20_ADDRESS if req.side == Side.BUY else req.token_address).lower()
-        # approve(address,uint256) — spender = Uniswap proxy, amount = max uint256
-        spender = ARC_UNISWAP_PROXY.lower().removeprefix("0x").rjust(64, "0")
-        amount = "f" * 64  # type(uint256).max
-        data = "0x095ea7b3" + spender + amount
+        spenders: list[str] = []
+        if spender and isinstance(spender, str) and spender.startswith("0x") and len(spender) == 42:
+            spenders = [spender.lower()]
+        else:
+            # Arc has been observed returning the legacy proxy; approve both so either works.
+            spenders = [ARC_UNISWAP_PROXY_LEGACY.lower(), ARC_UNISWAP_PROXY.lower()]
         now = datetime.now(timezone.utc)
-        tx = UnsignedTransaction(
-            chain=req.chain or "arc",
-            chain_id=getattr(self.chain, "chain_id", 5042),
-            to=token,
-            data=data,
-            value=0,
-            token_address=token,
-            side=req.side,
-            amount_usdc=0.0,
-            min_out=0.0,
-            slippage_pct=req.max_slippage_pct,
-            deadline=now + timedelta(seconds=self.settings.tx_deadline_s),
-            built_by="deterministic-adapter",
-            function_signature="approve(address,uint256)",
-            params=[ARC_UNISWAP_PROXY, str(2**256 - 1)],
-            idempotency_key=f"approve-proxy:{token}:{req.idempotency_key}"[:64],
-            purpose="erc20_approve",
-        )
-        log.info("submitting Uniswap proxy approve for token=%s", token)
-        sub = await self.wallet.submit(tx, now, expected_chain_id=getattr(self.chain, "chain_id", 5042))
-        h = sub.tx_hash
-        if not h and sub.provider_tx_id:
-            h = await self.wallet.resolve_tx_hash(sub.provider_tx_id)
-        if not h:
-            raise IntegrationNotVerified(
-                "Uniswap proxy approve",
-                f"approve submitted but no tx hash yet (provider_tx_id={sub.provider_tx_id})",
+        for sp in spenders:
+            sp_pad = sp.removeprefix("0x").rjust(64, "0")
+            amount = "f" * 64  # type(uint256).max
+            data = "0x095ea7b3" + sp_pad + amount
+            tx = UnsignedTransaction(
+                chain=req.chain or "arc",
+                chain_id=getattr(self.chain, "chain_id", 5042),
+                to=token,
+                data=data,
+                value=0,
+                token_address=token,
+                side=req.side,
+                amount_usdc=0.0,
+                min_out=0.0,
+                slippage_pct=req.max_slippage_pct,
+                deadline=now + timedelta(seconds=self.settings.tx_deadline_s),
+                built_by="deterministic-adapter",
+                function_signature="approve(address,uint256)",
+                params=[sp, str(2**256 - 1)],
+                idempotency_key=f"approve-proxy:{token}:{sp}:{req.idempotency_key}"[:64],
+                purpose="erc20_approve",
             )
-        receipt = await self.chain.wait_for_receipt(h, self.settings.confirm_timeout_s)
-        if receipt is None:
-            raise IntegrationNotVerified("Uniswap proxy approve", f"approve tx {h} not confirmed in time")
-        if getattr(receipt, "status", 1) != 1:
-            raise IntegrationNotVerified("Uniswap proxy approve", f"approve tx {h} reverted")
-        log.info("Uniswap proxy approve confirmed token=%s tx=%s", token, h)
-        record_event(
-            AuditKind.EXECUTION, AuditStatus.OK, provider=req.venue or "", operation="approve_proxy",
-            component="execution.live", token_key=f"arc:{token}", decision_id=req.decision_id,
-            user_id=self.audit_user_id, detail={"tx_hash": h, "spender": ARC_UNISWAP_PROXY},
-        )
+            log.info("submitting Uniswap proxy approve token=%s spender=%s", token, sp)
+            sub = await self.wallet.submit(tx, now, expected_chain_id=getattr(self.chain, "chain_id", 5042))
+            h = sub.tx_hash
+            if not h and sub.provider_tx_id:
+                h = await self.wallet.resolve_tx_hash(sub.provider_tx_id)
+            if not h:
+                raise IntegrationNotVerified(
+                    "Uniswap proxy approve",
+                    f"approve submitted but no tx hash yet (provider_tx_id={sub.provider_tx_id})",
+                )
+            receipt = await self.chain.wait_for_receipt(h, self.settings.confirm_timeout_s)
+            if receipt is None:
+                raise IntegrationNotVerified("Uniswap proxy approve", f"approve tx {h} not confirmed in time")
+            if getattr(receipt, "status", 1) != 1:
+                raise IntegrationNotVerified("Uniswap proxy approve", f"approve tx {h} reverted")
+            log.info("Uniswap proxy approve confirmed token=%s spender=%s tx=%s", token, sp, h)
+            record_event(
+                AuditKind.EXECUTION, AuditStatus.OK, provider=req.venue or "", operation="approve_proxy",
+                component="execution.live", token_key=f"arc:{token}", decision_id=req.decision_id,
+                user_id=self.audit_user_id, detail={"tx_hash": h, "spender": sp},
+            )
 
     def _failed(self, req: TradeRequest, step: str, exc: Exception, status: OrderStatus) -> ExecutionResult:
         """An unexpected error during execution becomes a recorded order with its reason (and an audit row)."""

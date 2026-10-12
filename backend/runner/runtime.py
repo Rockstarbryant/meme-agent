@@ -544,9 +544,12 @@ class RunnerRuntime:
             # Older policies only listed Universal Router; swaps via the proxy would
             # otherwise fail ROUTER_NOT_ALLOWLISTED after we switched off Permit2.
             try:
-                from app.chains.arc.deployments import ARC_UNISWAP_PROXY, ARC_UNIVERSAL_ROUTER
+                from app.chains.arc.deployments import (
+                    ARC_UNISWAP_PROXY, ARC_UNISWAP_PROXY_LEGACY, ARC_UNIVERSAL_ROUTER,
+                )
                 routers = set(policy.allowed_routers or set())
                 routers.add(ARC_UNISWAP_PROXY.lower())
+                routers.add(ARC_UNISWAP_PROXY_LEGACY.lower())
                 routers.add(ARC_UNIVERSAL_ROUTER.lower())
                 policy = policy.model_copy(update={"allowed_routers": routers})
             except Exception:
