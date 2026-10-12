@@ -290,10 +290,15 @@ class TradingEngine:
             await self.bus.publish(E.ORDER_SUBMITTED, cid, order=res.model_dump(mode="json"))
 
     # ------------------------------------------------------------- exits
-    async def monitor_positions(self, now: datetime | None = None, *, manual_close: set[str] | None = None,
-                                emergency_close: bool = False) -> list[ExecutionResult]:
-        now, out = now or utcnow(), []
-        review: list[tuple] = []   # positions the rules left alone: candidates for the AI exit reviewer
+    async def mark_open_positions(self, now: datetime | None = None) -> dict[str, MarketState]:
+        """Refresh last_price for every open position and emit POSITION_UPDATED.
+
+        Separated from exit logic so the cloud worker can upload marks to the
+        control plane before slow AI exit reviews run (those can take minutes).
+        Returns position_id -> MarketState for callers that continue into exits.
+        """
+        now = now or utcnow()
+        markets: dict[str, MarketState] = {}
         for pos in list(self.portfolio.open_positions()):
             try:
                 m = await self.market_data.get_market_state(pos.token_address)
@@ -310,6 +315,30 @@ class TradingEngine:
                              pos.id, pos.token_address, m.price, prev)
             else:
                 log.warning("monitor: zero/missing price position=%s token=%s", pos.id, pos.token_address)
+            markets[pos.id] = m
+            await self.bus.publish(E.POSITION_UPDATED, pos.id, price=pos.last_price, pnl=round(pos.unrealized_pnl, 6))
+        return markets
+
+    async def monitor_positions(self, now: datetime | None = None, *, manual_close: set[str] | None = None,
+                                emergency_close: bool = False,
+                                markets: dict[str, MarketState] | None = None) -> list[ExecutionResult]:
+        now, out = now or utcnow(), []
+        review: list[tuple] = []   # positions the rules left alone: candidates for the AI exit reviewer
+        # Prefer a pre-fetched mark pass (cloud worker uploads those first); otherwise mark inline.
+        if markets is None:
+            markets = await self.mark_open_positions(now)
+        for pos in list(self.portfolio.open_positions()):
+            m = markets.get(pos.id)
+            if m is None:
+                try:
+                    m = await self.market_data.get_market_state(pos.token_address)
+                except DataUnavailable as exc:
+                    log.warning("monitor: price unavailable position=%s token=%s err=%s",
+                                pos.id, pos.token_address, exc)
+                    await self.bus.publish(E.RISK_ALERT, pos.id, kind="PRICE_UNAVAILABLE", error=str(exc))
+                    continue
+                if m.price and m.price > 0:
+                    self.portfolio.mark(pos.id, m.price, now)
             decisions = self.exit_manager_for(pos.strategy_id).evaluate(
                 pos, now, m, manual_close=pos.id in (manual_close or set()), emergency=emergency_close)
             for d in decisions:

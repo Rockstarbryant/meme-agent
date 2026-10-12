@@ -293,6 +293,10 @@ class CloudWorker:
                     self._promote_held_tokens_hot(rt)
                 with contextlib.suppress(Exception):
                     await rt.monitor_once()
+                with contextlib.suppress(Exception):
+                    await rt.upload_once()
+                with contextlib.suppress(Exception):
+                    await self._persist_state(rt, user_id)
 
             if rt.engine is None or rt.controls.global_pause or rt.state == "LIVE_BLOCKED":
                 await rt.heartbeat_once()
@@ -328,7 +332,15 @@ class CloudWorker:
                 # Keep held tokens on the HOT monitoring track so global monitoring
                 # refreshes their snapshots (token page "Scanned") frequently.
                 self._promote_held_tokens_hot(rt)
-                await rt.monitor_once()
+                # 1) Mark prices only  2) upload/persist so UI updates  3) exits+AI (can be slow)
+                markets = {}
+                with contextlib.suppress(Exception):
+                    markets = await rt.mark_positions_once()
+                with contextlib.suppress(Exception):
+                    await rt.upload_once()
+                with contextlib.suppress(Exception):
+                    await self._persist_state(rt, user_id)
+                await rt.monitor_once(markets=markets or None)
                 addrs = self._global_candidate_addresses(user_id)
                 if not addrs:
                     log.warning(
@@ -349,7 +361,14 @@ class CloudWorker:
                         state_fn=state_fn, min_interval_s=float(self.s.eval_min_interval_s), deadline=deadline,
                     )
                 await rt.drain_commands()
-                await rt.monitor_once()
+                markets2 = {}
+                with contextlib.suppress(Exception):
+                    markets2 = await rt.mark_positions_once()
+                with contextlib.suppress(Exception):
+                    await rt.upload_once()
+                with contextlib.suppress(Exception):
+                    await self._persist_state(rt, user_id)
+                await rt.monitor_once(markets=markets2 or None)
                 self._promote_held_tokens_hot(rt)
             finally:
                 pass

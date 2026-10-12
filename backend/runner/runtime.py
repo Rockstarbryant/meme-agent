@@ -1131,11 +1131,22 @@ class RunnerRuntime:
             )
         return n
 
-    async def monitor_once(self) -> None:
+    async def mark_positions_once(self) -> dict:
+        """Price-mark open positions and emit POSITION_UPDATED without running exits/AI.
+
+        Used by the cloud worker so the control plane / UI can refresh before
+        slow AI exit reviews block the rest of the cycle.
+        """
+        if self.engine is None or self.portfolio is None:
+            return {}
+        await self.sync_live_cash()
+        return await self.engine.mark_open_positions(self.clock())
+
+    async def monitor_once(self, *, markets: dict | None = None) -> None:
         if self.engine is None or self.portfolio is None:
             return
         await self.sync_live_cash()
-        await self.engine.monitor_positions(self.clock())
+        await self.engine.monitor_positions(self.clock(), markets=markets)
         if self.mono() - self._pf_at >= self.s.snapshot_interval_s:
             self._pf_at = self.mono()
             await self.bus.publish(E.PORTFOLIO_SNAPSHOT, "", portfolio=self.portfolio_summary(),
