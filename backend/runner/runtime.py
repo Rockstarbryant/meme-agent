@@ -539,6 +539,18 @@ class RunnerRuntime:
         from app.risk.per_user_policy import PlatformCeilings, UserPolicyContext, effective_limits
 
         policy = WalletPolicy(**b.wallet_policy) if b.wallet_policy else None
+        if policy is not None:
+            # Ensure Uniswap Trading API proxy is allowlisted (x-permit2-disabled flow).
+            # Older policies only listed Universal Router; swaps via the proxy would
+            # otherwise fail ROUTER_NOT_ALLOWLISTED after we switched off Permit2.
+            try:
+                from app.chains.arc.deployments import ARC_UNISWAP_PROXY, ARC_UNIVERSAL_ROUTER
+                routers = set(policy.allowed_routers or set())
+                routers.add(ARC_UNISWAP_PROXY.lower())
+                routers.add(ARC_UNIVERSAL_ROUTER.lower())
+                policy = policy.model_copy(update={"allowed_routers": routers})
+            except Exception:
+                pass
         if policy is not None and self.wallet is not None and hasattr(self.wallet, "configure_policy"):
             self.wallet.configure_policy(policy)
         platform = PlatformCeilings(**b.platform_ceilings) if b.platform_ceilings else None

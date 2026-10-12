@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from eth_abi import decode as abi_decode
 
-from app.chains.arc.deployments import ARC_UNIVERSAL_ROUTER, ARC_PERMIT2
+from app.chains.arc.deployments import ARC_UNIVERSAL_ROUTER, ARC_PERMIT2, ARC_UNISWAP_PROXY
 from app.chains.base import FillDetails, SimulationResult
 from app.core.errors import IntegrationNotVerified, DataUnavailable
 from app.core.types import Side
@@ -32,7 +32,7 @@ class UniswapArcAdapter:
     live_trading_verified = True
 
     def router_allowlist(self) -> set[str]:
-        return {ARC_UNIVERSAL_ROUTER.lower()}
+        return {ARC_UNIVERSAL_ROUTER.lower(), ARC_UNISWAP_PROXY.lower()}
 
     def executable(self) -> tuple[bool, str]:
         return True, ""
@@ -42,11 +42,15 @@ class UniswapArcAdapter:
         self.impact_unit = impact_unit if impact_unit in ("percent", "fraction") else "percent"
         self._quotes: dict[tuple[str, str], dict] = {}
         self.api_key, self.rpc, self.wallet_address, self.base_url = api_key, rpc, wallet_address, base_url.rstrip("/")
+        # x-permit2-disabled: Privy cannot EIP-712-sign Permit2 messages. The Trading API
+        # then uses the proxy-approval flow (approve token → proxy, swap via proxy).
+        # See https://developers.uniswap.org/docs/trading/swapping-api/concepts/no-permit2-workflow
         self.http = httpx.AsyncClient(timeout=20.0, headers={
             "x-api-key": api_key,
             "accept": "application/json",
             "content-type": "application/json",
             "x-universal-router-version": "2.1.1",
+            "x-permit2-disabled": "true",
             "x-agent-info": json.dumps({"integration_name": "arc-autonomous-trading-agent", "version": "2.0.0"}, separators=(",", ":")),
         })
 
@@ -131,56 +135,82 @@ class UniswapArcAdapter:
         body = self._quotes.get((str(request.token_address).lower(), request.side.value))
         if not body or not body.get("quote"):
             raise DataUnavailable("no matching Uniswap quote is cached")
-        # Uniswap often returns permitData so the swap can pull tokens via Permit2 in one flow.
-        # Privy executes plain eth_sendTransaction (no EIP-712 permit signing). If the wallet
-        # already approved the token to Permit2 on-chain, the /swap calldata works without a
-        # signed permit. If not, raise a clear signal so the live executor can submit approve() first.
-        if body.get("permitData"):
-            from app.chains.arc.deployments import ARC_PERMIT2
-            token = str(request.token_address).lower()
-            owner = self.wallet_address.lower().removeprefix("0x").rjust(64, "0")
-            spender = ARC_PERMIT2.lower().removeprefix("0x").rjust(64, "0")
+        # With x-permit2-disabled, permitData must be null; swaps go through ARC_UNISWAP_PROXY
+        # after a classic ERC-20 approve(token → proxy). If allowance is missing, signal the
+        # live executor to approve before retrying.
+        token = str(request.token_address).lower()
+        owner = self.wallet_address.lower().removeprefix("0x").rjust(64, "0")
+        proxy_spender = ARC_UNISWAP_PROXY.lower().removeprefix("0x").rjust(64, "0")
+        try:
+            raw_allow = await self.rpc.call(
+                "eth_call",
+                [{"to": token, "data": "0xdd62ed3e" + owner + proxy_spender}, "latest"],
+            )
+            allowance = int(raw_allow, 16)
+        except Exception as exc:  # noqa: BLE001
+            raise IntegrationNotVerified(
+                "Uniswap proxy allowance",
+                f"could not read ERC-20 allowance to Uniswap proxy: {type(exc).__name__}: {exc}",
+            ) from exc
+        needed = 0
+        q = body.get("quote") or {}
+        for key in ("amountIn", "inputAmount", "amountInRaw"):
+            if q.get(key) is not None:
+                try:
+                    needed = int(str(q[key]))
+                    break
+                except ValueError:
+                    pass
+        if needed <= 0 and request.side == Side.SELL and request.quantity:
+            dec = await self.token_decimals(token)
+            needed = int(float(request.quantity) * (10 ** dec))
+        if request.side == Side.BUY:
+            # BUY spends USDC; check USDC → proxy when we can. amount is in USDC units on request.
+            from app.chains.arc.network import USDC_ERC20_ADDRESS
+            usdc = USDC_ERC20_ADDRESS.lower()
             try:
-                raw_allow = await self.rpc.call(
+                raw_usdc = await self.rpc.call(
                     "eth_call",
-                    [{"to": token, "data": "0xdd62ed3e" + owner + spender}, "latest"],
+                    [{"to": usdc, "data": "0xdd62ed3e" + owner + proxy_spender}, "latest"],
                 )
-                allowance = int(raw_allow, 16)
-            except Exception as exc:  # noqa: BLE001
+                usdc_allow = int(raw_usdc, 16)
+            except Exception:
+                usdc_allow = 0
+            buy_needed = int(float(request.amount_usdc or 0) * 1_000_000)  # USDC 6 decimals
+            if usdc_allow < max(buy_needed, 1):
                 raise IntegrationNotVerified(
-                    "Uniswap Permit2 allowance",
-                    f"could not read ERC-20 allowance to Permit2: {type(exc).__name__}: {exc}",
-                ) from exc
-            # Required raw input for this sell (or buy of non-USDC if ever used).
-            needed = 0
-            q = body.get("quote") or {}
-            for key in ("amountIn", "inputAmount", "amountInRaw"):
-                if q.get(key) is not None:
-                    try:
-                        needed = int(str(q[key]))
-                        break
-                    except ValueError:
-                        pass
-            if needed <= 0 and request.side == Side.SELL and request.quantity:
-                dec = await self.token_decimals(token)
-                needed = int(float(request.quantity) * (10 ** dec))
-            if allowance < max(needed, 1):
-                raise IntegrationNotVerified(
-                    "Uniswap Permit2 allowance",
-                    "NEEDS_PERMIT2_APPROVE: token is not approved to Permit2; "
-                    "live executor must submit approve(Permit2) before the sell",
+                    "Uniswap proxy allowance",
+                    "NEEDS_PROXY_APPROVE: USDC is not approved to Uniswap proxy; "
+                    "live executor must submit approve(proxy) before the buy",
                 )
-            # Allowance is sufficient — build swap without attaching a signed permit.
+        elif allowance < max(needed, 1):
+            raise IntegrationNotVerified(
+                "Uniswap proxy allowance",
+                "NEEDS_PROXY_APPROVE: token is not approved to Uniswap proxy; "
+                "live executor must submit approve(proxy) before the sell",
+            )
+        if body.get("permitData"):
+            # Should not happen with x-permit2-disabled; treat as hard misconfig.
+            raise IntegrationNotVerified(
+                "Uniswap Permit2",
+                "quote still returned permitData despite x-permit2-disabled; check API headers",
+            )
         swap = await self._post("swap", {"quote": body["quote"]})
         raw = swap.get("swap") or {}
         to = str(raw.get("to") or "").lower()
         data = str(raw.get("data") or "")
-        if to != ARC_UNIVERSAL_ROUTER.lower():
+        allowed_targets = {ARC_UNIVERSAL_ROUTER.lower(), ARC_UNISWAP_PROXY.lower()}
+        if to not in allowed_targets:
             raise IntegrationNotVerified("Uniswap Arc router", f"unexpected swap target {to}")
         if not data.startswith("0x") or len(data) < 10:
             raise DataUnavailable("Uniswap /swap returned empty calldata")
         value = int(str(raw.get("value") or "0"), 0) if str(raw.get("value") or "0").startswith("0x") else int(raw.get("value") or 0)
-        sig, params = decode_universal_router_execute(data)
+        # Proxy may wrap UR execute; decode when possible, else leave signature blank.
+        sig, params = "", []
+        try:
+            sig, params = decode_universal_router_execute(data)
+        except Exception:
+            sig, params = "execute(bytes,bytes[])", []
         return UnsignedTransaction(chain="arc", chain_id=5042, to=to, data=data, value=value,
                                    token_address=request.token_address, side=request.side,
                                    amount_usdc=request.amount_usdc or 0.0, min_out=quote.expected_out * (1 - request.max_slippage_pct / 100),

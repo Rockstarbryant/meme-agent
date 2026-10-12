@@ -128,11 +128,12 @@ class ArcExecutionEngine(ExecutionAdapter):
             try:
                 tx = await self.chain.build_swap_tx(quote, req, deadline)
             except IntegrationNotVerified as build_exc:
-                # SELL of an ERC-20 via Uniswap often needs a one-time approve(token → Permit2).
-                if "NEEDS_PERMIT2_APPROVE" not in str(build_exc) and "Permit2" not in str(build_exc):
+                # Uniswap proxy-approval flow (x-permit2-disabled): one-time approve(token → proxy).
+                msg = str(build_exc)
+                if "NEEDS_PROXY_APPROVE" not in msg and "NEEDS_PERMIT2_APPROVE" not in msg:
                     raise
-                step = "approve_permit2"
-                await self._approve_token_to_permit2(req)
+                step = "approve_proxy"
+                await self._approve_token_to_uniswap_proxy(req)
                 # Re-quote after approve so the cached Uniswap body is fresh, then rebuild.
                 quote, _ = await self._preflight(approved)
                 step = "build"
@@ -177,22 +178,24 @@ class ArcExecutionEngine(ExecutionAdapter):
         fill = await self.chain.parse_fill(receipt, quote)  # verifies the ACTUAL outcome
         return self._finish(req, h, fill, quote)
 
-    async def _approve_token_to_permit2(self, req: TradeRequest) -> None:
-        """One-time ERC-20 approve(token → Uniswap Permit2) so sells can run without EIP-712 permit signing.
+    async def _approve_token_to_uniswap_proxy(self, req: TradeRequest) -> None:
+        """One-time ERC-20 approve(token → Uniswap Trading API proxy) for the no-Permit2 flow.
 
-        Privy only supports eth_sendTransaction; Uniswap Trading API often returns permitData for
-        sells. Approving max uint256 to Permit2 lets the subsequent /swap calldata pull tokens.
+        Privy only supports eth_sendTransaction (no EIP-712). With x-permit2-disabled the
+        Trading API routes swaps through ARC_UNISWAP_PROXY after a classic approve.
+        For BUY we approve USDC; for SELL we approve the position token.
         """
         import logging
         from datetime import datetime, timezone
 
-        from app.chains.arc.deployments import ARC_PERMIT2
+        from app.chains.arc.deployments import ARC_UNISWAP_PROXY
+        from app.chains.arc.network import USDC_ERC20_ADDRESS
         from app.domain.trade import UnsignedTransaction
 
         log = logging.getLogger(__name__)
-        token = req.token_address.lower()
-        # approve(address,uint256) — spender = Permit2, amount = max uint256
-        spender = ARC_PERMIT2.lower().removeprefix("0x").rjust(64, "0")
+        token = (USDC_ERC20_ADDRESS if req.side == Side.BUY else req.token_address).lower()
+        # approve(address,uint256) — spender = Uniswap proxy, amount = max uint256
+        spender = ARC_UNISWAP_PROXY.lower().removeprefix("0x").rjust(64, "0")
         amount = "f" * 64  # type(uint256).max
         data = "0x095ea7b3" + spender + amount
         now = datetime.now(timezone.utc)
@@ -210,30 +213,30 @@ class ArcExecutionEngine(ExecutionAdapter):
             deadline=now + timedelta(seconds=self.settings.tx_deadline_s),
             built_by="deterministic-adapter",
             function_signature="approve(address,uint256)",
-            params=[ARC_PERMIT2, str(2**256 - 1)],
-            idempotency_key=f"approve-permit2:{token}:{req.idempotency_key}"[:64],
+            params=[ARC_UNISWAP_PROXY, str(2**256 - 1)],
+            idempotency_key=f"approve-proxy:{token}:{req.idempotency_key}"[:64],
             purpose="erc20_approve",
         )
-        log.info("submitting Permit2 approve for token=%s", token)
+        log.info("submitting Uniswap proxy approve for token=%s", token)
         sub = await self.wallet.submit(tx, now, expected_chain_id=getattr(self.chain, "chain_id", 5042))
         h = sub.tx_hash
         if not h and sub.provider_tx_id:
             h = await self.wallet.resolve_tx_hash(sub.provider_tx_id)
         if not h:
             raise IntegrationNotVerified(
-                "Permit2 approve",
+                "Uniswap proxy approve",
                 f"approve submitted but no tx hash yet (provider_tx_id={sub.provider_tx_id})",
             )
         receipt = await self.chain.wait_for_receipt(h, self.settings.confirm_timeout_s)
         if receipt is None:
-            raise IntegrationNotVerified("Permit2 approve", f"approve tx {h} not confirmed in time")
+            raise IntegrationNotVerified("Uniswap proxy approve", f"approve tx {h} not confirmed in time")
         if getattr(receipt, "status", 1) != 1:
-            raise IntegrationNotVerified("Permit2 approve", f"approve tx {h} reverted")
-        log.info("Permit2 approve confirmed token=%s tx=%s", token, h)
+            raise IntegrationNotVerified("Uniswap proxy approve", f"approve tx {h} reverted")
+        log.info("Uniswap proxy approve confirmed token=%s tx=%s", token, h)
         record_event(
-            AuditKind.EXECUTION, AuditStatus.OK, provider=req.venue or "", operation="approve_permit2",
+            AuditKind.EXECUTION, AuditStatus.OK, provider=req.venue or "", operation="approve_proxy",
             component="execution.live", token_key=f"arc:{token}", decision_id=req.decision_id,
-            user_id=self.audit_user_id, detail={"tx_hash": h, "spender": ARC_PERMIT2},
+            user_id=self.audit_user_id, detail={"tx_hash": h, "spender": ARC_UNISWAP_PROXY},
         )
 
     def _failed(self, req: TradeRequest, step: str, exc: Exception, status: OrderStatus) -> ExecutionResult:
