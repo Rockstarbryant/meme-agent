@@ -78,7 +78,9 @@ async def upsert_position(s: AsyncSession, user_id: str, p: Position) -> None:
         cost_basis_usdc=p.cost_basis_usdc, total_invested_usdc=p.total_invested_usdc, realized_pnl_usdc=p.realized_pnl_usdc,
         peak_price=p.peak_price, last_price=p.last_price, tiers_hit=list(p.tiers_hit), strategy_id=p.strategy_id,
         strategy_version=p.strategy_version, decision_id=p.decision_id, opened_at=p.opened_at,
-        last_new_high_at=p.last_new_high_at, closed_at=p.closed_at, exit_reason=p.exit_reason.value if p.exit_reason else None))
+        last_new_high_at=p.last_new_high_at, closed_at=p.closed_at,
+        exit_reason=p.exit_reason.value if p.exit_reason else None,
+        exit_detail=(p.exit_detail[:500] if getattr(p, "exit_detail", None) else None)))
 
 
 async def save_portfolio(s: AsyncSession, user_id: str, pf: PortfolioState, now: datetime) -> str:

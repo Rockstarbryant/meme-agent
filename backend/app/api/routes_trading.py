@@ -88,7 +88,8 @@ def _pos(p) -> dict:
             "gain_pct": (p.last_price / p.entry_price - 1) * 100 if p.entry_price else None, "tiers_hit": list(p.tiers_hit),
             "strategy_id": p.strategy_id, "strategy_version": p.strategy_version, "decision_id": p.decision_id,
             "opened_at": p.opened_at, "closed_at": p.closed_at,
-            "exit_reason": (p.exit_reason if isinstance(p.exit_reason, (str, type(None))) else p.exit_reason.value)}
+            "exit_reason": (p.exit_reason if isinstance(p.exit_reason, (str, type(None))) else p.exit_reason.value),
+            "exit_detail": getattr(p, "exit_detail", None)}
 
 
 @router.get("/opportunities")

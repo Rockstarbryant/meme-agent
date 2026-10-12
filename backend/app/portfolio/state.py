@@ -32,6 +32,7 @@ class Position(BaseModel):
     decision_id: str = ""
     closed_at: datetime | None = None
     exit_reason: ExitReason | None = None
+    exit_detail: str | None = None
 
     @property
     def market_value(self) -> float:

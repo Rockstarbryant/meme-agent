@@ -252,6 +252,8 @@ class Position(Base):
     last_new_high_at: Mapped[datetime] = mapped_column()
     closed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Short free-text why the exit fired (AI reasoning summary, stop detail, etc.)
+    exit_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class Portfolio(Base):

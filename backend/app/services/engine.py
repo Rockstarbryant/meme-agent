@@ -436,8 +436,17 @@ class TradingEngine:
                 pos.tiers_hit.append(d.tier_index)
             if not pos.is_open:
                 pos.exit_reason = d.reason
-                await self.bus.publish(E.POSITION_CLOSED, pos.id, reason=d.reason.value,
-                                       realized_pnl=round(pos.realized_pnl_usdc, 6))
+                # Persist AI / rule rationale so the Positions UI can show "why we exited"
+                # the same way decision_id supports "why we bought".
+                detail = (d.detail or "").strip()
+                if detail:
+                    pos.exit_detail = detail[:500]
+                await self.bus.publish(
+                    E.POSITION_CLOSED, pos.id,
+                    reason=d.reason.value,
+                    detail=pos.exit_detail or d.detail,
+                    realized_pnl=round(pos.realized_pnl_usdc, 6),
+                )
         return res
 
     # ---------------------------------------------------------- controls

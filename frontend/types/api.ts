@@ -68,6 +68,8 @@ export interface Position {
   peak_price: number; cost_basis_usdc: number; realized_pnl_usdc: number; unrealized_pnl_usdc: number;
   gain_pct: number | null; tiers_hit: number[]; strategy_id: string; strategy_version: number; decision_id: string;
   opened_at: string; closed_at: string | null; exit_reason: string | null;
+  /** AI / rule free-text rationale for the exit (e.g. AI exit reasoning summary). */
+  exit_detail?: string | null;
   exit_price?: number | null; proceeds_usdc?: number | null; exit_count?: number; invested_usdc?: number; held_seconds?: number | null;
   return_pct?: number | null; drawdown_from_peak_pct?: number | null;
 }

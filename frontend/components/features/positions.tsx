@@ -43,8 +43,14 @@ export function PositionCard({ p, onClose }: { p: Position; onClose?: (p: Positi
       </div>
 
       {!open && (
-        <div className="rounded-md border border-l-[3px] border-l-accent bg-muted/50 p-3 text-sm">
+        <div className="rounded-md border border-l-[3px] border-l-accent bg-muted/50 p-3 text-sm space-y-1.5">
           <p><span className="text-muted-foreground">Closed because: </span><strong>{exitReasonLabel(p.exit_reason)}</strong></p>
+          {p.exit_detail ? (
+            <p className="text-sm leading-snug">
+              <span className="text-muted-foreground">Why the agent exited: </span>
+              {p.exit_detail}
+            </p>
+          ) : null}
           <p className="text-xs text-muted-foreground">Closed {stamp(p.closed_at)} · held {duration(held)}</p>
         </div>
       )}
@@ -69,6 +75,9 @@ export function PositionCard({ p, onClose }: { p: Position; onClose?: (p: Positi
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t pt-4">
         {open && onClose && <Button size="sm" variant="outline" onClick={() => onClose(p)}>Close position</Button>}
         <Link className="text-xs underline" href={`/decisions/${p.decision_id}`}>Why did the agent buy this?</Link>
+        {!open && p.exit_reason === "AI_EXIT" && p.exit_detail ? (
+          <span className="text-xs text-muted-foreground" title={p.exit_detail}>Why did the agent exit? (see above)</span>
+        ) : null}
         <Link className="text-xs underline" href={`/tokens/${encodeURIComponent(key)}`}>Token page</Link>
       </div>
     </CardContent></Card>
