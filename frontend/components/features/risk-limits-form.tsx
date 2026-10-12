@@ -12,20 +12,43 @@ import { useAuth } from "@/lib/auth";
 import type { RiskLimits } from "@/types/api";
 
 const FIELDS: { key: keyof RiskLimits; label: string; step?: string }[] = [
-  { key: "max_trade_usdc", label: "Maximum trade (USDC)" }, { key: "max_position_usdc", label: "Maximum position (USDC)" },
-  { key: "max_daily_loss_usdc", label: "Maximum daily loss (USDC)" }, { key: "max_total_exposure_usdc", label: "Maximum total exposure (USDC)" },
-  { key: "max_open_positions", label: "Maximum open positions", step: "1" }, { key: "max_slippage_pct", label: "Maximum slippage (%)", step: "0.1" },
+  { key: "max_trade_usdc", label: "Maximum trade (USDC)" },
+  { key: "max_position_usdc", label: "Maximum position (USDC)" },
+  { key: "max_daily_loss_usdc", label: "Maximum daily loss (USDC)" },
+  { key: "max_total_exposure_usdc", label: "Maximum total exposure (USDC)" },
+  { key: "max_chain_exposure_usdc", label: "Maximum chain exposure (USDC)" },
+  { key: "max_open_positions", label: "Maximum open positions", step: "1" },
+  { key: "max_slippage_pct", label: "Maximum slippage (%)", step: "0.1" },
   { key: "min_liquidity_usdc", label: "Minimum liquidity (USDC)" },
   { key: "max_price_impact_pct", label: "Maximum price impact (%)", step: "0.1" },
   { key: "max_total_cost_pct", label: "Maximum total cost: pool fees + impact (%)", step: "0.1" },
 ];
-type Editable = Pick<RiskLimits, "max_trade_usdc" | "max_position_usdc" | "max_daily_loss_usdc" | "max_total_exposure_usdc" | "max_open_positions" | "max_slippage_pct" | "min_liquidity_usdc" | "max_price_impact_pct" | "max_total_cost_pct">;
+type Editable = Pick<
+  RiskLimits,
+  | "max_trade_usdc"
+  | "max_position_usdc"
+  | "max_daily_loss_usdc"
+  | "max_total_exposure_usdc"
+  | "max_chain_exposure_usdc"
+  | "max_open_positions"
+  | "max_slippage_pct"
+  | "min_liquidity_usdc"
+  | "max_price_impact_pct"
+  | "max_total_cost_pct"
+>;
 
 export function validateLimits(l: Editable): string | null {
-  const nums = [l.max_trade_usdc, l.max_position_usdc, l.max_daily_loss_usdc, l.max_total_exposure_usdc, l.max_open_positions, l.max_slippage_pct, l.min_liquidity_usdc, l.max_price_impact_pct, l.max_total_cost_pct];
+  const nums = [
+    l.max_trade_usdc, l.max_position_usdc, l.max_daily_loss_usdc, l.max_total_exposure_usdc,
+    l.max_chain_exposure_usdc, l.max_open_positions, l.max_slippage_pct, l.min_liquidity_usdc,
+    l.max_price_impact_pct, l.max_total_cost_pct,
+  ];
   if (nums.some((v) => !Number.isFinite(v) || v <= 0)) return "Every value must be a number greater than zero.";
   if (l.max_trade_usdc > l.max_position_usdc) return "Maximum trade cannot exceed maximum position.";
   if (l.max_position_usdc > l.max_total_exposure_usdc) return "Maximum position cannot exceed maximum total exposure.";
+  if (l.max_chain_exposure_usdc > l.max_total_exposure_usdc) {
+    return "Maximum chain exposure cannot exceed maximum total exposure.";
+  }
   if (l.max_slippage_pct > 20) return "Maximum slippage cannot exceed 20%.";
   if (l.max_price_impact_pct > 50 || l.max_total_cost_pct > 50) return "Price impact and total cost cannot exceed 50%.";
   if (l.max_price_impact_pct > l.max_total_cost_pct) return "Maximum price impact cannot exceed maximum total cost.";

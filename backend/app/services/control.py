@@ -38,10 +38,19 @@ ONLINE_WINDOW_S = 45
 
 
 def default_limits(s: Settings) -> RiskLimits:
-    return RiskLimits(max_trade_usdc=s.risk_max_trade_usdc, max_position_usdc=s.risk_max_position_usdc,
-                      max_daily_loss_usdc=s.risk_max_daily_loss_usdc, max_total_exposure_usdc=s.risk_max_total_exposure_usdc,
-                      max_open_positions=s.risk_max_open_positions, max_slippage_pct=s.risk_max_slippage_pct,
-                      min_liquidity_usdc=s.risk_min_liquidity_usdc)
+    # max_chain_exposure defaults to total exposure so Arc-only installs are not
+    # silently capped at the RiskLimits model default of $3.
+    total = float(s.risk_max_total_exposure_usdc)
+    return RiskLimits(
+        max_trade_usdc=s.risk_max_trade_usdc,
+        max_position_usdc=s.risk_max_position_usdc,
+        max_daily_loss_usdc=s.risk_max_daily_loss_usdc,
+        max_total_exposure_usdc=total,
+        max_chain_exposure_usdc=total,
+        max_open_positions=s.risk_max_open_positions,
+        max_slippage_pct=s.risk_max_slippage_pct,
+        min_liquidity_usdc=s.risk_min_liquidity_usdc,
+    )
 
 
 async def get_config(db: AsyncSession, user_id: str) -> M.AgentConfig:
@@ -143,7 +152,17 @@ def platform_ceilings_from_settings(settings: Settings) -> PlatformCeilings:
 async def load_limits(db: AsyncSession, settings: Settings, user_id: str) -> RiskLimits:
     """User risk limits, always clamped to platform ceilings before leaving the control plane."""
     raw = await repo.get_setting(db, f"user:{user_id}:risk_limits")
-    limits = RiskLimits(**raw) if raw else default_limits(settings)
+    if raw:
+        data = dict(raw)
+        # Older saves omitted max_chain_exposure_usdc; pydantic would then use the $3 model
+        # default and silently block sizing. Backfill from total exposure when missing.
+        if data.get("max_chain_exposure_usdc") is None or "max_chain_exposure_usdc" not in data:
+            data["max_chain_exposure_usdc"] = float(
+                data.get("max_total_exposure_usdc") or settings.risk_max_total_exposure_usdc
+            )
+        limits = RiskLimits(**data)
+    else:
+        limits = default_limits(settings)
     return clamp_to_platform(limits, platform_ceilings_from_settings(settings))
 
 
